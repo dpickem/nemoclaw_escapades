@@ -4,6 +4,39 @@
 
 ![M1 deliverables overview](./m1_foundation_deliverables_overview.svg)
 
+---
+
+## TODOs
+
+Items still needed before this post is complete:
+
+- [ ] **Slack permissions walkthrough** — Detailed setup guide covering OAuth
+  scopes, bot token vs. user token, event subscriptions, socket mode vs.
+  HTTP endpoint, workspace installation flow, and the minimum permission
+  set required for the connector to receive and reply to messages.
+- [ ] **NVIDIA Inference Hub setup walkthrough** — How to create an account,
+  obtain API keys, select an endpoint/model, and configure the inference
+  backend with those credentials.
+- [ ] **Local development environment setup** — Prerequisites (Python version,
+  dependencies, env vars), repo clone-to-first-run instructions, and a
+  "hello world" smoke test that proves the loop works end-to-end.
+- [ ] **Connector implementation walkthrough** — Code-level explanation of the
+  Slack connector: event normalization, response formatting, error
+  propagation back to the channel.
+- [ ] **Orchestrator implementation walkthrough** — Code-level explanation of
+  context assembly, prompt shaping, inference dispatch, retry logic, and
+  response construction.
+- [ ] **Inference backend interface walkthrough** — How the generic backend
+  contract is defined and how the NVIDIA Inference Hub adapter implements
+  it, with notes on swapping providers later.
+- [ ] **Observability and logging setup** — What gets logged, where logs live,
+  how to read them, and how to simulate failure modes (auth, network,
+  model) to verify error handling.
+- [ ] **End-to-end demo / screenshots** — Annotated screenshots or a recorded
+  walkthrough showing a Slack message flowing through the system and back.
+
+---
+
 ## Why This Milestone Comes First
 
 If the series introduction explains why this project exists, M1 explains why
