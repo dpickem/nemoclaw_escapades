@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <style>
+      .title { fill: #f8fafc; font: 700 40px Arial, sans-serif; }
+      .subtitle { fill: #cbd5e1; font: 500 21px Arial, sans-serif; }
+      .boxSlack { fill: #0f172a; stroke: #22d3ee; stroke-width: 3; rx: 16; }
+      .boxOrch { fill: #0f172a; stroke: #34d399; stroke-width: 3; rx: 16; }
+      .boxModel { fill: #0f172a; stroke: #a78bfa; stroke-width: 3; rx: 16; }
+      .boxObs { fill: #0f172a; stroke: #f97316; stroke-width: 3; rx: 16; }
+      .h { fill: #f8fafc; font: 700 26px Arial, sans-serif; }
+      .t { fill: #cbd5e1; font: 500 18px Arial, sans-serif; }
+      .arrowF { stroke: #e2e8f0; stroke-width: 4; fill: none; marker-end: url(#headF); }
+      .arrowB { stroke: #94a3b8; stroke-width: 3.5; fill: none; marker-end: url(#headB); }
+      .arrowObs { stroke: #f97316; stroke-width: 3.5; fill: none; marker-end: url(#headObs); }
+    </style>
+    <marker id="headF" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#e2e8f0"/>
+    </marker>
+    <marker id="headB" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#94a3b8"/>
+    </marker>
+    <marker id="headObs" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#f97316"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="900" fill="url(#bgGrad)"/>
+  <text class="title" x="800" y="80" text-anchor="middle">M1 Runtime Loop</text>
+  <text class="subtitle" x="800" y="116" text-anchor="middle">Slack -> Orchestrator -> Inference Hub -> Slack response</text>
+
+  <rect class="boxSlack" x="150" y="300" width="320" height="180"/>
+  <text class="h" x="310" y="370" text-anchor="middle">Slack Connector</text>
+  <text class="t" x="310" y="405" text-anchor="middle">ingress + egress</text>
+
+  <rect class="boxOrch" x="640" y="270" width="320" height="240"/>
+  <text class="h" x="800" y="360" text-anchor="middle">Orchestrator</text>
+  <text class="t" x="800" y="395" text-anchor="middle">context assembly</text>
+  <text class="t" x="800" y="423" text-anchor="middle">routing + response shaping</text>
+
+  <rect class="boxModel" x="1130" y="300" width="320" height="180"/>
+  <text class="h" x="1290" y="370" text-anchor="middle">Inference Hub</text>
+  <text class="t" x="1290" y="405" text-anchor="middle">model endpoint</text>
+
+  <path class="arrowF" d="M470 390 L640 390"/>
+  <path class="arrowF" d="M960 390 L1130 390"/>
+
+  <path class="arrowB" d="M1130 440 L960 440"/>
+  <path class="arrowB" d="M640 440 L470 440"/>
+
+  <rect class="boxObs" x="600" y="590" width="400" height="180"/>
+  <text class="h" x="800" y="660" text-anchor="middle">Observability</text>
+  <text class="t" x="800" y="695" text-anchor="middle">logs, retries, and error paths</text>
+  <path class="arrowObs" d="M800 510 L800 590"/>
+</svg>

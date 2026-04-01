@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1f2937"/>
+    </linearGradient>
+    <style>
+      .title { fill: #f8fafc; font: 700 40px Arial, sans-serif; }
+      .subtitle { fill: #cbd5e1; font: 500 21px Arial, sans-serif; }
+      .card1 { fill: #111827; stroke: #22d3ee; stroke-width: 3; rx: 16; }
+      .card2 { fill: #111827; stroke: #34d399; stroke-width: 3; rx: 16; }
+      .card3 { fill: #111827; stroke: #a78bfa; stroke-width: 3; rx: 16; }
+      .card4 { fill: #111827; stroke: #f97316; stroke-width: 3; rx: 16; }
+      .h { fill: #f8fafc; font: 700 24px Arial, sans-serif; }
+      .t { fill: #cbd5e1; font: 500 17px Arial, sans-serif; }
+      .arrow { stroke: #e2e8f0; stroke-width: 3.5; fill: none; marker-end: url(#head); }
+    </style>
+    <marker id="head" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#e2e8f0"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="900" fill="url(#bgGrad)"/>
+  <text class="title" x="800" y="82" text-anchor="middle">M1 Deliverable Map</text>
+  <text class="subtitle" x="800" y="118" text-anchor="middle">What must exist before moving to M2</text>
+
+  <rect class="card1" x="120" y="230" width="300" height="180"/>
+  <text class="h" x="270" y="302" text-anchor="middle">Repo + Docs</text>
+  <text class="t" x="270" y="338" text-anchor="middle">scaffold + architecture notes</text>
+
+  <rect class="card2" x="470" y="230" width="300" height="180"/>
+  <text class="h" x="620" y="302" text-anchor="middle">Slack Connector</text>
+  <text class="t" x="620" y="338" text-anchor="middle">channel I/O contract</text>
+
+  <rect class="card3" x="820" y="230" width="300" height="180"/>
+  <text class="h" x="970" y="302" text-anchor="middle">Inference Backend</text>
+  <text class="t" x="970" y="338" text-anchor="middle">provider abstraction</text>
+
+  <rect class="card4" x="1170" y="230" width="300" height="180"/>
+  <text class="h" x="1320" y="302" text-anchor="middle">Orchestrator Loop</text>
+  <text class="t" x="1320" y="338" text-anchor="middle">one-turn end-to-end flow</text>
+
+  <path class="arrow" d="M420 320 L470 320"/>
+  <path class="arrow" d="M770 320 L820 320"/>
+  <path class="arrow" d="M1120 320 L1170 320"/>
+
+  <rect class="card2" x="580" y="560" width="440" height="200"/>
+  <text class="h" x="800" y="640" text-anchor="middle">Architecture Diagrams</text>
+  <text class="t" x="800" y="676" text-anchor="middle">clear component boundaries</text>
+  <text class="t" x="800" y="704" text-anchor="middle">request/response paths and error paths</text>
+
+  <path class="arrow" d="M1320 410 L1320 500 L1020 500 L1020 560"/>
+  <path class="arrow" d="M620 410 L620 560"/>
+</svg>
