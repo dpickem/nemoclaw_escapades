@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" viewBox="0 0 900 620">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 28px Arial, sans-serif; }
+      .nodeText { fill: #ffffff; font: 600 15px Arial, sans-serif; }
+      .decisionText { fill: #ffffff; font: 600 14px Arial, sans-serif; }
+      .termText { fill: #ffffff; font: 700 14px Arial, sans-serif; }
+      .termSub { fill: #ffffff; font: 400 12px Arial, sans-serif; }
+      .labelText { fill: #334155; font: 700 13px Arial, sans-serif; }
+      .edgeLabelText { fill: #64748b; font: 600 12px Arial, sans-serif; }
+      .arrow { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrowHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#475569"/>
+    </marker>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="900" height="620" rx="12"/>
+
+  <text class="title" x="450" y="42" text-anchor="middle">Hosting Decision Tree</text>
+
+  <!-- Node 1: Need always-on agent? (diamond) -->
+  <g transform="translate(450, 100)" filter="url(#shadow)">
+    <polygon points="0,-40 160,0 0,40 -160,0" fill="#1e293b" rx="6"/>
+    <text class="decisionText" x="0" y="-4" text-anchor="middle">Need always-on</text>
+    <text class="decisionText" x="0" y="14" text-anchor="middle">agent?</text>
+  </g>
+
+  <!-- Edge: No ’ Local dev -->
+  <path class="arrow" d="M610,100 L740,100"/>
+  <text class="edgeLabelText" x="670" y="92">NO</text>
+
+  <!-- Terminal: Local dev (laptop) -->
+  <g filter="url(#shadow)">
+    <rect x="742" y="76" width="140" height="48" rx="10" fill="#0891b2"/>
+    <text class="termText" x="812" y="97" text-anchor="middle">Local dev</text>
+    <text class="termSub" x="812" y="113" text-anchor="middle">(laptop)</text>
+  </g>
+
+  <!-- Edge: Yes ’ Handles company IP? -->
+  <path class="arrow" d="M450,140 L450,200"/>
+  <text class="edgeLabelText" x="460" y="175">YES</text>
+
+  <!-- Node 2: Handles company IP? (diamond) -->
+  <g transform="translate(450, 240)" filter="url(#shadow)">
+    <polygon points="0,-40 160,0 0,40 -160,0" fill="#1e293b"/>
+    <text class="decisionText" x="0" y="-4" text-anchor="middle">Handles</text>
+    <text class="decisionText" x="0" y="14" text-anchor="middle">company IP?</text>
+  </g>
+
+  <!-- Edge: No ’ Brev -->
+  <path class="arrow" d="M610,240 L740,240"/>
+  <text class="edgeLabelText" x="670" y="232">NO</text>
+
+  <!-- Terminal: Brev (personal only) -->
+  <g filter="url(#shadow)">
+    <rect x="742" y="210" width="140" height="60" rx="10" fill="#d97706"/>
+    <text class="termText" x="812" y="235" text-anchor="middle">NVIDIA Brev</text>
+    <text class="termSub" x="812" y="253" text-anchor="middle">  personal only</text>
+  </g>
+
+  <!-- Edge: Yes ’ On-prem or cloud? -->
+  <path class="arrow" d="M450,280 L450,340"/>
+  <text class="edgeLabelText" x="460" y="315">YES</text>
+
+  <!-- Label: Work-approved platforms only -->
+  <rect x="290" y="340" width="320" height="32" rx="6" fill="#dc2626" opacity="0.12"/>
+  <text class="labelText" x="450" y="361" text-anchor="middle" fill="#dc2626">Work-approved platforms only</text>
+
+  <!-- Node 3: On-prem or cloud? (diamond) -->
+  <g transform="translate(450, 420)" filter="url(#shadow)">
+    <polygon points="0,-40 160,0 0,40 -160,0" fill="#1e293b"/>
+    <text class="decisionText" x="0" y="-4" text-anchor="middle">On-prem</text>
+    <text class="decisionText" x="0" y="14" text-anchor="middle">or cloud?</text>
+  </g>
+
+  <!-- Edge: On-prem ’ DGX Spark / Station -->
+  <path class="arrow" d="M290,420 L170,420 L170,500"/>
+  <text class="edgeLabelText" x="210" y="412">On-prem</text>
+
+  <!-- Terminal: DGX Spark / DGX Station -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="502" width="200" height="70" rx="12" fill="#16a34a"/>
+    <text class="termText" x="170" y="530" text-anchor="middle">DGX Spark /</text>
+    <text class="termText" x="170" y="550" text-anchor="middle">DGX Station</text>
+    <text class="termSub" x="170" y="566" text-anchor="middle">on-premises</text>
+  </g>
+
+  <!-- Edge: Cloud ’ DGX Cloud / Corp VM -->
+  <path class="arrow" d="M610,420 L730,420 L730,500"/>
+  <text class="edgeLabelText" x="660" y="412">Cloud</text>
+
+  <!-- Terminal: DGX Cloud / Corp VM -->
+  <g filter="url(#shadow)">
+    <rect x="630" y="502" width="200" height="70" rx="12" fill="#7c3aed"/>
+    <text class="termText" x="730" y="530" text-anchor="middle">DGX Cloud /</text>
+    <text class="termText" x="730" y="550" text-anchor="middle">Corp VM</text>
+    <text class="termSub" x="730" y="566" text-anchor="middle">enterprise cloud</text>
+  </g>
+</svg>
