@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="663" viewBox="0 0 1600 663">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .pillText { fill: #475569; font: 600 14px Arial, sans-serif; }
+      .pillActive { fill: #ffffff; font: 700 14px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .noteTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .learn { stroke: #65a30d; stroke-width: 2.5; fill: none; marker-end: url(#learnHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="learnHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#65a30d"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="663"/>
+
+  <text class="title" x="800" y="58" text-anchor="middle">M6 - Close the Self-Improvement Loop</text>
+  <text class="subtitle" x="800" y="88" text-anchor="middle">The system now runs, delegates, remembers, and feeds its own outcomes back into future behavior.</text>
+
+  <rect x="120" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="325" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="530" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="735" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="940" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="1145" y="112" width="190" height="38" rx="12" fill="#2563eb"/>
+  <text class="pillActive" x="215" y="136" text-anchor="middle">M1 Foundation</text>
+  <text class="pillActive" x="420" y="136" text-anchor="middle">M2 Coding Agent</text>
+  <text class="pillActive" x="625" y="136" text-anchor="middle">M3 Review</text>
+  <text class="pillActive" x="830" y="136" text-anchor="middle">M4 Knowledge</text>
+  <text class="pillActive" x="1035" y="136" text-anchor="middle">M5 Memory</text>
+  <text class="pillActive" x="1240" y="136" text-anchor="middle">M6 Learning</text>
+
+  <rect x="120" y="185" width="1360" height="86" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="120" y="185" width="420" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="150" y="211">Stages 1-5: Running System</text>
+  <text class="cardText" x="165" y="246">Interfaces, sandboxes, review, knowledge capture, and memory orchestration are all in place.</text>
+
+  <rect x="120" y="290" width="1360" height="250" rx="18" fill="#f7fee7" stroke="#bef264"/>
+  <rect x="120" y="290" width="420" height="40" rx="12" fill="#65a30d"/>
+  <text class="stageTitle" x="150" y="316">Stage 6: Self-Improvement Loop</text>
+  <rect x="190" y="360" width="260" height="60" rx="12" fill="#ecfccb" stroke="#bef264"/>
+  <rect x="520" y="360" width="260" height="60" rx="12" fill="#ecfccb" stroke="#bef264"/>
+  <rect x="850" y="360" width="220" height="60" rx="12" fill="#ecfccb" stroke="#bef264"/>
+  <rect x="1140" y="360" width="220" height="60" rx="12" fill="#ecfccb" stroke="#bef264"/>
+  <text class="cardTitle" x="320" y="385" text-anchor="middle">Execution traces</text>
+  <text class="cardText" x="320" y="404" text-anchor="middle">what happened and why</text>
+  <text class="cardTitle" x="650" y="385" text-anchor="middle">Evaluator</text>
+  <text class="cardText" x="650" y="404" text-anchor="middle">what worked, what failed</text>
+  <text class="cardTitle" x="960" y="385" text-anchor="middle">Skill updates</text>
+  <text class="cardText" x="960" y="404" text-anchor="middle">improve behavior</text>
+  <text class="cardTitle" x="1250" y="385" text-anchor="middle">Policy updates</text>
+  <text class="cardText" x="1250" y="404" text-anchor="middle">refine guardrails</text>
+  <path class="learn" d="M450 390 L520 390"/>
+  <path class="learn" d="M780 390 L850 390"/>
+  <path class="learn" d="M1070 390 L1140 390"/>
+  <rect x="350" y="455" width="900" height="48" rx="12" fill="#ecfccb" stroke="#bef264"/>
+  <text class="cardText" x="800" y="484" text-anchor="middle">Lessons from evaluation feed back into the system so later runs change how the agent plans, executes, and reviews work.</text>
+
+  <rect x="120" y="565" width="1360" height="68" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="noteTitle" x="150" y="591">Why this milestone matters</text>
+  <text class="noteText" x="150" y="615">The architecture becomes a flywheel: execution creates experience, memory preserves it, and evaluation improves future behavior.</text>
+</svg>

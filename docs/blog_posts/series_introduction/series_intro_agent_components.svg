@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .noteTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .memArrow { stroke: #ea580c; stroke-width: 2.5; fill: none; marker-end: url(#memHead); }
+      .feedArrow { stroke: #65a30d; stroke-width: 2; fill: none; stroke-dasharray: 8 6; marker-end: url(#feedHead); }
+      .feedLabel { fill: #65a30d; font: 600 14px Arial, sans-serif; }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="memHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+    <marker id="feedHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#65a30d"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="720"/>
+
+  <text class="title" x="800" y="58" text-anchor="middle">Agent System Anatomy (From Scratch)</text>
+  <text class="subtitle" x="800" y="88" text-anchor="middle">Inspired by OpenClaw, NemoClaw, Hermes, and OpenShell — decomposed into explicit building blocks</text>
+
+  <!-- Row 1: Core pipeline -->
+  <rect x="120" y="120" width="1360" height="168" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="120" y="120" width="320" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="150" y="146">Core Pipeline</text>
+
+  <rect x="170" y="178" width="250" height="86" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="295" y="212" text-anchor="middle">Connectors</text>
+  <text class="cardText" x="295" y="236" text-anchor="middle">Slack, APIs, future adapters</text>
+
+  <rect x="490" y="178" width="250" height="86" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="615" y="212" text-anchor="middle">Orchestrator</text>
+  <text class="cardText" x="615" y="236" text-anchor="middle">Plan, route, decide</text>
+
+  <rect x="810" y="178" width="250" height="86" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="935" y="212" text-anchor="middle">Execution</text>
+  <text class="cardText" x="935" y="236" text-anchor="middle">Tools + sandboxed agents</text>
+
+  <rect x="1130" y="178" width="250" height="86" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="1255" y="212" text-anchor="middle">Review Loop</text>
+  <text class="cardText" x="1255" y="236" text-anchor="middle">Critique, approve, improve</text>
+
+  <path class="arrow" d="M420 221 L490 221"/>
+  <path class="arrow" d="M740 221 L810 221"/>
+  <path class="arrow" d="M1060 221 L1130 221"/>
+
+  <!-- Row 2: Inference backend -->
+  <rect x="120" y="310" width="1360" height="86" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="120" y="310" width="320" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="150" y="336">Inference Backend</text>
+  <text class="cardText" x="165" y="374">Model endpoints behind a pluggable interface — swap providers without changing the rest of the system.</text>
+
+  <!-- Row 3: Memory layer -->
+  <rect x="120" y="418" width="1360" height="120" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <rect x="120" y="418" width="320" height="40" rx="12" fill="#ea580c"/>
+  <text class="stageTitle" x="150" y="444">Memory Layer</text>
+
+  <rect x="195" y="472" width="280" height="46" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <rect x="535" y="472" width="280" height="46" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <rect x="875" y="472" width="280" height="46" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <rect x="1215" y="472" width="180" height="46" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardTitle" x="335" y="500" text-anchor="middle">Working memory</text>
+  <text class="cardTitle" x="675" y="500" text-anchor="middle">User memory</text>
+  <text class="cardTitle" x="1015" y="500" text-anchor="middle">Knowledge memory</text>
+  <text class="cardTitle" x="1305" y="500" text-anchor="middle">Policies</text>
+  <path class="memArrow" d="M475 495 L535 495"/>
+  <path class="memArrow" d="M815 495 L875 495"/>
+  <path class="memArrow" d="M1155 495 L1215 495"/>
+
+  <!-- Vertical connectors: pipeline to memory -->
+  <path class="memArrow" d="M615 264 L615 310"/>
+  <path class="memArrow" d="M935 264 L935 310"/>
+  <path class="memArrow" d="M615 396 L615 418"/>
+  <path class="memArrow" d="M935 396 L935 418"/>
+
+  <!-- Row 4: Learning feedback -->
+  <rect x="120" y="560" width="1360" height="86" rx="18" fill="#f7fee7" stroke="#bef264"/>
+  <rect x="120" y="560" width="320" height="40" rx="12" fill="#65a30d"/>
+  <text class="stageTitle" x="150" y="586">Self-Improvement Loop</text>
+  <text class="cardText" x="165" y="624">Evaluate outcomes, extract lessons, update skills and policies — then feed improvements back into the orchestrator.</text>
+
+  <!-- Feedback arrow from learning back up to orchestrator -->
+  <path class="feedArrow" d="M1480 560 L1480 140 L615 140 L615 178"/>
+  <text class="feedLabel" x="1420" y="130">learning feedback</text>
+
+  <!-- Note bar -->
+  <rect x="120" y="668" width="1360" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="684" text-anchor="middle">Each layer is introduced in a separate milestone so the system builds up incrementally and stays understandable at every step.</text>
+</svg>

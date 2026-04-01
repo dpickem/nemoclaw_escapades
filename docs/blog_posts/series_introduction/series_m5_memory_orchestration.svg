@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="748" viewBox="0 0 1600 748">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .pillText { fill: #475569; font: 600 14px Arial, sans-serif; }
+      .pillActive { fill: #ffffff; font: 700 14px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .mutedText { fill: #94a3b8; font: 500 15px Arial, sans-serif; }
+      .noteTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .memArrow { stroke: #dc2626; stroke-width: 2.5; fill: none; marker-end: url(#memHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="memHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="748"/>
+
+  <text class="title" x="800" y="58" text-anchor="middle">M5 - Add Memory Orchestration on Top of the Knowledge Base</text>
+  <text class="subtitle" x="800" y="88" text-anchor="middle">The system now keeps task context, user context, and durable knowledge in separate lanes instead of mixing them together.</text>
+
+  <rect x="120" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="325" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="530" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="735" y="112" width="190" height="38" rx="12" fill="#0f766e"/>
+  <rect x="940" y="112" width="190" height="38" rx="12" fill="#2563eb"/>
+  <rect x="1145" y="112" width="190" height="38" rx="12" fill="#e2e8f0"/>
+  <text class="pillActive" x="215" y="136" text-anchor="middle">M1 Foundation</text>
+  <text class="pillActive" x="420" y="136" text-anchor="middle">M2 Coding Agent</text>
+  <text class="pillActive" x="625" y="136" text-anchor="middle">M3 Review</text>
+  <text class="pillActive" x="830" y="136" text-anchor="middle">M4 Knowledge</text>
+  <text class="pillActive" x="1035" y="136" text-anchor="middle">M5 Memory</text>
+  <text class="pillText" x="1240" y="136" text-anchor="middle">M6 Learning</text>
+
+  <rect x="120" y="185" width="1360" height="88" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="120" y="185" width="420" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="150" y="211">Stages 1-4: Running System</text>
+  <text class="cardText" x="165" y="248">Connector, orchestrator, coding sandbox, review loop, and knowledge capture are all already in place.</text>
+
+  <rect x="120" y="292" width="1360" height="212" rx="18" fill="#fef2f2" stroke="#fca5a5"/>
+  <rect x="120" y="292" width="420" height="40" rx="12" fill="#dc2626"/>
+  <text class="stageTitle" x="150" y="318">Stage 5: Memory Orchestration</text>
+  <rect x="185" y="358" width="250" height="64" rx="12" fill="#fee2e2" stroke="#fca5a5"/>
+  <rect x="500" y="358" width="250" height="64" rx="12" fill="#fee2e2" stroke="#fca5a5"/>
+  <rect x="815" y="358" width="250" height="64" rx="12" fill="#fee2e2" stroke="#fca5a5"/>
+  <rect x="1130" y="358" width="250" height="64" rx="12" fill="#fee2e2" stroke="#fca5a5"/>
+  <text class="cardTitle" x="310" y="384" text-anchor="middle">Working memory</text>
+  <text class="cardText" x="310" y="405" text-anchor="middle">task-local context</text>
+  <text class="cardTitle" x="625" y="384" text-anchor="middle">User memory</text>
+  <text class="cardText" x="625" y="405" text-anchor="middle">preferences and patterns</text>
+  <text class="cardTitle" x="940" y="384" text-anchor="middle">Knowledge memory</text>
+  <text class="cardText" x="940" y="405" text-anchor="middle">retrieved durable context</text>
+  <text class="cardTitle" x="1255" y="384" text-anchor="middle">Memory policies</text>
+  <text class="cardText" x="1255" y="405" text-anchor="middle">retention and routing rules</text>
+  <path class="memArrow" d="M435 390 L500 390"/>
+  <path class="memArrow" d="M750 390 L815 390"/>
+  <path class="memArrow" d="M1065 390 L1130 390"/>
+  <rect x="315" y="445" width="970" height="40" rx="12" fill="#fee2e2" stroke="#fca5a5"/>
+  <text class="cardText" x="800" y="470" text-anchor="middle">A memory router decides what should be remembered, where it should live, and what should be retrieved later.</text>
+
+  <rect x="120" y="532" width="1360" height="86" rx="18" fill="#f8fafc" stroke="#e2e8f0"/>
+  <rect x="120" y="532" width="270" height="40" rx="12" fill="#cbd5e1"/>
+  <text class="stageTitle" x="150" y="558">Stage 6: Learning Loop</text>
+  <text class="mutedText" x="160" y="594">Added next: use outcomes recorded in memory to improve future behavior.</text>
+
+  <rect x="120" y="650" width="1360" height="68" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="noteTitle" x="150" y="676">Why this milestone matters</text>
+  <text class="noteText" x="150" y="700">Memory stops being a buzzword: distinct stores, clear routing, and traceable retrieval replace a single mixed context.</text>
+</svg>
