@@ -26,8 +26,9 @@
 11. [Revised Coding + Review Loop](#11--revised-coding--review-loop)
 12. [Failure Modes & Recovery](#12--failure-modes--recovery)
 13. [Deployment](#13--deployment)
-14. [Comparison: File-Based vs NMB vs Hermes](#14--comparison-file-based-vs-nmb-vs-hermes)
-15. [Future: Upstream Contribution to OpenShell](#15--future-upstream-contribution-to-openshell)
+14. [Coordinator Integration & Extended Message Types](#14--coordinator-integration--extended-message-types)
+15. [Comparison: File-Based vs NMB vs Hermes](#15--comparison-file-based-vs-nmb-vs-hermes)
+16. [Future: Upstream Contribution to OpenShell](#16--future-upstream-contribution-to-openshell)
 
 ---
 
@@ -1141,7 +1142,119 @@ OpenShell gateway peering (not yet available in alpha).
 
 ---
 
-## 14  Comparison: File-Based vs NMB vs Hermes
+## 14  Coordinator Integration & Extended Message Types
+
+This section was added after analyzing Claude Code's multi-agent orchestration
+(see [Claude Code Deep Dive §19](deep_dives/claude_code_deep_dive.md#19--sub-agents-skills--coordinator-mode)).
+Claude Code's `COORDINATOR_MODE`, `FORK_SUBAGENT`, and `UDS_INBOX` features
+solve the same coordination problem as NMB but without cross-sandbox isolation.
+NMB provides the transport; these extensions add the orchestration logic that
+rides on top.
+
+### 14.1  New Message Types
+
+#### Session fork (adopted from Claude Code's `FORK_SUBAGENT`)
+
+| Type | Purpose | Payload |
+|------|---------|---------|
+| `task.fork` | Fork parent session into a sub-agent with existing context | `{ parent_session, focus, tool_surface[] }` |
+
+`task.fork` sends a serialized conversation snapshot so the child agent
+starts with the parent's full context instead of a blank slate. More
+efficient than re-packaging all context in `task.assign` for complex tasks
+where the sub-agent needs to understand the full conversation history.
+
+#### Peer discovery (adopted from Claude Code's `ListPeersTool` / `UDS_INBOX`)
+
+| Op | Purpose | Payload |
+|----|---------|---------|
+| `peers.list` | Query connected sandboxes | Request: `{}`, Response: `{ peers: [{ sandbox_id, connected_at, agent_type?, status? }] }` |
+
+The broker already maintains a connection registry. `peers.list` exposes it
+as a queryable operation so agents can discover who else is online and
+route messages to available peers rather than hard-coded sandbox names.
+
+#### Task lifecycle (adopted from Claude Code's `TaskCreate/Get/Update/List`)
+
+| Type | Purpose | Payload |
+|------|---------|---------|
+| `task.create` | Create a new task in the task store | `{ title, prompt, agent_type?, parent_id?, tool_surface[]? }` |
+| `task.update` | Update task status/metadata | `{ task_id, status?, result?, metadata? }` |
+| `task.get` | Query a task by ID | `{ task_id }` |
+| `task.list` | List tasks with filters | `{ status?, agent_type?, limit? }` |
+
+These messages are routed to the orchestrator, which owns the task store
+(see [Orchestrator Design §10](orchestrator_design.md#10--task-store)).
+Sub-agents can query and update their own tasks without direct database
+access.
+
+### 14.2  Coordinator-Aware Tool Surface
+
+When the orchestrator operates in coordinator mode, it selectively restricts
+which tools each sub-agent sandbox receives. The tool surface is declared in
+the `task.assign` or `task.fork` payload:
+
+```json
+{
+  "op": "send",
+  "to": "coding-sandbox-1",
+  "type": "task.assign",
+  "payload": {
+    "prompt": "Implement feature X",
+    "tool_surface": ["bash", "read_file", "edit_file", "write_file", "grep", "glob"],
+    "context_files": [...]
+  }
+}
+```
+
+The sub-agent's sandbox policy enforces this at the OpenShell level — even if
+the agent tries to use a tool not in its `tool_surface`, the sandbox blocks it.
+
+### 14.3  Permission Scope Enforcement
+
+Claude Code has a known security gap: sub-agents can widen permissions beyond
+their parent's scope. NMB + OpenShell solves this by construction:
+
+1. Each sub-agent runs in a separate OpenShell sandbox with its own policy
+2. The sandbox policy is generated from the `tool_surface` in `task.assign`
+3. The coordinator cannot grant a sub-agent broader permissions than the
+   coordinator's own sandbox policy allows
+4. NMB message-type restrictions can further limit what a sandbox can send:
+
+```yaml
+# Coding sandbox NMB policy: can send results but not spawn new agents
+network_policies:
+  nmb:
+    endpoints:
+      - host: messages.local
+        port: 9876
+        rules:
+          - allow: { path: "/send/task.complete" }
+          - allow: { path: "/send/task.progress" }
+          - allow: { path: "/send/task.error" }
+          - allow: { path: "/publish/progress.*" }
+          - deny:  { path: "/send/task.assign" }   # can't spawn sub-agents
+          - deny:  { path: "/send/task.fork" }      # can't fork sessions
+```
+
+### 14.4  Updated Comparison: NMB vs Claude Code Multi-Agent
+
+| Dimension | Claude Code | NMB |
+|-----------|-------------|-----|
+| **Transport** | In-process + UDS | WebSocket via `messages.local` proxy |
+| **Latency** | <1ms / ~5ms | ~20-50ms (local) / ~25-150ms (cross-host) |
+| **Isolation** | None (shared process) | Full (separate OpenShell sandboxes) |
+| **Permission enforcement** | In-process (known widening gap) | Policy-enforced at sandbox level |
+| **Coordinator mode** | Built-in (`coordinatorMode.ts`) | Orchestrator-side (uses NMB as transport) |
+| **Session forking** | `/fork` (in-process snapshot) | `task.fork` (serialized snapshot via NMB) |
+| **Peer discovery** | `ListPeersTool` / `UDS_INBOX` | `peers.list` (broker connection registry) |
+| **Task management** | `TaskCreate/Get/Update/List` tools | `task.create/update/get/list` messages → orchestrator's task store |
+| **Audit trail** | None | Full (SQLite, training flywheel integration) |
+| **Cross-host** | No | Yes (Tailscale / SSH / TLS) |
+
+---
+
+## 15  Comparison: File-Based vs NMB vs Hermes
 
 | Dimension | File-Based (current) | NMB (proposed) | Hermes `sessions_send` |
 |-----------|---------------------|----------------|------------------------|
@@ -1160,7 +1273,7 @@ OpenShell gateway peering (not yet available in alpha).
 
 ---
 
-## 15  Future: Upstream Contribution to OpenShell
+## 16  Future: Upstream Contribution to OpenShell
 
 If NMB proves valuable, the natural evolution is to propose the
 `messages.local` pattern as a first-class OpenShell feature — similar to how
@@ -1184,6 +1297,8 @@ inter-sandbox messaging a standard OpenShell capability.
 
 ### Sources
 
+- [Orchestrator Design](orchestrator_design.md) (coordinator mode, task store, permission model)
+- [Claude Code Deep Dive §19](deep_dives/claude_code_deep_dive.md#19--sub-agents-skills--coordinator-mode) (coordinator mode, session forking, peer discovery)
 - [Training Flywheel Deep Dive §5](training_flywheel_deep_dive.md#5--nmb-as-a-training-data-accelerator) (NMB audit log as training data source)
 - [OpenShell Request Flow](deep_dives/openshell_deep_dive.md#5--request-flow)
 - [OpenShell Policy Engine](deep_dives/openshell_deep_dive.md#7--policy-engine)

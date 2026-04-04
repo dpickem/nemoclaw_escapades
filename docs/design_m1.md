@@ -4,6 +4,10 @@
 >
 > **Parent:** [NemoClaw Escapades Design Document](design.md)
 >
+> **Companion:** [Orchestrator Agent Design](orchestrator_design.md) — detailed
+> agent loop, streaming tool execution, compaction, permission model, and
+> behavioral contract architecture (applies to M1 and beyond).
+>
 > **Blog Post:** [M1 — Building Our Own Agent](blog_posts/m1/m1_setting_up_nemoclaw.md)
 
 ---
@@ -56,11 +60,13 @@ to explain, every later milestone will be built on sand.
 | In Scope | Out of Scope |
 |----------|--------------|
 | OpenShell gateway setup and lifecycle | Multi-gateway federation or remote gateway management |
-| OpenShell provider registration (NVIDIA Inference Hub via `inference.local`) | Local model serving, multi-provider routing, prompt caching |
+| OpenShell provider registration (NVIDIA Inference Hub via `inference.local`) | Local model serving, multi-provider routing |
 | Orchestrator running inside an always-on OpenShell sandbox | Ephemeral per-task sandboxes (M2 concern) |
 | Sandbox policy for the orchestrator (network, filesystem, credentials) | Auto-generated policies from skill metadata (M2+) |
 | Slack connector (first implementation of a generic connector base class) | Other connectors (Telegram, Discord, etc.) |
 | Orchestrator agent loop with multi-turn conversation (in-memory thread history) | Parallel tasks, sub-agent delegation |
+| Defensive model output handling (transcript repair) | Cache-aware system prompt with static/dynamic boundary (M2+) |
+| Tiered auto-approval for safe operations + async Slack escalation | Three-tier context compaction (M2+) |
 | Structured logging and retry logic | Distributed tracing, metrics dashboards, alerting |
 | Local-machine deployment (gateway + sandbox on same host) | Hosted deployment (Brev, DGX Spark) — stretch goal for late M1 |
 | Architecture diagrams that match the running code | Documentation for milestones beyond M1 |
@@ -291,7 +297,7 @@ planning, delegation, and persistent memory retrieval.
 
 - Import or reference any platform SDK (`slack_sdk`, `slack_bolt`, etc.).
 - Contain any inference-provider-specific logic.
-- Manage persistent memory state (durable memory is an M5 concern).
+- Manage persistent memory state (durable memory is an M4 concern).
 - Delegate to sub-agents.
 
 The orchestrator can and should use rich interactive features (confirmation
@@ -327,12 +333,12 @@ Implementation details:
   `ts` as the key, so a reply starts a new thread context.
 - History is lost on process restart. This is acceptable for M1 since the
   system runs as a single local process. Persistent conversation storage is
-  deferred to M5.
+  deferred to M4.
 - A configurable maximum history length (default: 50 messages per thread)
   prevents unbounded memory growth. When the limit is reached, the oldest
   messages are dropped.
 - Thread history is independent of the persistent memory system designed for
-  M5. It serves a narrower purpose: give the model enough recent context to
+  M4. It serves a narrower purpose: give the model enough recent context to
   hold a coherent conversation within a single Slack thread.
 
 **System prompt design (M1):**
@@ -344,8 +350,56 @@ identity and basic behavioral constraints. It should include:
 - Instructions to be concise and direct.
 - A note that the agent does not yet have tools or persistent memory.
 
-The prompt will be loaded from a configuration file so it can be changed
-without modifying code.
+The prompt is loaded from a configuration file so it can be changed without
+modifying code. Cache-aware system prompt construction (static/dynamic
+boundary for provider prompt caching) is deferred to M2+ — see
+[Orchestrator Design §4](orchestrator_design.md#4--system-prompt-construction)
+and [Future Work in design.md](design.md#10--future-work--features-inspired-by-claude-code).
+
+**Context overflow handling (M1):**
+
+Long-running Slack conversations can exceed the context window. M1 handles
+this with **simple message-count truncation**: when the thread history exceeds
+a configured limit (default: 50 messages), the oldest messages are dropped.
+
+Three-tier compaction (micro/full/session memory, adopted from Claude Code)
+is deferred to M2+ when tool outputs and multi-sandbox coordination produce
+much larger transcripts. See
+[Orchestrator Design §8](orchestrator_design.md#8--session-management--compaction)
+for the full compaction architecture.
+
+**Defensive model output handling (transcript repair):**
+
+The orchestrator implements a **model behavioral contract** adopted from
+Claude Code (see
+[Orchestrator Design §9](orchestrator_design.md#9--model-behavioral-contract--defensive-llm-programming)).
+Even in M1's simple conversational loop, the model can produce malformed
+output that breaks the conversation flow:
+
+| Violation | M1 Repair |
+|-----------|-----------|
+| Empty/whitespace-only response | Replace with `"I wasn't able to generate a response. Could you rephrase?"` |
+| Malformed JSON (if structured output is requested) | Fall back to raw text extraction; log the malformed response |
+| Response exceeds token limit (truncated) | Retry with "resume directly, no recap" continuation prompt (up to 2 retries) |
+| Model returns error content | Log and surface a user-friendly error message via Slack |
+
+This defensive layer is minimal in M1 but the pattern is established so M2's
+tool-use loop can add: orphaned tool-call repair, duplicate ID dedup,
+synthetic placeholder injection, and malformed tool-input fallback.
+
+**Tiered auto-approval for operations:**
+
+M1 is conversational only (no tools), so the approval system is simple. But
+the pattern is scaffolded for M2:
+
+| Tier | M1 Behavior | M2+ Behavior |
+|------|-------------|--------------|
+| **Fast-path** | All responses auto-approved (M1 has no side-effect tools) | Known-safe read operations auto-approve |
+| **LLM classifier** | Not active | Evaluates ambiguous operations |
+| **Slack escalation** | Not active | Dangerous operations pause and send Slack approval request |
+
+The approval interface is defined in M1 so M2 can plug in the classifier and
+Slack escalation without restructuring the orchestrator.
 
 ### 4.3  Inference Backend
 
@@ -731,10 +785,10 @@ requires.
 | Configuration | `Config` dataclass loading from `.env` via `python-dotenv` | Yes, directly | Same env vars we need (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `INFERENCE_HUB_API_KEY`). Can be lifted almost as-is and extended with OpenShell and M1-specific fields. |
 | Domain models | Slack context objects, LLM usage tracking, exchange records | Partially | The Slack context and usage types map well to M1's `NormalizedRequest` and `TokenUsage`. Intent classification types are nv-claw-specific and should not be carried over. |
 | Audit / observability | SQLite audit DB logging every exchange with tokens, latency, and outcome | Yes, pattern | The audit pattern is exactly what M1 needs. Can be lifted as-is or simplified to structured JSON logging. |
-| Embedding client | Batched embeddings client | Not for M1 | Useful for memory retrieval in M5. |
+| Embedding client | Batched embeddings client | Not for M1 | Useful for memory retrieval in M4. |
 | Thread enrichment | User resolution, thread history fetching, link detection for Jira/Gerrit/GitLab | Partially | The thread history fetching is relevant now that M1 includes multi-turn. Link detection is useful for M2+. |
 | Workflow engine | YAML manifest + executor for declarative task workflows | Not for M1 | Interesting reference for later milestones but M1 is a conversational loop, not a workflow system. |
-| Memory system | Hybrid BM25 + embedding retrieval with MMR and decay scoring | Not for M1 | Directly relevant to M5 memory orchestration. |
+| Memory system | Hybrid BM25 + embedding retrieval with MMR and decay scoring | Not for M1 | Directly relevant to M4 memory orchestration. |
 | Permissions / tenancy | Tiered permissions and multi-tenant stubs | Not for M1 | Future concern. |
 | Project scaffolding | `pyproject.toml`, `Makefile`, `uv`-based build, pytest layout | Yes | The build tooling, make targets, and test structure are directly portable. |
 
@@ -761,7 +815,7 @@ requires.
 
 8. Thread enrichment → good reference for M2+ multi-turn context and link
    detection.
-9. Memory system → good reference for M5 memory orchestration.
+9. Memory system → good reference for M4 memory orchestration.
 10. Workflow engine → good reference for declarative task execution in later
     milestones.
 
@@ -776,6 +830,8 @@ requires.
 | Clean orchestrator separation | nv-claw's orchestration is mixed into the Slack handler. M1 needs a standalone `Orchestrator` class. |
 | OpenShell integration | nv-claw runs as a bare-metal process. M1 runs inside an OpenShell sandbox with `inference.local` routing. |
 | Async throughout | nv-claw is synchronous. M1 specifies async for future concurrency. This is the largest rewrite cost. |
+| Transcript repair | nv-claw has basic try/except. M1 needs defensive model output handling with fallback messages. *(From Claude Code.)* |
+| Approval interface | nv-claw has no approval gating. M1 needs a pluggable approval interface (auto-approve stub for now, classifier + Slack escalation for M2). *(From Claude Code.)* |
 
 ### 9.4  Estimated Reuse
 
@@ -797,7 +853,9 @@ integrating OpenShell, and separating the orchestrator from the Slack handler.
 | Async throughout | The orchestrator will eventually manage concurrent tasks; building async from the start avoids a rewrite | Sync with threading — adequate for M1 but creates an async migration tax later |
 | JSON structured logging | Machine-parseable from day one; makes future log shipping trivial | Plain text logging — easier to read in a terminal but harder to query programmatically |
 | Static system prompt loaded from file | Separates prompt engineering from code; easy to iterate | Inline string — faster to start but mixes concerns |
-| Multi-turn via in-memory thread history | Conversations feel natural from day one; nv_claw already proves this works | Persistent conversation store — deferred to M5 since in-memory is sufficient while the system runs as a single process |
+| Multi-turn via in-memory thread history | Conversations feel natural from day one; nv_claw already proves this works | Persistent conversation store — deferred to M4 since in-memory is sufficient while the system runs as a single process |
+| Transcript repair from M1 | Empty responses and truncation happen even in simple conversational loops; defensive handling prevents silent failures and user confusion | Trust model output — faster to ship but creates user-visible failures on edge cases |
+| Approval interface stub from M1 | Defining the interface now (even as auto-approve) means M2 can add the tiered classifier without restructuring the orchestrator loop | Add approval in M2 — defers the interface design and may require orchestrator loop changes |
 | Credential injection for Slack tokens (not a provider proxy) | Slack socket mode requires the Bolt SDK to hold the tokens directly to maintain a persistent websocket connection. Unlike inference — where `inference.local` proxies stateless HTTP requests and attaches the API key transparently — there is no simple intermediary that can sit between the sandbox and Slack. Both credential paths are managed by OpenShell (the `.env` file never enters the sandbox; a leaked image contains no secrets), but the mechanism differs: inference uses a proxy pattern (code never touches the key), Slack uses direct credential injection (code reads tokens as env vars). Building a bidirectional websocket proxy would add significant infrastructure for marginal M1 security benefit. The planned M2 mitigation is to move the connector into its own dedicated sandbox so the orchestrator stops needing Slack tokens entirely. | Slack provider proxy analogous to `inference.local` — architecturally cleaner but requires proxying a full websocket lifecycle; deferred in favor of the simpler M2 path of isolating the connector in its own sandbox |
 
 ## 11  Deliverables
@@ -811,7 +869,9 @@ integrating OpenShell, and separating the orchestrator from the Slack handler.
 | Slack connector | `ConnectorBase` ABC + `SlackConnector` implementation | Messages can be received and replied to reliably in socket mode |
 | Inference backend | `BackendBase` ABC + `InferenceHubBackend` (via `inference.local`) | Orchestrator calls model endpoints through one contract and the OpenShell proxy |
 | Orchestrator loop | Multi-turn request → context → inference → response pipeline | Multi-turn Slack conversations work naturally within a thread |
-| Observability baseline | Structured JSON logger, request lifecycle logging, error categorization | Failures are visible, diagnosable, and never silent |
+| Transcript repair layer | Empty-response handling, truncation recovery, error surfacing | Malformed model output never crashes the loop or leaves the user hanging |
+| Approval interface | Auto-approve-all stub; interface ready for M2 classifier + Slack escalation | Clean seam for M2 to plug in tiered approval without restructuring |
+| Observability baseline | Structured JSON logger, request lifecycle logging, error categorization, prompt cache break detection | Failures are visible, diagnosable, and never silent |
 | Makefile-based setup | `make setup` provisions gateway, secrets, and sandbox from `.env`; `make start/stop/logs` manage lifecycle | A new contributor goes from clone to running system with `cp .env.example .env && make setup && make start` |
 | Local deployment | Gateway + orchestrator sandbox on local machine, inference hosted remotely | End-to-end flow runs from a local OpenShell sandbox |
 | Architecture diagrams | Visual map of runtime responsibilities matching the actual code | Diagrams are reviewable and match the code path |
@@ -831,6 +891,7 @@ integrating OpenShell, and separating the orchestrator from the Slack handler.
 | Bot-message filtering | Verify the connector ignores its own messages and does not create loops |
 | Retry logic works | Simulate a transient 429/5xx from inference hub; confirm retry and eventual success or graceful failure |
 | Logs are useful | Review structured log output for a successful request and a failed request; confirm both are diagnosable |
+| Transcript repair works | Simulate an empty model response and a truncated response; confirm the user receives a graceful fallback |
 | Makefile setup works end-to-end | `make setup && make start` on a fresh clone with a valid `.env` results in a running orchestrator within 5 minutes |
 | Makefile is idempotent | Running `make setup` twice in a row succeeds without errors or side effects |
 | Secrets stay out of the sandbox | Verify `.env` values are not present in the sandbox filesystem; only injected via OpenShell credentials |
@@ -846,7 +907,7 @@ and scoped to decisions that must be resolved during M1.
 | 1 | Which NVIDIA Inference Hub model to use as the default? | Open | Depends on availability and cost; evaluate during implementation |
 | 2 | Should the system prompt include any persona details or stay minimal? | Open | Start minimal; iterate based on response quality |
 | 3 | Should M1 support multi-channel Slack (multiple workspaces) or single workspace only? | Resolved | Single workspace for M1; multi-workspace is a future extension |
-| 4 | Should the orchestrator handle conversation history in M1? | Resolved | Yes; in-memory thread history keyed by Slack thread_ts. Cleared on restart; persistent storage deferred to M5 |
+| 4 | Should the orchestrator handle conversation history in M1? | Resolved | Yes; in-memory thread history keyed by Slack thread_ts. Cleared on restart; persistent storage deferred to M4 |
 | 5 | Where should the orchestrator be hosted for always-on operation? | Resolved | Inside an OpenShell sandbox on the local machine for M1; move the gateway to Brev for always-on per [Hosting Deep Dive](deep_dives/hosting_deep_dive.md) |
 | 6 | Should we include a health-check endpoint in M1? | Open | Low-cost addition; decide during implementation |
 | 7 | Should the NMB broker ship with M1? | Deferred | NMB is most valuable for M2+ multi-sandbox coordination; not needed for M1 single-sandbox deployment |
@@ -858,16 +919,18 @@ and scoped to decisions that must be resolved during M1.
 The following items are explicitly deferred to later milestones to keep M1
 focused on the foundation loop:
 
+- Cache-aware system prompt (static/dynamic boundary for prompt caching) — M2+.
+- Three-tier context compaction (micro/full/session memory) — M2+.
 - Ephemeral per-task sandboxes (OpenShell sandbox-per-workflow) — M2.
 - Sub-agent delegation — M2.
 - Review agent — M3.
-- Knowledge capture from Slack/Teams — M4.
-- Persistent memory (Honcho, SecondBrain) — M5.
+- Persistent memory (Honcho, SecondBrain) — M4.
+- Knowledge capture from Slack/Teams — M5.
 - Self-improvement loop — M6.
 - Web UI / Mission Control dashboard — M2+.
 - NemoClaw Message Bus (NMB) — M2.
 - Training data capture — M2+.
-- Persistent conversation storage (in-memory thread history is in scope; durable storage is M5).
+- Persistent conversation storage (in-memory thread history is in scope; durable storage is M4).
 - Cron scheduling — M2+.
 
 ## 15  M2 Readiness Checklist
@@ -886,6 +949,10 @@ refactoring core abstractions. This checklist defines that threshold:
 - [ ] The orchestrator has a clean `handle()` entry point that M2 can extend
       with planning, delegation, and memory retrieval without breaking the
       existing flow.
+- [ ] Transcript repair layer handles empty responses and truncation;
+      the interface is ready for M2 tool-call repair patterns.
+- [ ] Approval interface is defined with an auto-approve stub; M2 can plug
+      in the tiered classifier and Slack escalation without restructuring.
 - [ ] Structured logging is in place and working for both success and failure
       paths, with logs accessible from the host via volume mount.
 - [ ] The project structure supports adding new connectors, backends, and
@@ -902,11 +969,18 @@ refactoring core abstractions. This checklist defines that threshold:
 ## 16  References
 
 - [NemoClaw Escapades — Design Document](design.md)
+- [Orchestrator Agent Design](orchestrator_design.md) — agent loop, streaming
+  tool execution, system prompt construction, compaction, permission model,
+  behavioral contract, task store
+- [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) — source for
+  the system prompt cache boundary, three-tier compaction, transcript repair,
+  and tiered auto-approval patterns adopted in M1
 - [Hosting Deep Dive](deep_dives/hosting_deep_dive.md)
 - [Hermes Deep Dive](deep_dives/hermes_deep_dive.md)
 - [OpenClaw Deep Dive](deep_dives/openclaw_deep_dive.md)
 - [OpenShell Deep Dive](deep_dives/openshell_deep_dive.md)
 - [NemoClaw Deep Dive](deep_dives/nemoclaw_deep_dive.md)
+- [NMB Design](nmb_design.md)
 - [M1 Blog Post](blog_posts/m1/m1_setting_up_nemoclaw.md)
 - [Slack Bolt for Python](https://slack.dev/bolt-python/)
 - [NVIDIA Inference Hub](https://build.nvidia.com/)
