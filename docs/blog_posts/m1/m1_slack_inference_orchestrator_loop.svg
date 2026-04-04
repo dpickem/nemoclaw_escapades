@@ -1,58 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520">
   <defs>
-    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#111827"/>
-      <stop offset="100%" stop-color="#1e293b"/>
-    </linearGradient>
     <style>
-      .title { fill: #f8fafc; font: 700 40px Arial, sans-serif; }
-      .subtitle { fill: #cbd5e1; font: 500 21px Arial, sans-serif; }
-      .boxSlack { fill: #0f172a; stroke: #22d3ee; stroke-width: 3; rx: 16; }
-      .boxOrch { fill: #0f172a; stroke: #34d399; stroke-width: 3; rx: 16; }
-      .boxModel { fill: #0f172a; stroke: #a78bfa; stroke-width: 3; rx: 16; }
-      .boxObs { fill: #0f172a; stroke: #f97316; stroke-width: 3; rx: 16; }
-      .h { fill: #f8fafc; font: 700 26px Arial, sans-serif; }
-      .t { fill: #cbd5e1; font: 500 18px Arial, sans-serif; }
-      .arrowF { stroke: #e2e8f0; stroke-width: 4; fill: none; marker-end: url(#headF); }
-      .arrowB { stroke: #94a3b8; stroke-width: 3.5; fill: none; marker-end: url(#headB); }
-      .arrowObs { stroke: #f97316; stroke-width: 3.5; fill: none; marker-end: url(#headObs); }
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 20px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .labelFwd { fill: #2563eb; font: 600 14px Arial, sans-serif; }
+      .labelRet { fill: #7c3aed; font: 600 14px Arial, sans-serif; }
+      .labelObs { fill: #ea580c; font: 600 14px Arial, sans-serif; }
+      .arrowFwd { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#fwdHead); }
+      .arrowRet { stroke: #7c3aed; stroke-width: 2.5; fill: none; stroke-dasharray: 8 6; marker-end: url(#retHead); }
+      .arrowObs { stroke: #ea580c; stroke-width: 2; fill: none; marker-end: url(#obsHead); }
     </style>
-    <marker id="headF" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
-      <polygon points="0 0, 12 4, 0 8" fill="#e2e8f0"/>
+    <marker id="fwdHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
     </marker>
-    <marker id="headB" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
-      <polygon points="0 0, 12 4, 0 8" fill="#94a3b8"/>
+    <marker id="retHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/>
     </marker>
-    <marker id="headObs" markerWidth="12" markerHeight="8" refX="11" refY="4" orient="auto">
-      <polygon points="0 0, 12 4, 0 8" fill="#f97316"/>
+    <marker id="obsHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
     </marker>
   </defs>
 
-  <rect x="0" y="0" width="1600" height="900" fill="url(#bgGrad)"/>
-  <text class="title" x="800" y="80" text-anchor="middle">M1 Runtime Loop</text>
-  <text class="subtitle" x="800" y="116" text-anchor="middle">Slack -> Orchestrator -> Inference Hub -> Slack response</text>
+  <rect class="bg" x="0" y="0" width="1600" height="520"/>
 
-  <rect class="boxSlack" x="150" y="300" width="320" height="180"/>
-  <text class="h" x="310" y="370" text-anchor="middle">Slack Connector</text>
-  <text class="t" x="310" y="405" text-anchor="middle">ingress + egress</text>
+  <text class="title" x="800" y="50" text-anchor="middle">M1 Runtime Loop</text>
+  <text class="subtitle" x="800" y="80" text-anchor="middle">Slack message → Orchestrator → Inference Hub → Slack response</text>
 
-  <rect class="boxOrch" x="640" y="270" width="320" height="240"/>
-  <text class="h" x="800" y="360" text-anchor="middle">Orchestrator</text>
-  <text class="t" x="800" y="395" text-anchor="middle">context assembly</text>
-  <text class="t" x="800" y="423" text-anchor="middle">routing + response shaping</text>
+  <!-- Core pipeline row -->
+  <rect x="100" y="110" width="1400" height="200" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="100" y="110" width="260" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="130" y="136">Core Pipeline</text>
 
-  <rect class="boxModel" x="1130" y="300" width="320" height="180"/>
-  <text class="h" x="1290" y="370" text-anchor="middle">Inference Hub</text>
-  <text class="t" x="1290" y="405" text-anchor="middle">model endpoint</text>
+  <!-- Slack Connector card -->
+  <rect x="150" y="168" width="300" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="300" y="210" text-anchor="middle">Slack Connector</text>
+  <text class="cardText" x="300" y="235" text-anchor="middle">Ingress + egress</text>
+  <text class="cardText" x="300" y="258" text-anchor="middle">Socket mode WebSocket</text>
 
-  <path class="arrowF" d="M470 390 L640 390"/>
-  <path class="arrowF" d="M960 390 L1130 390"/>
+  <!-- Orchestrator card -->
+  <rect x="550" y="168" width="300" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="700" y="210" text-anchor="middle">Orchestrator</text>
+  <text class="cardText" x="700" y="235" text-anchor="middle">Context assembly</text>
+  <text class="cardText" x="700" y="258" text-anchor="middle">Routing + response shaping</text>
 
-  <path class="arrowB" d="M1130 440 L960 440"/>
-  <path class="arrowB" d="M640 440 L470 440"/>
+  <!-- Inference Hub card -->
+  <rect x="950" y="168" width="300" height="120" rx="14" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="cardTitle" x="1100" y="210" text-anchor="middle">NVIDIA Inference Hub</text>
+  <text class="cardText" x="1100" y="235" text-anchor="middle">Model endpoint</text>
+  <text class="cardText" x="1100" y="258" text-anchor="middle">OpenAI-compatible API</text>
 
-  <rect class="boxObs" x="600" y="590" width="400" height="180"/>
-  <text class="h" x="800" y="660" text-anchor="middle">Observability</text>
-  <text class="t" x="800" y="695" text-anchor="middle">logs, retries, and error paths</text>
-  <path class="arrowObs" d="M800 510 L800 590"/>
+  <!-- Forward arrows -->
+  <path class="arrowFwd" d="M450 215 L550 215"/>
+  <text class="labelFwd" x="493" y="208">request</text>
+  <path class="arrowFwd" d="M850 215 L950 215"/>
+  <text class="labelFwd" x="890" y="208">prompt</text>
+
+  <!-- Return arrows -->
+  <path class="arrowRet" d="M950 255 L850 255"/>
+  <text class="labelRet" x="878" y="274">completion</text>
+  <path class="arrowRet" d="M550 255 L450 255"/>
+  <text class="labelRet" x="478" y="274">response</text>
+
+  <!-- Observability row -->
+  <rect x="100" y="340" width="1400" height="110" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <rect x="100" y="340" width="260" height="40" rx="12" fill="#ea580c"/>
+  <text class="stageTitle" x="130" y="366">Observability</text>
+
+  <text class="cardText" x="150" y="410">Structured JSON logs</text>
+  <text class="cardText" x="450" y="410">Error categorization</text>
+  <text class="cardText" x="750" y="410">Retry tracking</text>
+  <text class="cardText" x="1020" y="410">Latency + token metrics</text>
+
+  <!-- Vertical connector from pipeline to observability -->
+  <path class="arrowObs" d="M700 288 L700 340"/>
+
+  <!-- Bottom note -->
+  <rect x="100" y="478" width="1400" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="494" text-anchor="middle">Every step emits structured logs with request_id correlation. Failures never crash the process — they surface as user-facing messages.</text>
 </svg>
