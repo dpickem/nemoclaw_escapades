@@ -63,7 +63,7 @@ setup-secrets: .env ## Register inference and Slack providers with the gateway
 		|| echo "⚠  Provider may already exist (use 'openshell provider update' to change)."; \
 		openshell inference set \
 			--provider inference-hub \
-			--model "$${INFERENCE_MODEL:-azure/anthropic/claude-opus-4.6}" \
+			--model "$${INFERENCE_MODEL:-azure/anthropic/claude-opus-4-6}" \
 			--no-verify \
 		&& echo "✓ Inference routing configured (inference.local → inference-hub)." \
 		|| echo "⚠  Inference routing may already be configured."; \
