@@ -1,0 +1,52 @@
+# NemoClaw Escapades — Orchestrator sandbox image
+#
+# Runs inside an OpenShell sandbox.  OpenShell replaces the entrypoint with
+# its own supervisor (openshell-sandbox), which applies Landlock and network
+# policies before dropping to the user specified in the policy's `process`
+# section.  The supervisor must start as root, so this image must NOT set
+# USER or ENTRYPOINT.  The actual application command is passed via
+# `-- <cmd>` on `openshell sandbox create`.
+#
+# For local development without OpenShell, use `make run` instead.
+
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir .
+
+# --- Runtime stage ---------------------------------------------------
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# OpenShell sandbox prerequisites:
+#   - sandbox user/group: the supervisor drops to this after applying policies
+#   - iproute2: needed by the supervisor to create network namespaces for proxy isolation
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r sandbox && useradd -r -g sandbox -d /app -s /bin/bash sandbox
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
+
+# Application code (read-only at runtime per policy)
+COPY --chown=root:root src/ ./src/
+COPY --chown=root:root prompts/ ./prompts/
+RUN chmod -R a+rX,a-w src/
+
+# Writable directories (per policy: /app/logs is read_write)
+RUN mkdir -p /app/logs && chown sandbox:sandbox /app/logs
+
+ENV PYTHONPATH=/app/src
+ENV PYTHONUNBUFFERED=1
+
+# Do NOT set USER or ENTRYPOINT here.  OpenShell replaces the entrypoint
+# with its own supervisor (openshell-sandbox), which needs root to apply
+# Landlock/network policies before dropping to the `sandbox` user.
+# The actual application command is passed via `-- <cmd>` on
+# `openshell sandbox create`.

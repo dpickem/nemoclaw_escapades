@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="660" viewBox="0 0 1600 660">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .pipeLabel { fill: #475569; font: 600 13px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenHead); }
+      .arrowRed { stroke: #dc2626; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#redHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="redHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="660"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Connector Event Pipeline</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">From raw Slack event to rendered Block Kit response</text>
+
+  <!-- Row 1: Inbound pipeline -->
+  <rect x="80" y="100" width="1440" height="160" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="300" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Inbound: Event to Request</text>
+
+  <!-- Step 1: Slack Event -->
+  <rect x="110" y="158" width="170" height="80" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="195" y="192" text-anchor="middle">Slack Event</text>
+  <text class="cardText" x="195" y="212" text-anchor="middle">message / mention</text>
+
+  <!-- Step 2: Filter -->
+  <rect x="330" y="158" width="170" height="80" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="415" y="192" text-anchor="middle">Filter</text>
+  <text class="cardText" x="415" y="212" text-anchor="middle">_should_ignore()</text>
+
+  <!-- Step 3: Normalize -->
+  <rect x="550" y="158" width="200" height="80" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="650" y="192" text-anchor="middle">Normalize</text>
+  <text class="cardText" x="650" y="212" text-anchor="middle">NormalizedRequest</text>
+
+  <!-- Step 4: Post Thinking -->
+  <rect x="800" y="158" width="200" height="80" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="900" y="192" text-anchor="middle">Post Thinking</text>
+  <text class="cardText" x="900" y="212" text-anchor="middle">placeholder msg</text>
+
+  <!-- Step 5: Call Handler -->
+  <rect x="1050" y="158" width="200" height="80" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="cardTitle" x="1150" y="192" text-anchor="middle">Call Orchestrator</text>
+  <text class="cardText" x="1150" y="212" text-anchor="middle">await handler(req)</text>
+
+  <!-- Arrows -->
+  <path class="arrowBlue" d="M280 198 L330 198"/>
+  <path class="arrowBlue" d="M500 198 L550 198"/>
+  <path class="arrowBlue" d="M750 198 L800 198"/>
+  <path class="arrowBlue" d="M1000 198 L1050 198"/>
+
+  <!-- Drop label on filter -->
+  <path class="arrowRed" d="M415 238 L415 262"/>
+  <text class="cardText" x="432" y="276" fill="#dc2626">drop bots,</text>
+  <text class="cardText" x="432" y="292" fill="#dc2626">subtypes</text>
+
+  <!-- Row 2: Outbound pipeline -->
+  <rect x="80" y="310" width="1440" height="160" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="310" width="300" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="336">Outbound: Response to Slack</text>
+
+  <!-- Step 6: RichResponse -->
+  <rect x="110" y="368" width="200" height="80" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="210" y="402" text-anchor="middle">RichResponse</text>
+  <text class="cardText" x="210" y="422" text-anchor="middle">from orchestrator</text>
+
+  <!-- Step 7: Error Check -->
+  <rect x="360" y="368" width="200" height="80" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="460" y="402" text-anchor="middle">Error Check</text>
+  <text class="cardText" x="460" y="422" text-anchor="middle">detect error phrases</text>
+
+  <!-- Step 8: Rate Limiter -->
+  <rect x="610" y="368" width="200" height="80" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="710" y="402" text-anchor="middle">Rate Limiter</text>
+  <text class="cardText" x="710" y="422" text-anchor="middle">3 errors / 60s max</text>
+
+  <!-- Step 9: Render -->
+  <rect x="860" y="368" width="200" height="80" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="960" y="402" text-anchor="middle">Render</text>
+  <text class="cardText" x="960" y="422" text-anchor="middle">Block Kit JSON</text>
+
+  <!-- Step 10: Reply -->
+  <rect x="1110" y="368" width="200" height="80" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="1210" y="402" text-anchor="middle">Reply</text>
+  <text class="cardText" x="1210" y="422" text-anchor="middle">chat_update / post</text>
+
+  <!-- Arrows -->
+  <path class="arrow" d="M310 408 L360 408"/>
+  <path class="arrow" d="M560 408 L610 408"/>
+  <path class="arrow" d="M810 408 L860 408"/>
+  <path class="arrow" d="M1060 408 L1110 408"/>
+
+  <!-- Rate limit suppress label -->
+  <path class="arrowRed" d="M710 448 L710 472"/>
+  <text class="cardText" x="726" y="486" fill="#dc2626">suppress if</text>
+  <text class="cardText" x="726" y="502" fill="#dc2626">limit exceeded</text>
+
+  <!-- Vertical connector: inbound to outbound -->
+  <path class="arrowGreen" d="M1250 238 L1250 280 L210 280 L210 310"/>
+
+  <!-- Row 3: Rendering detail -->
+  <rect x="80" y="520" width="1440" height="110" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="80" y="520" width="260" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="110" y="546">Block Type Mapping</text>
+
+  <rect x="130" y="576" width="220" height="36" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="240" y="599" text-anchor="middle">TextBlock &#8594; section</text>
+
+  <rect x="385" y="576" width="230" height="36" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="500" y="599" text-anchor="middle">ActionBlock &#8594; actions</text>
+
+  <rect x="650" y="576" width="240" height="36" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="770" y="599" text-anchor="middle">ConfirmBlock &#8594; confirm</text>
+
+  <rect x="925" y="576" width="310" height="36" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="1080" y="599" text-anchor="middle">FormBlock &#8594; header + selects + btn</text>
+
+  <rect x="1270" y="576" width="220" height="36" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="1380" y="599" text-anchor="middle">Markdown &#8594; Slack mrkdwn</text>
+</svg>

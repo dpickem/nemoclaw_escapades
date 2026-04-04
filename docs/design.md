@@ -2,7 +2,7 @@
 
 > **Tagline:** The enterprisified OpenClaw with practical use-cases.
 >
-> **Started:** 2026-02-24 &nbsp;|&nbsp; **Last updated:** 2026-03-30
+> **Started:** 2026-02-24 &nbsp;|&nbsp; **Last updated:** 2026-04-01
 
 ---
 
@@ -25,13 +25,18 @@
    - [9.4 UX Principles](#94--ux-principles)
    - [9.5 Milestone Mapping](#95--milestone-mapping)
    - [9.6 Open Questions (Web UI)](#96--open-questions-web-ui)
-10. [References & Related Projects](#10--references--related-projects)
+10. [Future Work — Features Inspired by Claude Code](#10--future-work--features-inspired-by-claude-code)
+11. [References & Related Projects](#11--references--related-projects)
 
 ### Companion Design Documents
 
+- **[Orchestrator Agent Design](orchestrator_design.md)** — agent loop
+  architecture, streaming tool execution, system prompt construction, multi-agent
+  coordinator mode, permission system, session compaction, model behavioral
+  contract, task store. Draws from the Claude Code leak analysis.
 - **[NemoClaw Message Bus (NMB) Design](nmb_design.md)** — real-time
   inter-sandbox messaging protocol, broker, client library, security model,
-  multi-host deployment.
+  multi-host deployment, coordinator integration, session forking, peer discovery.
 - **[Training Flywheel Design](training_flywheel_deep_dive.md)** — turning
   daily agent interactions into SFT/RL training data; two-layer trace capture,
   quality filtering, DPO pairs from review loops, Nemotron fine-tuning.
@@ -59,6 +64,7 @@ lessons learned.
 | **[OpenShell](https://github.com/NVIDIA/OpenShell)** | Secure runtime for autonomous AI agents (Apache 2.0). Sandbox containers, kernel-level isolation (Landlock + seccomp), declarative network policy, inference routing, credential injection. Agent-agnostic — doesn't care what runs inside. **This is the infrastructure layer we use directly.** |
 | **[NemoClaw](https://github.com/NVIDIA/NemoClaw)** | Setup harness that automates deploying OpenClaw into an OpenShell sandbox (Apache 2.0, alpha). Contains a blueprint (default policies + setup script) and a plugin (inference provider registration). **Not an agent** — no agent loop, no skills, no memory, no tools. Since this project builds a custom orchestrator rather than vanilla OpenClaw, NemoClaw provides no runtime value. Studied for policy patterns but not used in the stack. |
 | **[SecondBrain](https://github.com/dpickem/project_second_brain)** | Personal knowledge management & learning system (own project). Features: multi-source ingestion (PDF, web, books, code), LLM-powered summarization, Neo4j knowledge graph, spaced repetition learning (FSRS), Obsidian-based vault, and a React/FastAPI web UI. Serves as the "academic memory" layer for this project. |
+| **[Claude Code](https://github.com/zackautocracy/claude-code)** | Anthropic's terminal-native AI coding assistant (proprietary, source leaked March 2026). 1,884 TypeScript files, 40+ tools, 80+ slash commands, 90 feature flags. Key patterns adopted for this project: streaming-first async generator agent loop, three-tier context compaction (micro/full/session memory), two-stage auto-permission classifier, prompt cache boundary (`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`), model behavioral contract with transcript repair, coordinator mode for multi-agent orchestration, `skillify` for automatic workflow capture, `extractMemories` for passive memory extraction. See [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) and [Orchestrator Design](orchestrator_design.md). |
 | **nv-tools** | Unified CLI for NVIDIA services (Jira, Gerrit, GitLab, Slack, etc.). Provides read/write access to the professional ecosystem. |
 
 
@@ -123,10 +129,10 @@ are auto-garbage-collected. Calls `inference.local` (model-agnostic via
 OpenShell routing) so it can run on Nemotron, Claude, or any other model.
 
 The coding agent evolves across milestones:
-- **M3:** Start with Claude Code for fast proof-of-concept (best code quality,
+- **M2:** Start with Claude Code for fast proof-of-concept (best code quality,
   one-command setup, but Anthropic-locked and off-policy for the training
   flywheel).
-- **M4+:** Replace with a custom coding agent that lifts the best patterns from
+- **M6+:** Replace with a custom coding agent that lifts the best patterns from
   both OpenClaw (Pi's 20+ tools, `apply_patch`, block streaming, tool
   profiles) and Hermes (provider resolver, context compression, prompt
   caching, concurrent tool execution). The custom agent is model-agnostic,
@@ -208,8 +214,9 @@ patterns), but nothing from NemoClaw is used at runtime.
 
 ## 4  Milestones
 
-The milestones are ordered by dependency. Each milestone corresponds to a blog
-post in the series (see §6).
+The milestones below are listed in planned execution order, and milestone IDs
+are now sequential (`M1` → `M6`). Each milestone corresponds to a blog post in
+the series (see §6).
 
 ### Milestone 1 — Foundation: Slack + Inference Hub + Orchestrator
 
@@ -221,27 +228,24 @@ by an inference hub endpoint.
 - Slack connector (generic connector base class, Slack as first impl).
 - Inference hub integration (generic backend base class).
 - Minimal orchestrator that receives a Slack message, calls the LLM, and
-  replies.
+  replies. See [Orchestrator Design](orchestrator_design.md) for the detailed
+  agent loop, tool system, and session management architecture.
 - Architecture diagrams (the ones missing from NemoClaw's own docs).
+- Defensive model output handling (transcript repair) — orphan stripping,
+  JSON fallback, empty-message filtering, recovery prompts. *(Inspired by
+  Claude Code's behavioral contract.)*
+- Tiered auto-approval for safe operations — fast-path pattern matcher for
+  known-safe operations + async Slack escalation for dangerous ones.
+  *(Inspired by Claude Code's YOLO classifier.)*
 
-### Milestone 2 — Knowledge Management via SecondBrain
-
-Connect the orchestrator to SecondBrain so the agent can store and retrieve
-knowledge.
-
-**Deliverables:**
-- SecondBrain CLI integration as a tool available to the orchestrator.
-- Ability to save, search, and retrieve notes programmatically.
-- Separation of personal vs. professional knowledge bases.
-
-### Milestone 3 — Coding Agent via OpenShell
+### Milestone 2 — Coding Agent via OpenShell
 
 Add a sub-agent that can write code inside a sandboxed OpenShell container.
 
 **Deliverables:**
 - OpenShell container provisioning and lifecycle management (auto-GC).
 - Claude Code running inside the container as the initial coding agent
-  (fastest path to a working system; replaced by custom agent in M4+).
+  (fastest path to a working system; replaced by custom agent in M6+).
 - Policy definition for the coding agent (permissions, tools, constraints).
 - Sub-agent delegation from orchestrator → coding agent.
 - Bookkeeping of spawned sub-agents and result processing.
@@ -250,20 +254,7 @@ Add a sub-agent that can write code inside a sandboxed OpenShell container.
   cleanup. Contract is agent-agnostic so the underlying coding agent can be
   swapped without changing the orchestrator.
 
-### Milestone 4 — Memory System + Self-Improvement Loop
-
-Add persistent memory so the agent can learn from past outcomes and
-autonomously improve its skills and policies.
-
-**Deliverables:**
-- Memory system integration (Honcho, SecondBrain, or hybrid).
-- Self-improvement loop: after each task, the agent evaluates the outcome,
-  extracts lessons, and updates its skills/policies.
-- Auto-skill creation and updates.
-- Cron-driven background tasks (check Slack, Jira, Google Docs for issues,
-  blockers, gaps, bugs; categorize & prioritize).
-
-### Milestone 5 — Review Agent
+### Milestone 3 — Review Agent
 
 Add a review agent that collaborates with the coding agent before code is
 pushed.
@@ -274,7 +265,7 @@ pushed.
   Git round-trips.
 - Post-push review integration via Gerrit/GitLab (using nv-tools).
 
-### Milestone 6 — Note-Taking & Professional Knowledge Base
+### Milestone 4 — Note-Taking & Professional Knowledge Base
 
 Build a scraping/summarization system that distills information from Slack
 (and ideally Teams) into a professional knowledge base.
@@ -284,6 +275,40 @@ Build a scraping/summarization system that distills information from Slack
 - Teams integration (open question: how to access Teams?).
 - Distilled notes stored in the professional KB.
 
+### Milestone 5 — Knowledge + Memory Orchestration (SecondBrain + Honcho)
+
+Add a structured memory layer that combines SecondBrain knowledge storage with
+Honcho user-memory patterns, borrowing proven memory-management techniques from
+both Hermes and OpenClaw.
+
+**Deliverables:**
+- SecondBrain integration for durable knowledge capture and retrieval.
+- Honcho integration for user modeling and personalized memory state.
+- Unified memory manager with clear roles (working memory, user memory,
+  knowledge memory) and retrieval routing.
+- Memory hygiene policies (deduplication, retention/decay, conflict handling,
+  and source traceability).
+- Explicit separation of personal vs. professional knowledge stores.
+- Passive memory extraction from conversations — automatically extract key
+  facts (user preferences, project conventions, recurring patterns) from every
+  conversation without explicit user action. *(Inspired by Claude Code's
+  `extractMemories` service.)*
+
+### Milestone 6 — Self-Improvement Loop + Autonomous Skill Evolution
+
+Build the continuous learning loop on top of the memory foundation so the agent
+can evaluate outcomes and improve behavior over time.
+
+**Deliverables:**
+- Post-task evaluator that records outcomes and lessons into the memory stack.
+- Skill/policy update pipeline driven by observed successes and failures.
+- Auto-skill creation/update flow with review checkpoints and rollback path.
+- Cron-driven background audits (Slack/Jira/docs), issue triage, and backlog
+  shaping.
+- Automatic skill capture from successful sessions — after a task succeeds,
+  offer to package the workflow as a reusable `SKILL.md`. *(Inspired by
+  Claude Code's `skillify` bundled skill.)*
+
 ## 5  Open Questions
 
 These are captured directly from the notebook and should be resolved as the
@@ -291,42 +316,49 @@ project progresses.
 
 | # | Question | Related Milestone | Answered In |
 |---|----------|-------------------|-------------|
-| 1 | What is the exact Hermes agent architecture? Can we duplicate it or lift applicable parts? | M4 | [Hermes Deep Dive §2, §4, §18-Q1](deep_dives/hermes_deep_dive.md#q1-what-is-the-exact-hermes-agent-architecture-can-we-duplicate-it-or-lift-applicable-parts) |
-| 2 | What is the block diagram for Hermes? | M4 | [Hermes Deep Dive §2](deep_dives/hermes_deep_dive.md#2--high-level-architecture) |
+| 1 | What is the exact Hermes agent architecture? Can we duplicate it or lift applicable parts? | M6 | [Hermes Deep Dive §2, §4, §18-Q1](deep_dives/hermes_deep_dive.md#q1-what-is-the-exact-hermes-agent-architecture-can-we-duplicate-it-or-lift-applicable-parts) |
+| 2 | What is the block diagram for Hermes? | M6 | [Hermes Deep Dive §2](deep_dives/hermes_deep_dive.md#2--high-level-architecture) |
 | 3 | Is Hermes compatible with inference hub, or can it be made compatible? | M1 | [Hermes Deep Dive §5, §18-Q3](deep_dives/hermes_deep_dive.md#q3-is-hermes-compatible-with-inference-hub-or-can-it-be-made-compatible) — **Yes**, via `base_url` config for any OpenAI-compatible endpoint |
-| 4 | How can we port Hermes to NemoClaw while preserving the self-learning loop? | M4 | [Hermes Deep Dive §14, §18-Q4](deep_dives/hermes_deep_dive.md#q4-how-can-we-port-hermes-to-nemoclaw-while-preserving-the-self-learning-loop) — replicate skills + memory + session search + prompt nudges |
-| 5 | How does Honcho combine with SecondBrain? Should we use one or both? | M4 | [Hermes Deep Dive §10, §18-Q5](deep_dives/hermes_deep_dive.md#q5-how-does-honcho-combine-with-secondbrain-should-we-use-one-or-both) — **Use both**: Honcho = user modeling, SB = domain knowledge, built-in memory = working context |
+| 4 | How can we port Hermes to NemoClaw while preserving the self-learning loop? | M6 | [Hermes Deep Dive §14, §18-Q4](deep_dives/hermes_deep_dive.md#q4-how-can-we-port-hermes-to-nemoclaw-while-preserving-the-self-learning-loop) — replicate skills + memory + session search + prompt nudges |
+| 5 | How does Honcho combine with SecondBrain? Should we use one or both? | M6 | [Hermes Deep Dive §10, §18-Q5](deep_dives/hermes_deep_dive.md#q5-how-does-honcho-combine-with-secondbrain-should-we-use-one-or-both) — **Use both**: Honcho = user modeling, SB = domain knowledge, built-in memory = working context |
 | 6 | Does NemoClaw provide a harness? Or computer use? | M1 | [NemoClaw Deep Dive §15-Q6](deep_dives/nemoclaw_deep_dive.md#q6-does-nemoclaw-provide-a-harness-or-computer-use) — **Harness**, not computer use; wraps OpenClaw in sandboxed runtime with policy controls, inference routing, lifecycle mgmt |
 | 7 | What should be the "main brain" — where does the orchestrator run? | M1 | [NemoClaw Deep Dive §15-Q7](deep_dives/nemoclaw_deep_dive.md#q7-what-should-be-the-main-brain--where-does-the-orchestrator-run) + [Hosting Deep Dive §11](deep_dives/hosting_deep_dive.md#11--where-the-core-agent-loop-runs) — Inside OpenShell sandbox; **Brev** recommended for always-on, DGX Spark for local |
 | 8 | Can existing slackbot workflows convert to NemoClaw policies? | M1 | [NemoClaw Deep Dive §15-Q8](deep_dives/nemoclaw_deep_dive.md#q8-can-existing-slackbot-workflows-convert-to-nemoclaw-policies) — Partially; workflow logic → OpenClaw skills, API access → NemoClaw network policies |
-| 9 | Can we auto-generate OpenShell sandbox policies from skills? | M3 | [OpenClaw Deep Dive §20-Q9](deep_dives/openclaw_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions) — **Yes**, via a `nemoclaw.infrastructure` block in SKILL.md metadata that declares network endpoints, filesystem paths, and binaries; a policy generator produces the OpenShell YAML. Fallback: deny-and-approve discovery via [OpenShell TUI](deep_dives/openshell_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions). |
-| 10 | Should each workflow run in its own sandbox container? | M3 | [NemoClaw Deep Dive §15-Q10](deep_dives/nemoclaw_deep_dive.md#q10-should-each-workflow-run-in-its-own-sandbox-container) + [OpenShell Deep Dive §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — **Yes**; one orchestrator sandbox (always-on) + ephemeral per-workflow sandboxes |
-| 11 | Which coding agent to run in OpenShell? Input/output contract? | M3 | **Phased approach:** M3 = Claude Code (fastest path, best code quality, but Anthropic-locked). M4+ = custom coding agent that lifts Pi's tools (20+ built-in, `apply_patch`, block streaming) and Hermes's runtime (provider resolver, context compression, prompt caching, concurrent tool execution). Custom agent is Python, model-agnostic (`inference.local`), and on-policy for the Nemotron training flywheel. I/O contract is agent-agnostic: seed workspace → task via NMB → results via NMB → cleanup. |
-| 12 | Can the review agent and coding agent collaborate locally without Git in the loop? | M5 | [Hermes §13](deep_dives/hermes_deep_dive.md#13--sub-agent-delegation) + [OpenShell §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — Hermes sub-agent delegation + OpenShell multi-sandbox architecture enables local coordination |
-| 13 | How can we access Teams for the note-taking system? | M6 | |
+| 9 | Can we auto-generate OpenShell sandbox policies from skills? | M2 | [OpenClaw Deep Dive §20-Q9](deep_dives/openclaw_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions) — **Yes**, via a `nemoclaw.infrastructure` block in SKILL.md metadata that declares network endpoints, filesystem paths, and binaries; a policy generator produces the OpenShell YAML. Fallback: deny-and-approve discovery via [OpenShell TUI](deep_dives/openshell_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions). |
+| 10 | Should each workflow run in its own sandbox container? | M2 | [NemoClaw Deep Dive §15-Q10](deep_dives/nemoclaw_deep_dive.md#q10-should-each-workflow-run-in-its-own-sandbox-container) + [OpenShell Deep Dive §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — **Yes**; one orchestrator sandbox (always-on) + ephemeral per-workflow sandboxes |
+| 11 | Which coding agent to run in OpenShell? Input/output contract? | M2 | **Phased approach:** M2 = Claude Code (fastest path, best code quality, but Anthropic-locked). M6+ = custom coding agent that lifts the best patterns from Claude Code (streaming tool execution, three-tier compaction, behavioral contract with transcript repair, prompt cache boundary), OpenClaw (Pi's 20+ tools, `apply_patch`, block streaming, tool profiles), and Hermes (provider resolver, context compression, concurrent tool execution). Custom agent is Python, model-agnostic (`inference.local`), and on-policy for the Nemotron training flywheel. I/O contract is agent-agnostic: seed workspace → task via NMB → results via NMB → cleanup. See [Orchestrator Design](orchestrator_design.md) for the detailed agent loop architecture. |
+| 12 | Can the review agent and coding agent collaborate locally without Git in the loop? | M3 | [Hermes §13](deep_dives/hermes_deep_dive.md#13--sub-agent-delegation) + [OpenShell §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — Hermes sub-agent delegation + OpenShell multi-sandbox architecture enables local coordination |
+| 13 | How can we access Teams for the note-taking system? | M5 | |
 | 14 | How to add another server backend to the Slack integration? | M1 | [Hermes §11](deep_dives/hermes_deep_dive.md#11--messaging-gateway) + [NemoClaw §13](deep_dives/nemoclaw_deep_dive.md#13--relationship-to-openclaw) — Hermes gateway uses platform adapter pattern; NemoClaw adds Telegram bridge |
 | 15 | What are formal sources on harness engineering? | — | [OpenShell blog](https://developer.nvidia.com/blog/run-autonomous-self-evolving-agents-more-safely-with-nvidia-openshell/) — OpenShell is the definitive example of agent harness engineering (out-of-process policy enforcement) |
-| 16 | Does this project cleanly separate work vs. hobby, or does it mix them? (2nd Brain = personal; else = professional) | M2 | [Hermes §18-Q5](deep_dives/hermes_deep_dive.md#q5-how-does-honcho-combine-with-secondbrain-should-we-use-one-or-both) — proposed 3-layer memory separation |
+| 16 | Does this project cleanly separate work vs. hobby, or does it mix them? (2nd Brain = personal; else = professional) | M4 | [Hermes §18-Q5](deep_dives/hermes_deep_dive.md#q5-how-does-honcho-combine-with-secondbrain-should-we-use-one-or-both) — proposed 3-layer memory separation |
 | 17 | Where should the NemoClaw Escapades agent be hosted for always-on operation? | M1 | [Hosting Deep Dive §9](deep_dives/hosting_deep_dive.md#9--recommended-architecture) — **Brev** for cloud, **DGX Spark** for local; start local, deploy to Brev at M1 |
 | 18 | What NVIDIA infrastructure options exist for hosting persistent agent workloads? | M1 | [Hosting Deep Dive §3–§6](deep_dives/hosting_deep_dive.md#3--option-1-nvidia-brev-recommended) — Brev (recommended), DGX Spark, Remote SSH, Base Command Platform |
-| 19 | Should the NMB be implemented as part of Milestone 1 (foundation) or Milestone 3 (coding agent)? | M1/M3 | [NMB Design](nmb_design.md) — NMB is most valuable for M3+ (multi-sandbox coordination), but the broker is simple enough to deploy with M1 |
-| 20 | Should we propose `messages.local` as an upstream OpenShell feature? | M3 | [NMB Design §15](nmb_design.md#15--future-upstream-contribution-to-openshell) — If NMB proves valuable, contributing the pattern upstream eliminates the standalone broker |
+| 19 | Should the NMB be implemented as part of Milestone 1 (foundation) or Milestone 2 (coding agent)? | M1/M2 | [NMB Design](nmb_design.md) — NMB is most valuable for M2+ (multi-sandbox coordination), but the broker is simple enough to deploy with M1 |
+| 20 | Should we propose `messages.local` as an upstream OpenShell feature? | M2 | [NMB Design §15](nmb_design.md#15--future-upstream-contribution-to-openshell) — If NMB proves valuable, contributing the pattern upstream eliminates the standalone broker |
 | 21 | For the NMB broker, should we start with a custom Python asyncio server or use NATS from the beginning? | M1 | [NMB Design §4](nmb_design.md#4--message-broker) — Custom for v1 (minimal dependencies), NATS for v2 if production hardness needed |
+| 22 | Should NemoClaw adopt a feature flag system for progressive rollout of capabilities? | M1 | Claude Code uses GrowthBook (remote) + Bun's `feature()` (build-time dead code elimination) to gate 90+ features. A similar system would let NemoClaw ship experimental features (voice input, browser automation, advanced coordinator modes) behind flags without destabilizing the core. Options: LaunchDarkly, Unleash, or a simple config-file-based system for v1. |
 
 ## 6  Blog Post Series
 
-Each milestone produces a blog post. The posts should be mostly auto-generated
-by the system itself (once capable), then reviewed and revised by the author.
-All posts must list sources and references (including Hermes & OpenClaw).
+The series starts with an introduction post, then each milestone produces a
+corresponding blog post. Posts should be mostly auto-generated by the system
+itself (once capable), then reviewed and revised by the author. All posts must
+list sources and references (including Hermes & OpenClaw). Every
+post should explicitly include:
+- What we are intending to build.
+- Learning objectives for that milestone.
+- Milestone deliverables and acceptance criteria.
 
-| # | Title (working) | Milestone |
-|---|-----------------|-----------|
-| 1 | **Setting Up NemoClaw: Slack, Inference Hub, and the First Agentic Loop** | M1 |
-| 2 | **Giving the Agent a Memory: SecondBrain as Knowledge Management** | M2 |
-| 3 | **Sandboxed Coding Agents with OpenShell** | M3 |
-| 4 | **The Self-Improvement Loop: Teaching the Agent to Learn** | M4 |
-| 5 | **Adding a Review Agent: Local Collaboration Before Push** | M5 |
-| 6 | **Building a Professional Knowledge Base from Slack & Teams** | M6 |
+| # | Title (working) | Milestone | Draft |
+|---|-----------------|-----------|-------|
+| 0 | **Building Agents from Scratch — Series Introduction** | — | [Intro post](blog_posts/series_introduction/series_introduction.md) |
+| 1 | **Building Our Own Agent: Local Orchestrator + NVIDIA Inference Hub** | M1 | [M1 post](blog_posts/m1/m1_setting_up_nemoclaw.md) |
+| 2 | **Sandboxed Coding Agents with OpenShell** | M2 | TBD |
+| 3 | **Adding a Review Agent: Local Collaboration Before Push** | M3 | TBD |
+| 4 | **Giving the Agent a Memory: SecondBrain + Honcho Integration** | M4 | TBD |
+| 5 | **Building a Professional Knowledge Base from Slack & Teams** | M5 | TBD |
+| 6 | **The Self-Improvement Loop: Teaching the Agent to Learn** | M6 | TBD |
 
 ## 7  Capabilities the System Should Eventually Have
 
@@ -392,6 +424,16 @@ Captured from the original brainstorm (2026-02-24):
    requirements (tools, env vars) but also sandbox-level policy
    (`nemoclaw.infrastructure`). The orchestrator auto-generates OpenShell
    policies from skill metadata, eliminating manual policy authoring.
+8. **Streaming-first tool execution** *(inspired by Claude Code)* — Tools
+   execute *during* the model's streaming response, not after it completes.
+   Concurrent-safe tools run in parallel. This cuts perceived latency by
+   50%+ for multi-tool turns. See
+   [Orchestrator Design §3](orchestrator_design.md#3--the-agent-loop).
+9. **Defensive model output handling** *(inspired by Claude Code)* — The
+   orchestrator never trusts LLM output structure. Malformed JSON falls back
+   to `{}`, orphaned tool calls get synthetic placeholders, empty messages are
+   filtered, and recovery prompts guide the model back on track. See
+   [Orchestrator Design §9](orchestrator_design.md#9--model-behavioral-contract--defensive-llm-programming).
 
 ## 9  Web UI — Mission Control Dashboard
 
@@ -531,7 +573,7 @@ Inspired by OpenClaw Studio's browser chat + Cline Kanban's sidebar chat.
 
 #### 9.2.7  Memory & Self-Learning Inspector
 
-Unique to NemoClaw — surfaces the self-improvement loop (§3.1, Milestone 4).
+Unique to NemoClaw — surfaces the self-improvement loop (§3.1, Milestone 6).
 
 - **Skills inventory** — Browse all auto-created skills. See creation date,
   usage count, success rate, and the originating task.
@@ -624,11 +666,11 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
 | Core Milestone | Web UI Additions |
 |----------------|------------------|
 | M1 — Foundation | Chat interface, basic agent dashboard, health indicators |
-| M2 — Knowledge Mgmt | KB browser, search, ingestion status |
-| M3 — Coding Agent | Kanban board, diff viewer, worktree management, auto-commit/PR |
-| M4 — Memory + Self-Learning | Memory inspector, skills inventory, learning timeline, policy diffs |
-| M5 — Review Agent | Inline commenting on diffs, review status indicators |
-| M6 — Note-Taking | Professional KB browser, Slack/Teams ingestion dashboard |
+| M2 — Coding Agent | Kanban board, diff viewer, worktree management, auto-commit/PR |
+| M3 — Review Agent | Inline commenting on diffs, review status indicators |
+| M4 — Memory orchestration | Memory routing view, working / user / knowledge tier indicators |
+| M5 — Knowledge capture | KB browser, Slack/Teams ingestion dashboard, search, ingestion status |
+| M6 — Self-Learning Loop | Memory inspector, skills inventory, learning timeline, policy diffs |
 | — (cross-cutting) | Approval gates, scheduler view, notification bridge |
 
 ### 9.6  Open Questions (Web UI)
@@ -641,7 +683,56 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
 | W4 | Should we adopt OpenClaw Studio directly and extend it, or build from scratch? | Studio is Next.js; our stack leans FastAPI + React. Evaluate effort to fork vs. build. |
 | W5 | How granular should the approval gate policies be? Per-agent? Per-tool? Per-target? | Start coarse (per-operation-type), refine based on usage. |
 
-## 10  References & Related Projects
+## 10  Future Work — Features Inspired by Claude Code
+
+The [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) revealed
+several production features that are worth incorporating into NemoClaw's
+roadmap. These are not assigned to specific milestones yet but should be
+considered as the system matures.
+
+### High Priority (incorporate as soon as practical)
+
+| Feature | Source | Description | Likely Milestone |
+|---------|--------|-------------|-----------------|
+| **Three-tier context compaction** | Claude Code `compact/` | Micro-compaction (~256 tokens, no API call), full compaction (~4K tokens, LLM summary), session memory (zero-cost in-memory key-fact cache). Essential for long-running conversations. | M2 |
+| **Cache-aware system prompt** | Claude Code `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | Split system prompt into static prefix (cached) and dynamic suffix (per-turn). Reduces cost by ~90% on subsequent turns via provider prompt caching. | M2 |
+| **Prompt cache break detection** | Claude Code `promptCacheBreakDetection.ts` | Monitor whether the system prompt's static prefix changed between turns; log warnings when cache effectiveness drops | M2 |
+| **Proactive tick system** | Claude Code `KAIROS` / `PROACTIVE` flags | Periodic `<proactive_tick>` events for always-on daemon behavior; check for pending Slack messages, cron jobs, stalled tasks | M1 |
+| **ToolSearch (deferred loading)** | Claude Code `ToolSearchTool` | As tool count grows (built-in + MCP + plugins), lazy-load tool definitions on demand to keep prompt size manageable | M2 |
+| **`batch` skill pattern** | Claude Code bundled skill | Research → decompose → distribute across worktree agents → verify → track; essential for large multi-file tasks | M2 |
+| **`verify` skill pattern** | Claude Code bundled skill | "Prove it works" workflow that pushes the model toward real validation (run the app, check CLI output) rather than static reasoning | M2 |
+| **IDE bridge system** | Claude Code `bridge/` + `BRIDGE_MODE` | Bidirectional VS Code / JetBrains integration; adopt for ACP integration (§7) | M2+ |
+
+### Medium Priority (nice to have)
+
+| Feature | Source | Description |
+|---------|--------|-------------|
+| **Copy-on-write speculation** | Claude Code | Pre-compute next response on overlay filesystem for fast session switching |
+| **Team memory sync** | Claude Code `teamMemorySync/` | Shared memory across agent teams; relevant when multiple sub-agents collaborate on related tasks |
+| **Browser automation tool** | Claude Code `WEB_BROWSER_TOOL` + `claude-in-chrome` skill | Programmatic browser automation beyond MCP-based Chrome integration |
+| **Feature flag system** | Claude Code GrowthBook + `bun:bundle` | Progressive rollout of experimental features behind runtime/build-time flags (see Q22) |
+| **Session forking** | Claude Code `FORK_SUBAGENT` | Fork current session context into a sub-agent via NMB `task.fork` (see [NMB Design §14](nmb_design.md#14--coordinator-integration--extended-message-types)) |
+
+### Lower Priority (aspirational)
+
+| Feature | Source | Description |
+|---------|--------|-------------|
+| **Voice input** | Claude Code `VOICE_MODE` | Voice-to-text input for the orchestrator; interesting for mobile/hands-free use |
+| **Desktop/mobile handoff** | Claude Code `/desktop`, `/mobile` commands | Seamless session transfer between devices; NemoClaw's Slack-first approach already handles this partially |
+| **Frustration detection** | Claude Code `useFrustrationDetection.ts` | Detect user frustration via regex patterns; trigger feedback surveys or adjust agent behavior |
+
+### Explicitly not adopting
+
+| Feature | Reason |
+|---------|--------|
+| **Single-provider lock-in** | NemoClaw's multi-provider design (Inference Hub, Anthropic, OpenAI, custom) is intentionally more flexible |
+| **Terminal-only interface** | NemoClaw's Slack + Web UI + future IDE integration is more accessible for an always-on agent |
+| **JSON file sessions** | NemoClaw uses SQLite from the start (matching Hermes) for searchability and concurrent access |
+| **Bun runtime** | NemoClaw is Python-based; the streaming architecture translates via `async for` generators |
+
+---
+
+## 11  References & Related Projects
 
 | Project | Repo | Relevance |
 |---------|------|-----------|
@@ -650,11 +741,12 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
 | **OpenClaw** | [openclaw/openclaw](https://github.com/openclaw/openclaw) | Primary reference architecture. Multi-channel personal AI assistant with sandbox execution (Docker/Podman), skills system, cron scheduling, multi-agent routing, and Canvas UI. Supports 20+ messaging platforms. MIT license. |
 | **Hermes Agent** | [NousResearch/hermes-agent](https://github.com/nousresearch/hermes-agent) | Self-improving agent with closed learning loop. Key subsystems to study: `skills/` (auto-created procedural memory), `honcho_integration/` (managed memory via Honcho), `cron/` (scheduled automations), `agent/` (core agent loop), `gateway/` (multi-platform messaging), `tools/` (40+ built-in tools). Six terminal backends including Docker and serverless (Modal, Daytona). MIT license. |
 | **SecondBrain** | [dpickem/project_second_brain](https://github.com/dpickem/project_second_brain) | Own project — personal knowledge management system. Provides the knowledge storage, retrieval, and learning infrastructure that NemoClaw Escapades will integrate as its memory/KB layer. Key subsystems: ingestion pipelines, Neo4j knowledge graph, FSRS spaced repetition, LLM-powered summarization, REST API (`/api/knowledge/*`, `/api/assistant/*`). MIT license. |
-| **Honcho** | [plastic-labs/honcho](https://github.com/plastic-labs/honcho) | User-modeling and memory system used by Hermes. Candidate for the persistent memory layer in Milestone 4. |
+| **Honcho** | [plastic-labs/honcho](https://github.com/plastic-labs/honcho) | User-modeling and memory system used by Hermes. Candidate for the persistent memory layer in Milestone 5. |
 | **NVIDIA Brev** | [brev.nvidia.com](https://brev.nvidia.com/) | GPU-accelerated cloud platform for agent hosting. Supports always-on instances, serverless deployments, and native NemoClaw deployment (`nemoclaw deploy`). Recommended hosting for this project. |
 | **Cline Kanban** | [cline.bot/kanban](https://cline.bot/kanban) | Browser-based kanban board for multi-agent orchestration. Key UI patterns adopted in §9: task cards with dependency chains, ephemeral git worktrees, checkpoint-scoped diff viewer with inline commenting, auto-commit/auto-PR, sidebar chat for board management. Agent-agnostic. |
 | **OpenClaw Studio** | [grp06/openclaw-studio](https://github.com/grp06/openclaw-studio) | Open-source web dashboard for OpenClaw (1.8k stars). Key UI patterns adopted in §9: WebSocket-powered live agent monitoring, approval gates, cron management UI, direct browser chat, multi-device access via Tailscale. Next.js + Gateway architecture. |
 | **VibeClaw** | [jasonkneen/vibeclaw](https://github.com/jasonkneen/vibeclaw) | Browser-based OpenClaw interface with sandbox mode (run agents in-browser) and live gateway mode. Useful reference for zero-install onboarding experience. |
+| **Claude Code** | [zackautocracy/claude-code](https://github.com/zackautocracy/claude-code) (source), [instructkr/claw-code](https://github.com/instructkr/claw-code) (rewrite), [thtskaran/claude-code-analysis](https://github.com/thtskaran/claude-code-analysis) (analysis) | Anthropic's terminal-native coding assistant. Source leaked March 2026 via `.map` file. 1,884 TS files, 40+ tools, 90 feature flags. Studied for agent loop, compaction, permission, and multi-agent patterns. **Proprietary — not used directly but patterns adopted.** |
 
 ### Deep Dives
 
@@ -674,6 +766,12 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
 - **[Hermes vs OpenClaw Comparison](deep_dives/hermes_vs_openclaw_comparison.md)** —
   side-by-side comparison of architecture, skills, memory, sandboxing,
   self-learning, and a per-milestone lift strategy for NemoClaw Escapades.
+- **[Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md)** — leaked
+  source analysis: async generator agent loop, 40+ tools with 5-layer filtering,
+  three-tier compaction, two-stage YOLO classifier, prompt cache boundary,
+  security architecture (4,437-line bash parser, NO_TOOLS sandwich), daemon mode,
+  proactive agent, bundled skills, model behavioral contract, 90 feature flags,
+  and hidden features behind build-time dead code elimination.
 
 ### System Designs
 
@@ -683,7 +781,14 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
   the compound improvement loop (runtime self-learning + model weight adaptation).
 - **[NemoClaw Message Bus (NMB) Design](nmb_design.md)** — real-time
   inter-sandbox messaging: broker architecture, wire protocol, client library
-  API, security model, failure modes, and deployment.
+  API, security model, failure modes, deployment, coordinator integration,
+  session forking, and peer discovery.
+- **[Orchestrator Agent Design](orchestrator_design.md)** — agent loop
+  architecture (streaming-first async generator), system prompt construction
+  with cache boundary, tool system with 5-layer filtering, coordinator mode
+  for multi-agent orchestration, permission system with tiered auto-approval,
+  three-tier session compaction, model behavioral contract with transcript
+  repair, task store, and proactive agent tick.
 
 ### Key Documentation Links
 

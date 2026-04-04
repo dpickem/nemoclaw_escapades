@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .stepNum { fill: #ffffff; font: 700 16px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowLoop { stroke: #ea580c; stroke-width: 2; fill: none; stroke-dasharray: 8 5; marker-end: url(#loopHead); }
+      .arrowErr { stroke: #dc2626; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#errHead); }
+      .loopLabel { fill: #ea580c; font: 600 13px Arial, sans-serif; }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="loopHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+    <marker id="errHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="720"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Orchestrator Pipeline</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">Five steps from NormalizedRequest to RichResponse &#8212; the method never raises</text>
+
+  <!-- Row 1: Main pipeline (5 steps) -->
+  <rect x="80" y="100" width="1440" height="180" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="300" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Main Pipeline (handle method)</text>
+
+  <!-- Step 1: Build Prompt -->
+  <rect x="110" y="158" width="210" height="100" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <circle cx="132" cy="180" r="14" fill="#2563eb"/>
+  <text class="stepNum" x="132" y="185" text-anchor="middle">1</text>
+  <text class="cardTitle" x="153" y="180">Build Prompt</text>
+  <text class="cardText" x="120" y="208">system prompt</text>
+  <text class="cardText" x="120" y="226">+ thread history</text>
+  <text class="cardText" x="120" y="244">+ user message</text>
+
+  <!-- Step 2: Inference + Repair -->
+  <rect x="370" y="158" width="260" height="100" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <circle cx="392" cy="180" r="14" fill="#2563eb"/>
+  <text class="stepNum" x="392" y="185" text-anchor="middle">2</text>
+  <text class="cardTitle" x="413" y="180">Inference + Repair</text>
+  <text class="cardText" x="380" y="208">call backend.complete()</text>
+  <text class="cardText" x="380" y="226">repair empty / truncated</text>
+  <text class="cardText" x="380" y="244">continuation retries</text>
+
+  <!-- Step 3: Approval Gate -->
+  <rect x="680" y="158" width="210" height="100" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <circle cx="702" cy="180" r="14" fill="#2563eb"/>
+  <text class="stepNum" x="702" y="185" text-anchor="middle">3</text>
+  <text class="cardTitle" x="723" y="180">Approval Gate</text>
+  <text class="cardText" x="690" y="208">M1: AutoApproval</text>
+  <text class="cardText" x="690" y="226">(approve all)</text>
+  <text class="cardText" x="690" y="244">M2+: tiered check</text>
+
+  <!-- Step 4: Record History -->
+  <rect x="940" y="158" width="210" height="100" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <circle cx="962" cy="180" r="14" fill="#2563eb"/>
+  <text class="stepNum" x="962" y="185" text-anchor="middle">4</text>
+  <text class="cardTitle" x="983" y="180">Record History</text>
+  <text class="cardText" x="950" y="208">append assistant msg</text>
+  <text class="cardText" x="950" y="226">to thread history</text>
+  <text class="cardText" x="950" y="244">(in-memory, per thread)</text>
+
+  <!-- Step 5: Shape Response -->
+  <rect x="1200" y="158" width="210" height="100" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <circle cx="1222" cy="180" r="14" fill="#2563eb"/>
+  <text class="stepNum" x="1222" y="185" text-anchor="middle">5</text>
+  <text class="cardTitle" x="1243" y="180">Shape Response</text>
+  <text class="cardText" x="1210" y="208">wrap in RichResponse</text>
+  <text class="cardText" x="1210" y="226">with TextBlock(s)</text>
+  <text class="cardText" x="1210" y="244">return to connector</text>
+
+  <!-- Main pipeline arrows -->
+  <path class="arrowBlue" d="M320 208 L370 208"/>
+  <path class="arrowBlue" d="M630 208 L680 208"/>
+  <path class="arrowBlue" d="M890 208 L940 208"/>
+  <path class="arrowBlue" d="M1150 208 L1200 208"/>
+
+  <!-- Row 2: Transcript repair detail -->
+  <rect x="80" y="310" width="1440" height="170" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <rect x="80" y="310" width="340" height="40" rx="12" fill="#ea580c"/>
+  <text class="stageTitle" x="110" y="336">Transcript Repair (inside Step 2)</text>
+
+  <!-- Repair cases -->
+  <rect x="130" y="366" width="250" height="92" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardTitle" x="255" y="394" text-anchor="middle">Normal Response</text>
+  <text class="cardText" x="255" y="416" text-anchor="middle">finish_reason = "stop"</text>
+  <text class="cardText" x="255" y="436" text-anchor="middle">pass through</text>
+
+  <rect x="420" y="366" width="250" height="92" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardTitle" x="545" y="394" text-anchor="middle">Truncated</text>
+  <text class="cardText" x="545" y="416" text-anchor="middle">finish_reason = "length"</text>
+  <text class="cardText" x="545" y="436" text-anchor="middle">continuation retry</text>
+
+  <rect x="710" y="366" width="250" height="92" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardTitle" x="835" y="394" text-anchor="middle">Empty / Whitespace</text>
+  <text class="cardText" x="835" y="416" text-anchor="middle">content is blank</text>
+  <text class="cardText" x="835" y="436" text-anchor="middle">fallback message</text>
+
+  <rect x="1000" y="366" width="250" height="92" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardTitle" x="1125" y="394" text-anchor="middle">Content Filtered</text>
+  <text class="cardText" x="1125" y="416" text-anchor="middle">content_filter reason</text>
+  <text class="cardText" x="1125" y="436" text-anchor="middle">rephrase message</text>
+
+  <!-- Continuation loop arrow: down from Truncated, left outside the diagram, up to Step 2 -->
+  <path class="arrowLoop" d="M545 458 L545 490 L60 490 L60 208 L110 208"/>
+  <text class="loopLabel" x="66" y="350">up to 2 retries</text>
+
+  <!-- Row 3: Error handling -->
+  <rect x="80" y="510" width="1440" height="170" rx="18" fill="#fef2f2" stroke="#fecaca"/>
+  <rect x="80" y="510" width="340" height="40" rx="12" fill="#dc2626"/>
+  <text class="stageTitle" x="110" y="536">Error Handling (catch blocks)</text>
+
+  <!-- Error categories -->
+  <rect x="130" y="568" width="200" height="88" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="230" y="596" text-anchor="middle">Auth Error</text>
+  <text class="cardText" x="230" y="618" text-anchor="middle">401/403</text>
+  <text class="cardText" x="230" y="636" text-anchor="middle">never retried</text>
+
+  <rect x="370" y="568" width="200" height="88" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="470" y="596" text-anchor="middle">Rate Limited</text>
+  <text class="cardText" x="470" y="618" text-anchor="middle">429</text>
+  <text class="cardText" x="470" y="636" text-anchor="middle">retried with backoff</text>
+
+  <rect x="610" y="568" width="200" height="88" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="710" y="596" text-anchor="middle">Timeout</text>
+  <text class="cardText" x="710" y="618" text-anchor="middle">no response in time</text>
+  <text class="cardText" x="710" y="636" text-anchor="middle">retried with backoff</text>
+
+  <rect x="850" y="568" width="200" height="88" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="950" y="596" text-anchor="middle">Model Error</text>
+  <text class="cardText" x="950" y="618" text-anchor="middle">5xx</text>
+  <text class="cardText" x="950" y="636" text-anchor="middle">retried with backoff</text>
+
+  <rect x="1090" y="568" width="200" height="88" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="1190" y="596" text-anchor="middle">Unknown</text>
+  <text class="cardText" x="1190" y="618" text-anchor="middle">unexpected failure</text>
+  <text class="cardText" x="1190" y="636" text-anchor="middle">generic error msg</text>
+
+  <!-- Error arrow: all errors to RichResponse with error text -->
+  <rect x="1330" y="582" width="160" height="56" rx="12" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text class="cardTitle" x="1410" y="606" text-anchor="middle">RichResponse</text>
+  <text class="cardText" x="1410" y="624" text-anchor="middle">user-friendly text</text>
+
+  <path class="arrowErr" d="M1290 612 L1330 612"/>
+
+  <!-- Bottom note -->
+  <rect x="80" y="696" width="1440" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="712" text-anchor="middle">The orchestrator never raises. Every failure path returns a RichResponse with a categorized, human-readable error message.</text>
+</svg>
