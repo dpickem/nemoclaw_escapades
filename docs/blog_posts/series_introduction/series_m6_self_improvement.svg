@@ -36,14 +36,14 @@
   <text class="pillActive" x="215" y="136" text-anchor="middle">M1 Foundation</text>
   <text class="pillActive" x="420" y="136" text-anchor="middle">M2 Coding Agent</text>
   <text class="pillActive" x="625" y="136" text-anchor="middle">M3 Review</text>
-  <text class="pillActive" x="830" y="136" text-anchor="middle">M4 Knowledge</text>
-  <text class="pillActive" x="1035" y="136" text-anchor="middle">M5 Memory</text>
+  <text class="pillActive" x="830" y="136" text-anchor="middle">M4 Memory</text>
+  <text class="pillActive" x="1035" y="136" text-anchor="middle">M5 Knowledge</text>
   <text class="pillActive" x="1240" y="136" text-anchor="middle">M6 Learning</text>
 
   <rect x="120" y="185" width="1360" height="86" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
   <rect x="120" y="185" width="420" height="40" rx="12" fill="#2563eb"/>
   <text class="stageTitle" x="150" y="211">Stages 1-5: Running System</text>
-  <text class="cardText" x="165" y="246">Interfaces, sandboxes, review, knowledge capture, and memory orchestration are all in place.</text>
+  <text class="cardText" x="165" y="246">Interfaces, sandboxes, review, memory orchestration, and knowledge capture are all in place.</text>
 
   <rect x="120" y="290" width="1360" height="250" rx="18" fill="#f7fee7" stroke="#bef264"/>
   <rect x="120" y="290" width="420" height="40" rx="12" fill="#65a30d"/>
