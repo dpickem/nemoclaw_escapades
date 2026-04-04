@@ -1,0 +1,105 @@
+# Orchestrator Sandbox Policy
+#
+# Defines what the orchestrator sandbox is allowed to do inside OpenShell.
+# The orchestrator and Slack connector run together in a single sandbox.
+#
+# Schema reference:
+#   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+# Based on the NemoClaw OpenClaw sandbox policy:
+#   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
+#
+# Quick guide:
+#   - "Static" fields (filesystem_policy, landlock, process) are locked at
+#     sandbox creation — changing them requires destroy + recreate.
+#   - "Dynamic" fields (network_policies) can be hot-reloaded on a running
+#     sandbox with `openshell policy set orchestrator --policy policies/orchestrator.yaml`.
+#   - Paths not listed in filesystem_policy are inaccessible.
+#   - Only binaries listed in a network policy entry may reach its endpoints.
+#   - REST endpoints need protocol: rest + tls: terminate for the proxy to
+#     intercept, resolve credential placeholders, and enforce HTTP rules.
+#   - WebSocket/tunnel endpoints use access: full for opaque passthrough.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Filesystem Policy (Static)
+# ---------------------------------------------------------------------------
+filesystem_policy:
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app/src
+    - /etc
+  read_write:
+    - /app/logs
+    - /app/prompts
+    - /tmp
+    - /dev/null
+
+# ---------------------------------------------------------------------------
+# Landlock (Static)
+# ---------------------------------------------------------------------------
+landlock:
+  compatibility: best_effort
+
+# ---------------------------------------------------------------------------
+# Process (Static)
+# ---------------------------------------------------------------------------
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+# ---------------------------------------------------------------------------
+# Network Policies (Dynamic — hot-reloadable)
+# ---------------------------------------------------------------------------
+network_policies:
+  # Slack HTTP API — auth.test, chat.postMessage, apps.connections.open, etc.
+  # protocol: rest + tls: terminate lets the proxy intercept HTTPS, resolve
+  # credential placeholders in Authorization headers, and enforce HTTP rules.
+  slack_api:
+    name: slack-api
+    endpoints:
+      - host: slack.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  # Slack WebSocket — Socket Mode uses a long-lived WebSocket after the
+  # initial apps.connections.open handshake. access: full uses a CONNECT
+  # tunnel which avoids the proxy's HTTP idle timeout killing the connection.
+  slack_websocket:
+    name: slack-websocket
+    endpoints:
+      - host: "*.slack.com"
+        port: 443
+        access: full
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  # NVIDIA Inference Hub — routed through OpenShell's inference proxy.
+  # The app sends requests to https://inference.local/v1, the proxy
+  # resolves the credential placeholder and forwards to the real
+  # inference endpoint configured via `openshell inference set`.
+  # Direct access to inference-api.nvidia.com is blocked by the proxy;
+  # all inference traffic MUST go through inference.local.
+  inference:
+    name: inference
+    endpoints:
+      - host: inference.local
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
