@@ -13,6 +13,7 @@ from enum import Enum
 # Error categorization
 # ---------------------------------------------------------------------------
 
+
 class ErrorCategory(str, Enum):
     AUTH_ERROR = "auth_error"
     RATE_LIMIT = "rate_limit"
@@ -25,6 +26,7 @@ class ErrorCategory(str, Enum):
 # ---------------------------------------------------------------------------
 # Connector layer types
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ActionPayload:
@@ -49,6 +51,7 @@ class NormalizedRequest:
 # ---------------------------------------------------------------------------
 # Platform-neutral response blocks
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ResponseBlock:
@@ -102,14 +105,19 @@ class FormBlock(ResponseBlock):
 @dataclass
 class RichResponse:
     """Platform-neutral response the orchestrator produces."""
+
     channel_id: str
     thread_ts: str | None = None
     blocks: list[ResponseBlock] = field(default_factory=list)
+    #: Set when the orchestrator is returning a classified failure to the user
+    #: (connectors may use this for rate limiting instead of parsing message text).
+    error_category: ErrorCategory | None = None
 
 
 # ---------------------------------------------------------------------------
 # Inference types
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class InferenceRequest:
@@ -152,6 +160,7 @@ class ApprovalResult:
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
+
 
 class InferenceError(Exception):
     """Raised when an inference call fails after all retries."""

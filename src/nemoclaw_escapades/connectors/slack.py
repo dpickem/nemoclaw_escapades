@@ -52,7 +52,7 @@ from __future__ import annotations
 import re
 import time
 from collections import defaultdict
-from typing import Any
+from typing import Any, cast
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
@@ -248,13 +248,13 @@ class SlackConnector(ConnectorBase):
         logger.info("Slack bot authenticated", extra={"user_id": self._bot_user_id})
 
         self._socket_handler = AsyncSocketModeHandler(self._app, self._app_token)
-        await self._socket_handler.start_async()
+        await self._socket_handler.start_async()  # type: ignore[no-untyped-call]
         logger.info("Slack connector started in socket mode")
 
     async def stop(self) -> None:
         """Close the socket-mode WebSocket and release resources."""
         if self._socket_handler:
-            await self._socket_handler.close_async()
+            await self._socket_handler.close_async()  # type: ignore[no-untyped-call]
         logger.info("Slack connector stopped")
 
     # ------------------------------------------------------------------
@@ -278,7 +278,11 @@ class SlackConnector(ConnectorBase):
         async def on_mention(event: dict[str, Any], client: Any) -> None:
             await self._on_event(event, client)
 
-        @self._app.action("")
+        # Bolt's @app.action("") only matches actions whose action_id is
+        # literally the empty string.  A regex catch-all ensures buttons and
+        # selects emitted by ActionBlock / FormBlock (which carry real
+        # action_ids like "approve", "submit_colour", etc.) are routed here.
+        @self._app.action(re.compile(r".*"))
         async def on_action(ack: Any, body: dict[str, Any], client: Any) -> None:
             await ack()
             request = self._normalize_action(body)
@@ -319,9 +323,7 @@ class SlackConnector(ConnectorBase):
     # Thinking indicator + response delivery
     # ------------------------------------------------------------------
 
-    async def _handle_with_thinking(
-        self, client: Any, request: NormalizedRequest
-    ) -> None:
+    async def _handle_with_thinking(self, client: Any, request: NormalizedRequest) -> None:
         """Post a thinking placeholder, call the orchestrator, then
         replace the placeholder with the real response.
 
@@ -344,16 +346,7 @@ class SlackConnector(ConnectorBase):
 
         response = await self._handler(request)
 
-        is_error = response.blocks and all(
-            isinstance(b, TextBlock)
-            and any(
-                phrase in (b.text or "")
-                for phrase in ("try again", "admin know", "rate-limited")
-            )
-            for b in response.blocks
-        )
-
-        if is_error and self._is_error_rate_limited(channel):
+        if response.error_category is not None and self._is_error_rate_limited(channel):
             logger.warning(
                 "Suppressing error response (rate limit)",
                 extra={"channel": channel, "thread_ts": thread_ts},
@@ -369,13 +362,9 @@ class SlackConnector(ConnectorBase):
         fallback_text = self._extract_fallback_text(response)
 
         if thinking_ts:
-            await self._update_message(
-                client, channel, thinking_ts, fallback_text, blocks
-            )
+            await self._update_message(client, channel, thinking_ts, fallback_text, blocks)
         else:
-            await self._post_message(
-                client, channel, thread_ts, fallback_text, blocks
-            )
+            await self._post_message(client, channel, thread_ts, fallback_text, blocks)
 
     def _is_error_rate_limited(self, channel: str) -> bool:
         """Check if error responses for this channel have exceeded the limit."""
@@ -385,9 +374,7 @@ class SlackConnector(ConnectorBase):
         timestamps.append(now)
         return len(timestamps) > self._ERROR_MAX_PER_WINDOW
 
-    async def _post_thinking(
-        self, client: Any, channel: str, thread_ts: str | None
-    ) -> str | None:
+    async def _post_thinking(self, client: Any, channel: str, thread_ts: str | None) -> str | None:
         """Post the transient thinking indicator and return its ``ts``.
 
         Args:
@@ -405,7 +392,7 @@ class SlackConnector(ConnectorBase):
                 text="Thinking…",
                 blocks=thinking_blocks(),
             )
-            return resp.get("ts")
+            return cast(str | None, resp.get("ts"))
         except Exception:
             logger.warning("Failed to post thinking indicator", exc_info=True)
             return None
@@ -636,10 +623,7 @@ class SlackConnector(ConnectorBase):
 
         if isinstance(block, ActionBlock):
             return _button_actions(
-                *[
-                    (btn.label, btn.action_id, btn.style, btn.value)
-                    for btn in block.actions
-                ]
+                *[(btn.label, btn.action_id, btn.style, btn.value) for btn in block.actions]
             )
 
         if isinstance(block, ConfirmBlock):
@@ -709,36 +693,34 @@ class SlackConnector(ConnectorBase):
                     }
                     for opt in field.options
                 ]
-                result.append({
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*{field.label}*{required_marker}",
-                    },
-                    "accessory": {
-                        "type": "static_select",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": f"Choose {field.label.lower()}…",
+                result.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*{field.label}*{required_marker}",
                         },
-                        "action_id": field.field_id,
-                        "options": options,
-                    },
-                })
+                        "accessory": {
+                            "type": "static_select",
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": f"Choose {field.label.lower()}…",
+                            },
+                            "action_id": field.field_id,
+                            "options": options,
+                        },
+                    }
+                )
             else:
                 hint = (
                     "Reply in this thread with your response."
                     if field.field_type in ("text", "multiline")
                     else f"_{field.field_type}_"
                 )
-                result.append(
-                    _section(f"*{field.label}*{required_marker}\n{hint}")
-                )
+                result.append(_section(f"*{field.label}*{required_marker}\n{hint}"))
 
         if block.submit_action_id:
-            result.append(
-                _button_actions(("Submit", block.submit_action_id, "primary", ""))
-            )
+            result.append(_button_actions(("Submit", block.submit_action_id, "primary", "")))
 
         return result
 

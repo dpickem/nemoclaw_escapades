@@ -24,7 +24,6 @@ def _make_response(
 
 
 class TestRepairResponse:
-
     def test_normal_response_not_repaired(self) -> None:
         result = repair_response(_make_response("Normal reply"))
         assert result.content == "Normal reply"
@@ -56,7 +55,7 @@ class TestRepairResponse:
         assert result.repair_reason is RepairReason.CONTENT_FILTER
         assert "filtered" in result.content.lower()
 
-    def test_none_content_treated_as_empty(self) -> None:
+    def test_empty_string_content_treated_as_empty(self) -> None:
         resp = _make_response("")
         resp.content = ""
         result = repair_response(resp)

@@ -176,5 +176,5 @@ If you work through the builds alongside the posts, you should be able to:
 - [`docs/deep_dives/openclaw_deep_dive.md`](../../deep_dives/openclaw_deep_dive.md)
 - [`docs/deep_dives/nemoclaw_deep_dive.md`](../../deep_dives/nemoclaw_deep_dive.md)
 - [`docs/deep_dives/hermes_deep_dive.md`](../../deep_dives/hermes_deep_dive.md)
-- [`docs/deep_dives/hermes_vs_openclaw_comparison.md`](../../deep_dives/hermes_vs_openclaw_comparison.md)
+- [`docs/deep_dives/hermes_vs_openclaw_vs_claude_code_comparison.md`](../../deep_dives/hermes_vs_openclaw_vs_claude_code_comparison.md)
 - [`docs/deep_dives/openshell_deep_dive.md`](../../deep_dives/openshell_deep_dive.md)
