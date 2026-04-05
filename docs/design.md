@@ -763,7 +763,7 @@ considered as the system matures.
 - **[Hosting & Infrastructure Deep Dive](deep_dives/hosting_deep_dive.md)** —
   NVIDIA Brev, DGX Spark, remote SSH, Base Command Platform; cost analysis,
   recommended architecture phases, and where the core agent loop runs.
-- **[Hermes vs OpenClaw Comparison](deep_dives/hermes_vs_openclaw_comparison.md)** —
+- **[Hermes vs OpenClaw vs Claude Code Comparison](deep_dives/hermes_vs_openclaw_vs_claude_code_comparison.md)** —
   side-by-side comparison of architecture, skills, memory, sandboxing,
   self-learning, and a per-milestone lift strategy for NemoClaw Escapades.
 - **[Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md)** — leaked

@@ -35,7 +35,7 @@ Every development milestone is documented as a blog post.
 - [OpenClaw Deep Dive](docs/deep_dives/openclaw_deep_dive.md) — gateway
   architecture, sandboxing, multi-agent routing, channels, skills, and
   applicability to this project.
-- [Hermes vs OpenClaw Comparison](docs/deep_dives/hermes_vs_openclaw_comparison.md) —
+- [Hermes vs OpenClaw vs Claude Code Comparison](docs/deep_dives/hermes_vs_openclaw_vs_claude_code_comparison.md) —
   side-by-side comparison of architecture, skills, memory, sandboxing,
   self-learning, and per-milestone lift strategy.
 - [Hosting & Infrastructure Deep Dive](docs/deep_dives/hosting_deep_dive.md) —
