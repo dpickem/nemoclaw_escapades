@@ -7,7 +7,7 @@
 # USER or ENTRYPOINT.  The actual application command is passed via
 # `-- <cmd>` on `openshell sandbox create`.
 #
-# For local development without OpenShell, use `make run` instead.
+# For local development without OpenShell, use `make run-local-dev` instead.
 
 FROM python:3.11-slim AS builder
 

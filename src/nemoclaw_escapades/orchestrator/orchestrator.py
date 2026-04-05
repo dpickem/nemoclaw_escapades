@@ -102,7 +102,8 @@ class Orchestrator:
         2. Call the inference backend (with transcript-repair retries
            for truncated output).
         3. Pass the result through the approval gate.
-        4. Append the assistant reply to thread history.
+        4. Commit the user + assistant turns to thread history (only after
+           a successful model call — failed requests leave history unchanged).
         5. Shape and return a platform-neutral ``RichResponse``.
 
         Every step is logged with structured JSON.  On failure the user
@@ -122,20 +123,19 @@ class Orchestrator:
         thread_key = request.thread_ts or request.request_id
 
         try:
-            messages = self._build_prompt(thread_key, request.text)
+            messages = self._messages_for_inference(thread_key, request.text)
+            turn_hist = self._history_with_user_message(thread_key, request.text)
 
             logger.info(
                 "Prompt built",
                 extra={
                     "request_id": request.request_id,
                     "thread_ts": thread_key,
-                    "history_length": len(self._thread_history[thread_key]),
+                    "history_length": len(turn_hist),
                 },
             )
 
-            content = await self._inference_with_repair(
-                messages, request.request_id
-            )
+            content = await self._inference_with_repair(messages, request.request_id)
 
             approval = await self._approval.check(
                 "respond", {"content": content, "request_id": request.request_id}
@@ -153,9 +153,7 @@ class Orchestrator:
                     "Please try rephrasing your request."
                 )
 
-            self._thread_history[thread_key].append(
-                {"role": "assistant", "content": content}
-            )
+            self._commit_turn(thread_key, request.text, content)
 
             total_ms = (time.monotonic() - start) * 1000
             logger.info(
@@ -225,14 +223,16 @@ class Orchestrator:
             original output, a concatenation of continuation segments,
             or a repair-layer fallback.
         """
-        accumulated_content = ""
+        base_messages = [dict(m) for m in messages]
+        prior_continuation_chunks: list[str] = []
 
         for attempt in range(1 + MAX_CONTINUATION_RETRIES):
+            call_messages = list(base_messages)
+            for chunk in prior_continuation_chunks:
+                call_messages.append({"role": "assistant", "content": chunk})
+                call_messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+
             if attempt > 0:
-                messages = messages + [
-                    {"role": "assistant", "content": accumulated_content},
-                    {"role": "user", "content": CONTINUATION_PROMPT},
-                ]
                 logger.info(
                     "Retrying with continuation prompt",
                     extra={
@@ -242,7 +242,7 @@ class Orchestrator:
                 )
 
             inference_request = InferenceRequest(
-                messages=messages,
+                messages=call_messages,
                 model=self._config.model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
@@ -266,51 +266,48 @@ class Orchestrator:
             if repair.was_repaired and not repair.needs_continuation:
                 return repair.content
 
-            accumulated_content += repair.content
-
             if not repair.needs_continuation:
-                return accumulated_content
+                return "".join(prior_continuation_chunks) + repair.content
+
+            prior_continuation_chunks.append(repair.content)
 
         logger.warning(
             "Exhausted continuation retries, returning partial content",
             extra={"request_id": request_id},
         )
-        return accumulated_content
+        return "".join(prior_continuation_chunks)
 
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
 
-    def _build_prompt(
-        self, thread_key: str, user_text: str
-    ) -> list[dict[str, str]]:
+    def _history_with_user_message(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
+        """Return thread history including *user_text*, with length cap applied.
+
+        Does not mutate ``_thread_history`` — used to build prompts before a
+        successful model round-trip commits the turn.
+        """
+        hist = list(self._thread_history[thread_key])
+        hist.append({"role": "user", "content": user_text})
+        max_len = self._config.max_thread_history
+        if len(hist) > max_len:
+            return hist[-max_len:]
+        return hist
+
+    def _messages_for_inference(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
         """Assemble the message list sent to the inference backend.
 
-        Appends *user_text* to the thread history, enforces the maximum
-        history length (dropping the oldest messages when exceeded), and
-        prepends the static system prompt.
-
-        Args:
-            thread_key: Thread identifier (``thread_ts`` or the
-                        message's own ``request_id`` for top-level
-                        messages).
-            user_text:  The user's message content.
-
-        Returns:
-            A list of ``{"role": ..., "content": ...}`` dicts in
-            OpenAI message format, starting with the system prompt.
+        Prepends the static system prompt to capped history + *user_text*.
+        History is not committed until ``_commit_turn`` runs after success.
         """
-        self._thread_history[thread_key].append(
-            {"role": "user", "content": user_text}
-        )
+        hist = self._history_with_user_message(thread_key, user_text)
+        return [{"role": "system", "content": self._system_prompt}] + hist
 
-        history = self._thread_history[thread_key]
-        max_len = self._config.max_thread_history
-        if len(history) > max_len:
-            self._thread_history[thread_key] = history[-max_len:]
-            history = self._thread_history[thread_key]
-
-        return [{"role": "system", "content": self._system_prompt}] + list(history)
+    def _commit_turn(self, thread_key: str, user_text: str, assistant_content: str) -> None:
+        """Persist user + assistant messages after a successful exchange."""
+        hist = self._history_with_user_message(thread_key, user_text)
+        hist.append({"role": "assistant", "content": assistant_content})
+        self._thread_history[thread_key] = hist
 
     # ------------------------------------------------------------------
     # Response shaping
@@ -335,9 +332,7 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _error_response(
-        request: NormalizedRequest, category: ErrorCategory
-    ) -> RichResponse:
+    def _error_response(request: NormalizedRequest, category: ErrorCategory) -> RichResponse:
         """Build a user-facing error message for a failed request.
 
         Each ``ErrorCategory`` maps to a distinct, non-technical message
@@ -361,15 +356,11 @@ class Orchestrator:
             ErrorCategory.RATE_LIMIT: (
                 "I'm being rate-limited right now. Please try again in a moment."
             ),
-            ErrorCategory.TIMEOUT: (
-                "The model didn't respond in time. Please try again."
-            ),
+            ErrorCategory.TIMEOUT: ("The model didn't respond in time. Please try again."),
             ErrorCategory.MODEL_ERROR: (
                 "Something went wrong with the model. Please try again shortly."
             ),
-            ErrorCategory.CONNECTOR_ERROR: (
-                "I had trouble communicating. Please try again."
-            ),
+            ErrorCategory.CONNECTOR_ERROR: ("I had trouble communicating. Please try again."),
             ErrorCategory.UNKNOWN: (
                 "Something unexpected happened. Please try again, and if the issue "
                 "persists, let the admin know."
@@ -378,7 +369,6 @@ class Orchestrator:
         return RichResponse(
             channel_id=request.channel_id,
             thread_ts=request.thread_ts,
-            blocks=[
-                TextBlock(text=messages.get(category, messages[ErrorCategory.UNKNOWN]))
-            ],
+            blocks=[TextBlock(text=messages.get(category, messages[ErrorCategory.UNKNOWN]))],
+            error_category=category,
         )

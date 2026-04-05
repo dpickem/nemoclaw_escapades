@@ -22,9 +22,7 @@ from nemoclaw_escapades.observability.logging import get_logger
 logger = get_logger("transcript_repair")
 
 # Sent to the user when the model returns an empty or whitespace-only message.
-EMPTY_RESPONSE_FALLBACK = (
-    "I wasn't able to generate a response. Could you rephrase?"
-)
+EMPTY_RESPONSE_FALLBACK = "I wasn't able to generate a response. Could you rephrase?"
 
 # Injected as a follow-up user message when the model's output is truncated
 # (finish_reason="length").  Mirrors Claude Code's continuation strategy:

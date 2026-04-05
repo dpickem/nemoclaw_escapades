@@ -4,7 +4,7 @@ Secrets (API keys, tokens) are injected by OpenShell at sandbox creation
 time.  The application code never reads a .env file — it only reads
 os.environ.  For local development without OpenShell, the Makefile
 exports .env vars into the shell before launching the process
-(see ``make run``).
+(see ``make run-local-dev``).
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def load_config() -> AppConfig:
     """Load configuration from environment variables.
 
     In the OpenShell sandbox, secrets are injected by the gateway.
-    For local dev, ``make run`` sources .env into the shell.
+    For local dev, ``make run-local-dev`` sources .env into the shell.
 
     Raises ValueError if required variables are missing.
     """

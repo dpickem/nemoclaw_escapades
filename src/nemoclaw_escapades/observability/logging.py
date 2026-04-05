@@ -37,6 +37,14 @@ class JSONFormatter(logging.Formatter):
             "thread_ts",
             "user_id",
             "channel_id",
+            "finish_reason",
+            "history_length",
+            "continuation_attempt",
+            "reason",
+            "channel",
+            "ts",
+            "content_length",
+            "action",
         }
         for key in extra_keys:
             value = getattr(record, key, None)

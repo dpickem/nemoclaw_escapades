@@ -1,9 +1,10 @@
 # NemoClaw Escapades Makefile
 #
 # Quick start:
-#   cp .env.example .env   # fill in real values
-#   make setup             # gateway + providers + sandbox (one-time)
-#   make run               # start the orchestrator locally
+#   cp .env.example .env        # fill in real values
+#   make setup                  # gateway + providers + sandbox (one-time)
+#   make run-local-dev          # start the orchestrator outside a sandbox
+#   make run-local-sandbox      # start the orchestrator inside the sandbox
 #
 # The sandbox runs inside OpenShell with proxy-mediated credential injection.
 # See policies/orchestrator.yaml for how Slack and inference credentials
@@ -44,9 +45,15 @@ install: ## Install the package and dev dependencies
 
 .PHONY: setup-gateway
 setup-gateway: ## Start the OpenShell gateway if not already running
-	@echo "Starting OpenShell gateway..."
-	@command -v openshell >/dev/null 2>&1 && openshell gateway start || \
-		echo "⚠  openshell CLI not found — skipping gateway setup."
+	@command -v openshell >/dev/null 2>&1 && { \
+		if openshell status >/dev/null 2>&1; then \
+			echo "✓ Gateway already running."; \
+		else \
+			echo "Starting OpenShell gateway..."; \
+			openshell gateway destroy --name openshell 2>/dev/null || true; \
+			openshell gateway start; \
+		fi; \
+	} || echo "⚠  openshell CLI not found — skipping gateway setup."
 
 # Inference provider must be 'nvidia' type (not 'generic') so that
 # openshell inference routing works via inference.local.
@@ -112,9 +119,12 @@ setup-sandbox: ## Build image in the cluster and create the orchestrator sandbox
 # this Makefile.  Make parses each VAR=value line as a Make variable, and
 # `export` pushes all Make variables into the environment of child processes.
 # The Python app reads them via os.environ — it never touches .env directly.
-.PHONY: run-local
-run-local: ## Run the orchestrator locally (exports .env into the process)
+.PHONY: run-local-dev
+run-local-dev: ## Run the orchestrator outside a sandbox (bare process, .env creds)
 	PYTHONPATH=src python -m nemoclaw_escapades.main
+
+.PHONY: run-local-sandbox
+run-local-sandbox: setup-gateway setup-secrets setup-sandbox ## (Re)create and run the orchestrator in the OpenShell sandbox
 
 # ---------------------------------------------------------------------------
 # Build

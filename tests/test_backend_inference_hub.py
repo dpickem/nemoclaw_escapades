@@ -52,7 +52,6 @@ def inference_request() -> InferenceRequest:
 
 
 class TestSuccessfulCalls:
-
     @respx.mock
     async def test_successful_completion(
         self, backend: InferenceHubBackend, inference_request: InferenceRequest
@@ -77,7 +76,6 @@ class TestSuccessfulCalls:
 
 
 class TestRetryLogic:
-
     @respx.mock
     async def test_retries_on_429(
         self, backend: InferenceHubBackend, inference_request: InferenceRequest
@@ -117,7 +115,6 @@ class TestRetryLogic:
 
 
 class TestErrorCategorization:
-
     @respx.mock
     async def test_401_raises_auth_error(
         self, backend: InferenceHubBackend, inference_request: InferenceRequest

@@ -100,9 +100,7 @@ class TestMultiTurnHistory:
         user_messages = [m for m in last_call.messages if m["role"] == "user"]
         assert len(user_messages) == 3
 
-    async def test_history_truncation(
-        self, mock_backend: MockBackend
-    ) -> None:
+    async def test_history_truncation(self, mock_backend: MockBackend) -> None:
         config = OrchestratorConfig(
             system_prompt_path="nonexistent.md",
             max_thread_history=4,
@@ -171,6 +169,7 @@ class TestErrorHandling:
         assert len(response.blocks) == 1
         assert isinstance(response.blocks[0], TextBlock)
         assert "time" in response.blocks[0].text.lower()
+        assert response.error_category is ErrorCategory.TIMEOUT
 
     async def test_unexpected_error_returns_generic_message(
         self, orchestrator_config: OrchestratorConfig
@@ -191,6 +190,7 @@ class TestErrorHandling:
         assert len(response.blocks) == 1
         assert isinstance(response.blocks[0], TextBlock)
         assert "unexpected" in response.blocks[0].text.lower()
+        assert response.error_category is ErrorCategory.UNKNOWN
 
     async def test_auth_error_returns_config_message(
         self, orchestrator_config: OrchestratorConfig
@@ -211,6 +211,46 @@ class TestErrorHandling:
         block = response.blocks[0]
         assert isinstance(block, TextBlock)
         assert "configuration" in block.text.lower()
+        assert response.error_category is ErrorCategory.AUTH_ERROR
+
+    async def test_failed_inference_does_not_leave_partial_history(
+        self, orchestrator_config: OrchestratorConfig
+    ) -> None:
+        class FlakyBackend(MockBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self._attempt = 0
+
+            async def complete(self, request: InferenceRequest) -> InferenceResponse:
+                self._attempt += 1
+                if self._attempt == 1:
+                    raise InferenceError("timeout", category=ErrorCategory.TIMEOUT)
+                return await super().complete(request)
+
+        orch = Orchestrator(FlakyBackend(), orchestrator_config)
+        thread = "thread-retry"
+        req1 = NormalizedRequest(
+            text="first",
+            user_id="U1",
+            channel_id="C1",
+            thread_ts=thread,
+            timestamp=0,
+            source="test",
+        )
+        await orch.handle(req1)
+        assert orch._thread_history[thread] == []
+
+        req2 = NormalizedRequest(
+            text="second",
+            user_id="U1",
+            channel_id="C1",
+            thread_ts=thread,
+            timestamp=1,
+            source="test",
+        )
+        await orch.handle(req2)
+        user_msgs = [m for m in orch._thread_history[thread] if m["role"] == "user"]
+        assert user_msgs == [{"role": "user", "content": "second"}]
 
 
 class TestTranscriptRepairIntegration:
@@ -232,10 +272,12 @@ class TestTranscriptRepairIntegration:
         self, orchestrator_config: OrchestratorConfig
     ) -> None:
         backend = MockBackend()
-        backend.set_response_sequence([
-            ("Part one...", "length"),
-            (" Part two.", "stop"),
-        ])
+        backend.set_response_sequence(
+            [
+                ("Part one...", "length"),
+                (" Part two.", "stop"),
+            ]
+        )
         orch = Orchestrator(backend, orchestrator_config)
         req = NormalizedRequest(
             text="test", user_id="U1", channel_id="C1", timestamp=0, source="test"
@@ -250,10 +292,12 @@ class TestTranscriptRepairIntegration:
         self, orchestrator_config: OrchestratorConfig
     ) -> None:
         backend = MockBackend()
-        backend.set_response_sequence([
-            ("Partial", "length"),
-            (" done.", "stop"),
-        ])
+        backend.set_response_sequence(
+            [
+                ("Partial", "length"),
+                (" done.", "stop"),
+            ]
+        )
         orch = Orchestrator(backend, orchestrator_config)
         req = NormalizedRequest(
             text="test", user_id="U1", channel_id="C1", timestamp=0, source="test"
@@ -262,16 +306,21 @@ class TestTranscriptRepairIntegration:
         continuation_call = backend.calls[1]
         user_msgs = [m for m in continuation_call.messages if m["role"] == "user"]
         assert any("resume" in m["content"].lower() for m in user_msgs)
+        assistant_msgs = [m for m in continuation_call.messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Partial"
 
     async def test_exhausted_continuations_returns_partial(
         self, orchestrator_config: OrchestratorConfig
     ) -> None:
         backend = MockBackend()
-        backend.set_response_sequence([
-            ("Part 1", "length"),
-            ("Part 2", "length"),
-            ("Part 3", "length"),
-        ])
+        backend.set_response_sequence(
+            [
+                ("Part 1", "length"),
+                ("Part 2", "length"),
+                ("Part 3", "length"),
+            ]
+        )
         orch = Orchestrator(backend, orchestrator_config)
         req = NormalizedRequest(
             text="test", user_id="U1", channel_id="C1", timestamp=0, source="test"
@@ -300,9 +349,7 @@ class TestApprovalGateIntegration:
         self, mock_backend: MockBackend, orchestrator_config: OrchestratorConfig
     ) -> None:
         class DenyGate(ApprovalGate):
-            async def check(
-                self, action: str, context: dict[str, object]
-            ) -> ApprovalResult:
+            async def check(self, action: str, context: dict[str, object]) -> ApprovalResult:
                 return ApprovalResult(approved=False, reason="policy_violation")
 
         orch = Orchestrator(mock_backend, orchestrator_config, approval=DenyGate())
@@ -318,14 +365,10 @@ class TestApprovalGateIntegration:
         self, mock_backend: MockBackend, orchestrator_config: OrchestratorConfig
     ) -> None:
         class ConditionalGate(ApprovalGate):
-            async def check(
-                self, action: str, context: dict[str, object]
-            ) -> ApprovalResult:
+            async def check(self, action: str, context: dict[str, object]) -> ApprovalResult:
                 return ApprovalResult(approved=True, reason="allowed")
 
-        orch = Orchestrator(
-            mock_backend, orchestrator_config, approval=ConditionalGate()
-        )
+        orch = Orchestrator(mock_backend, orchestrator_config, approval=ConditionalGate())
         req = NormalizedRequest(
             text="test", user_id="U1", channel_id="C1", timestamp=0, source="test"
         )

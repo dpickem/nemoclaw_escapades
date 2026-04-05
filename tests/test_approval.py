@@ -27,9 +27,7 @@ class TestApprovalGateInterface:
 
     async def test_custom_gate_can_deny(self) -> None:
         class DenyAll(ApprovalGate):
-            async def check(
-                self, action: str, context: dict[str, object]
-            ) -> ApprovalResult:
+            async def check(self, action: str, context: dict[str, object]) -> ApprovalResult:
                 return ApprovalResult(approved=False, reason="denied_by_policy")
 
         gate = DenyAll()

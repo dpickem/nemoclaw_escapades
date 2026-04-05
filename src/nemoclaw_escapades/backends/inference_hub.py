@@ -165,9 +165,7 @@ class InferenceHubBackend(BackendBase):
     # Single-attempt HTTP call
     # ------------------------------------------------------------------
 
-    async def _send_request(
-        self, payload: dict[str, object], model: str
-    ) -> InferenceResponse:
+    async def _send_request(self, payload: dict[str, object], model: str) -> InferenceResponse:
         """Execute one HTTP POST to ``/chat/completions``.
 
         This method represents a *single* network attempt.  Tenacity
@@ -262,7 +260,7 @@ class InferenceHubBackend(BackendBase):
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         if isinstance(exc, _RetryableError) and exc.retry_after is not None:
             return exc.retry_after
-        return self._default_wait(retry_state)  # type: ignore[return-value]
+        return self._default_wait(retry_state)
 
     @staticmethod
     def _log_retry(retry_state: RetryCallState) -> None:
