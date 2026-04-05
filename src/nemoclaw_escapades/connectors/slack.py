@@ -278,6 +278,10 @@ class SlackConnector(ConnectorBase):
         async def on_mention(event: dict[str, Any], client: Any) -> None:
             await self._on_event(event, client)
 
+        # Bolt's @app.action("") only matches actions whose action_id is
+        # literally the empty string.  A regex catch-all ensures buttons and
+        # selects emitted by ActionBlock / FormBlock (which carry real
+        # action_ids like "approve", "submit_colour", etc.) are routed here.
         @self._app.action(re.compile(r".*"))
         async def on_action(ack: Any, body: dict[str, Any], client: Any) -> None:
             await ack()
