@@ -1295,6 +1295,119 @@ inter-sandbox messaging a standard OpenShell capability.
 
 ---
 
+## 17  Off-the-Shelf Library Evaluation
+
+Before building a custom broker we evaluated several existing libraries for
+async cross-host agent communication. The NMB design has specific requirements
+that constrain library choice:
+
+- **WebSocket transport through an OpenShell proxy** (`messages.local:9876`)
+- **Proxy-enforced identity** via `X-Sandbox-ID` header on connect
+- **Point-to-point send, request-reply, pub/sub channels, streaming** in one protocol
+- **Full audit DB** with SQLite + FTS5 for the training flywheel
+- **Custom broker logic**: routing, pending-request tracking, per-sandbox limits
+- **Tiny footprint**: runs alongside the OpenShell gateway on a single host
+
+### 17.1  Library Comparison
+
+| Library | Transport | Messaging Model | Verdict |
+|---------|-----------|-----------------|---------|
+| **Google A2A SDK** (`a2a-sdk` v1.0.0-alpha) | JSON-RPC, HTTP, gRPC — no WebSocket | Task-centric (send task, get result). No fire-and-forget, no pub/sub channels, no streaming chunks, no audit DB. | **Does not fit.** Wrong messaging model. Possible future interop adapter. |
+| **MCP Streamable HTTP** | HTTP + SSE (server→client only) | Tool-oriented (expose tools, call them). Not a messaging bus — no point-to-point, no pub/sub, no peer-to-peer. | **Wrong abstraction entirely.** |
+| **AutoGen Distributed Runtime** (`autogen-ext[grpc]`) | gRPC (HTTP/2) | Closest conceptual fit — gRPC broker routing messages between agent workers. But: gRPC is harder to proxy through OpenShell (HTTP/2 framing), tightly coupled to AutoGen's agent model, no audit DB, no `X-Sandbox-ID` identity. | **Too coupled, wrong transport.** |
+| **KiboServe** (`kiboup` v0.2.1) | HTTP, MCP, A2A | Agent deployment framework, not a message bus. No broker, no inter-sandbox routing, no pub/sub. Requires Python 3.13+ (our baseline is 3.11). | **Wrong layer.** |
+| **FastMCP** | HTTP | OpenAPI-to-MCP bridge. Not relevant to inter-agent messaging. | **Not applicable.** |
+| **async-openai** | HTTP | OpenAI API client. Not relevant. | **Not applicable.** |
+
+### 17.2  Decision
+
+Build the custom asyncio WebSocket broker as specified. The implementation is
+intentionally minimal (~500 lines for the broker, ~300 for the client). The
+`websockets` library handles the WebSocket protocol; `aiosqlite` handles async
+SQLite; `alembic` handles migrations. No framework adoption needed.
+
+**Future consideration:** Once NMB is working, add an optional A2A-compatible
+agent card and task mapping layer so external agents can interop via the A2A
+protocol. This is a thin adapter on top of NMB, not a replacement.
+
+---
+
+## 18  Implementation Plan
+
+### 18.1  Package Layout
+
+```
+src/nemoclaw_escapades/nmb/
+├── __init__.py               # Public exports
+├── models.py                 # Wire protocol types (dataclasses + enums)
+├── broker.py                 # Asyncio WebSocket broker server
+├── client.py                 # Async MessageBus client
+├── sync.py                   # Synchronous wrapper
+├── cli.py                    # nmb-client CLI (argparse)
+└── audit/
+    ├── __init__.py
+    ├── db.py                 # AuditDB class (aiosqlite)
+    ├── alembic.ini
+    └── alembic/
+        ├── env.py
+        ├── script.py.mako
+        └── versions/
+            └── 001_initial_schema.py
+```
+
+### 18.2  Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `websockets` | `>=13.0` | Broker + client WebSocket transport |
+| `aiosqlite` | `>=0.20.0` | Async SQLite for audit DB |
+| `alembic` | `>=1.13.0` | DB migrations for audit schema |
+
+### 18.3  Build Phases
+
+**Phase 1 — Wire protocol types** (`nmb/models.py`):
+`Op`, `ErrorCode`, `DeliveryStatus` enums; `NMBMessage` and `PendingRequest`
+dataclasses; `parse_frame()` / `serialize_frame()` helpers; per-op validation.
+
+**Phase 2 — Audit DB with Alembic** (`nmb/audit/`):
+`AuditDB` class wrapping `aiosqlite` (WAL mode, log/query/export methods).
+Alembic migration `001_initial_schema` creates `messages` table, `connections`
+table, five indexes, and the FTS5 virtual table.
+
+**Phase 3 — Broker** (`nmb/broker.py`):
+`NMBBroker` class: WebSocket server, connection registry, message router,
+channel manager, pending-request tracker with timeout tasks, identity
+enforcement, disconnect cleanup, configurable limits. Runnable via
+`python -m nemoclaw_escapades.nmb.broker`.
+
+**Phase 4 — Async client** (`nmb/client.py`):
+`MessageBus` class: `connect`, `send`, `request` (Future-based reply),
+`reply`, `subscribe` (AsyncIterator), `publish`, `stream`, `listen`
+(AsyncIterator), `close`. Background receive task dispatches to futures and
+queues.
+
+**Phase 5 — Sync wrapper** (`nmb/sync.py`):
+Thread-backed synchronous `MessageBus` mirroring the async API. Methods
+submit coroutines via `run_coroutine_threadsafe`.
+
+**Phase 6 — CLI tool** (`nmb/cli.py`):
+`nmb-client` entry point (registered in `pyproject.toml`). Subcommands:
+`send`, `request`, `listen`, `subscribe`, `publish`. Uses sync wrapper.
+Sandbox ID from `$NMB_SANDBOX_ID` or `--sandbox-id`.
+
+**Phase 7 — Tests + policy + wiring**:
+`test_nmb_models`, `test_nmb_audit`, `test_nmb_broker`, `test_nmb_client`.
+`policies/nmb-enabled.yaml` template. Makefile `run-broker` target.
+
+### 18.4  Deferred (not in v1)
+
+- Multi-host TLS/auth (sections 3.2–3.4, 13.2–13.4)
+- Coordinator extensions (section 14: `task.fork`, `peers.list`, task CRUD)
+- Systemd service files
+- Integration with orchestrator `main.py` (separate PR)
+
+---
+
 ### Sources
 
 - [Orchestrator Design](orchestrator_design.md) (coordinator mode, task store, permission model)

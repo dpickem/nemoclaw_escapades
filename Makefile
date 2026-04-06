@@ -126,6 +126,11 @@ run-local-dev: ## Run the orchestrator outside a sandbox (bare process, .env cre
 .PHONY: run-local-sandbox
 run-local-sandbox: setup-gateway setup-secrets setup-sandbox ## (Re)create and run the orchestrator in the OpenShell sandbox
 
+.PHONY: run-broker
+run-broker: ## Run the NMB broker locally
+	PYTHONPATH=src python -m nemoclaw_escapades.nmb.broker \
+		--audit-db .nmb-audit.db
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
@@ -150,6 +155,10 @@ test: ## Run the test suite
 lint: ## Run linters and type checks
 	ruff check src/ tests/
 	ruff format --check src/ tests/
+	mypy src/
+
+.PHONY: typecheck
+typecheck: ## Run mypy type checks
 	mypy src/
 
 .PHONY: fmt

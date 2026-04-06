@@ -1,0 +1,20 @@
+# NMB network policy — add to any sandbox that participates in NMB messaging.
+#
+# Grants access to messages.local:9876 (resolved by the OpenShell proxy
+# to the NMB broker on the host).  Pair with the sandbox's existing
+# network policy (e.g. policies/orchestrator.yaml).
+version: 1
+
+network_policies:
+  nmb:
+    name: nemoclaw-message-bus
+    endpoints:
+      - host: messages.local
+        port: 9876
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/nmb-client
+      - path: /usr/bin/python3
