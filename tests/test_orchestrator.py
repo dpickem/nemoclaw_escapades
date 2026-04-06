@@ -238,7 +238,7 @@ class TestErrorHandling:
             source="test",
         )
         await orch.handle(req1)
-        assert orch._thread_history[thread] == []
+        assert orch._prompt.thread_history[thread] == []
 
         req2 = NormalizedRequest(
             text="second",
@@ -249,7 +249,7 @@ class TestErrorHandling:
             source="test",
         )
         await orch.handle(req2)
-        user_msgs = [m for m in orch._thread_history[thread] if m["role"] == "user"]
+        user_msgs = [m for m in orch._prompt.thread_history[thread] if m["role"] == "user"]
         assert user_msgs == [{"role": "user", "content": "second"}]
 
 
