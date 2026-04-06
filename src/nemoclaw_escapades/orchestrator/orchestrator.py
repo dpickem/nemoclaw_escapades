@@ -39,7 +39,6 @@ never crashes on a failed request.
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import OrchestratorConfig, load_system_prompt
@@ -53,6 +52,7 @@ from nemoclaw_escapades.models.types import (
 )
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.orchestrator.approval import ApprovalGate, AutoApproval
+from nemoclaw_escapades.orchestrator.prompt_builder import PromptBuilder
 from nemoclaw_escapades.orchestrator.transcript_repair import (
     CONTINUATION_PROMPT,
     MAX_CONTINUATION_RETRIES,
@@ -87,10 +87,10 @@ class Orchestrator:
         self._backend = backend
         self._config = config
         self._approval = approval or AutoApproval()
-        self._system_prompt = load_system_prompt(config.system_prompt_path)
-
-        # thread_ts → list of {"role": ..., "content": ...}
-        self._thread_history: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self._prompt = PromptBuilder(
+            system_prompt=load_system_prompt(config.system_prompt_path),
+            max_thread_history=config.max_thread_history,
+        )
 
     async def handle(self, request: NormalizedRequest) -> RichResponse:
         """Process a normalised request through the full agent loop.
@@ -123,15 +123,14 @@ class Orchestrator:
         thread_key = request.thread_ts or request.request_id
 
         try:
-            messages = self._messages_for_inference(thread_key, request.text)
-            turn_hist = self._history_with_user_message(thread_key, request.text)
+            messages = self._prompt.messages_for_inference(thread_key, request.text)
 
             logger.info(
                 "Prompt built",
                 extra={
                     "request_id": request.request_id,
                     "thread_ts": thread_key,
-                    "history_length": len(turn_hist),
+                    "history_length": len(messages) - 1,
                 },
             )
 
@@ -153,7 +152,7 @@ class Orchestrator:
                     "Please try rephrasing your request."
                 )
 
-            self._commit_turn(thread_key, request.text, content)
+            self._prompt.commit_turn(thread_key, request.text, content)
 
             total_ms = (time.monotonic() - start) * 1000
             logger.info(
@@ -276,38 +275,6 @@ class Orchestrator:
             extra={"request_id": request_id},
         )
         return "".join(prior_continuation_chunks)
-
-    # ------------------------------------------------------------------
-    # Prompt construction
-    # ------------------------------------------------------------------
-
-    def _history_with_user_message(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
-        """Return thread history including *user_text*, with length cap applied.
-
-        Does not mutate ``_thread_history`` — used to build prompts before a
-        successful model round-trip commits the turn.
-        """
-        hist = list(self._thread_history[thread_key])
-        hist.append({"role": "user", "content": user_text})
-        max_len = self._config.max_thread_history
-        if len(hist) > max_len:
-            return hist[-max_len:]
-        return hist
-
-    def _messages_for_inference(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
-        """Assemble the message list sent to the inference backend.
-
-        Prepends the static system prompt to capped history + *user_text*.
-        History is not committed until ``_commit_turn`` runs after success.
-        """
-        hist = self._history_with_user_message(thread_key, user_text)
-        return [{"role": "system", "content": self._system_prompt}] + hist
-
-    def _commit_turn(self, thread_key: str, user_text: str, assistant_content: str) -> None:
-        """Persist user + assistant messages after a successful exchange."""
-        hist = self._history_with_user_message(thread_key, user_text)
-        hist.append({"role": "assistant", "content": assistant_content})
-        self._thread_history[thread_key] = hist
 
     # ------------------------------------------------------------------
     # Response shaping
