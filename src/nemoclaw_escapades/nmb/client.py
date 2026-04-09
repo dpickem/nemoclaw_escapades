@@ -114,12 +114,19 @@ class MessageBus:
         if self._ws:
             await self._ws.close()
             self._ws = None
-        # Wake up any blocked futures
+        self._fail_pending_futures()
+        logger.info("Disconnected from NMB broker")
+
+    def _fail_pending_futures(self) -> None:
+        """Wake all pending request futures with ``NMBConnectionError``.
+
+        Called both from ``close()`` and from the ``_receive_loop``
+        ``finally`` block so futures never hang after a connection loss.
+        """
         for fut in self._pending_futures.values():
             if not fut.done():
                 fut.set_exception(NMBConnectionError("Connection closed"))
         self._pending_futures.clear()
-        logger.info("Disconnected from NMB broker")
 
     @property
     def _conn(self) -> ClientConnection:
@@ -142,6 +149,9 @@ class MessageBus:
         Deliver frames are routed to pending futures (request-reply),
         channel queues (subscriptions), or the general listen queue.
         Error and timeout frames are routed to their matching futures.
+
+        On unexpected connection loss, all pending request futures are
+        woken with ``NMBConnectionError`` so callers don't hang.
         """
         try:
             async for raw in self._conn:
@@ -166,6 +176,8 @@ class MessageBus:
                 logger.warning("Connection to broker lost")
         except asyncio.CancelledError:
             pass
+        finally:
+            self._fail_pending_futures()
 
     def _dispatch_deliver(self, msg: NMBMessage) -> None:
         """Route a delivered message to the correct future or queue.
@@ -264,7 +276,11 @@ class MessageBus:
         fut: asyncio.Future[NMBMessage] = asyncio.get_running_loop().create_future()
         self._pending_futures[msg.id] = fut
         await self._conn.send(serialize_frame(msg))
-        return await fut
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout + 5.0)
+        except TimeoutError:
+            self._pending_futures.pop(msg.id, None)
+            raise
 
     async def reply(self, original: NMBMessage, type: str, payload: dict[str, Any]) -> None:
         """Reply to a received request message.

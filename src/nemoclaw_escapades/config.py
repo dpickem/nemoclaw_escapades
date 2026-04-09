@@ -26,6 +26,16 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 2048
 
+# ── NMB broker defaults ───────────────────────────────────────────────
+
+DEFAULT_NMB_HOST = "0.0.0.0"
+DEFAULT_NMB_PORT = 9876
+DEFAULT_NMB_AUDIT_DB_PATH = "~/.nemoclaw/nmb/audit.db"
+DEFAULT_NMB_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+DEFAULT_NMB_MAX_PENDING_PER_SANDBOX = 100
+DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_NMB_MAX_CHANNELS_PER_SANDBOX = 50
+
 
 @dataclass
 class SlackConfig:
@@ -55,6 +65,31 @@ class OrchestratorConfig:
 class LogConfig:
     level: str = DEFAULT_LOG_LEVEL
     log_file: str | None = None
+
+
+@dataclass
+class BrokerConfig:
+    """Runtime configuration for the NMB broker.
+
+    Attributes:
+        host: Bind address.
+        port: Bind port.
+        audit_db_path: Path to the SQLite audit database.
+        persist_payloads: Whether to store full payloads in the audit DB.
+        max_message_size: Maximum allowed payload size in bytes.
+        max_pending_per_sandbox: Maximum in-flight requests per sandbox.
+        default_request_timeout: Default timeout for request-reply in seconds.
+        max_channels_per_sandbox: Maximum channel subscriptions per sandbox.
+    """
+
+    host: str = DEFAULT_NMB_HOST
+    port: int = DEFAULT_NMB_PORT
+    audit_db_path: str = DEFAULT_NMB_AUDIT_DB_PATH
+    persist_payloads: bool = True
+    max_message_size: int = DEFAULT_NMB_MAX_MESSAGE_SIZE
+    max_pending_per_sandbox: int = DEFAULT_NMB_MAX_PENDING_PER_SANDBOX
+    default_request_timeout: float = DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT
+    max_channels_per_sandbox: int = DEFAULT_NMB_MAX_CHANNELS_PER_SANDBOX
 
 
 @dataclass

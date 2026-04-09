@@ -1319,7 +1319,87 @@ that constrain library choice:
 | **FastMCP** | HTTP | OpenAPI-to-MCP bridge. Not relevant to inter-agent messaging. | **Not applicable.** |
 | **async-openai** | HTTP | OpenAI API client. Not relevant. | **Not applicable.** |
 
-### 17.2  Decision
+### 17.2  Per-Library Analysis
+
+#### Why each feature is required
+
+| Feature | Why NMB needs it |
+|---------|------------------|
+| **WebSocket transport** | OpenShell's proxy intercepts all outbound connections and enforces network policies by hostname — this is the same mechanism that gates `inference.local`. WebSocket upgrades over HTTP/1.1 are standard HTTP requests that the proxy can inspect, policy-check, and relay (including `X-Sandbox-ID` injection). gRPC's HTTP/2 multiplexed binary framing is harder for the proxy to intercept correctly (see section 4). Persistent bidirectional connections also avoid per-message handshake overhead. |
+| **OpenShell proxy compatible** | Sandboxes cannot open arbitrary network connections. All traffic exits through the OpenShell proxy, which resolves `messages.local` and injects credentials. The transport must work within this constraint. |
+| **Fire-and-forget send** | Task dispatch (`task.assign`), progress updates (`task.progress`), and cancellations (`task.cancel`) are one-way signals where the sender does not need a reply. Forcing everything through request-reply adds unnecessary latency and complexity. |
+| **Request-reply** | Code review (`review.request` / `review.feedback`) and clarification flows require correlated responses. The caller blocks until the target replies, enabling synchronous coordination patterns documented in section 10. |
+| **Pub/sub channels** | Progress streaming (section 10, pattern 3) needs a channel model: a coding sandbox publishes status updates to `progress.coding-1`, and any number of observers (orchestrator, UI, monitoring) can subscribe independently without the publisher knowing who is listening. |
+| **Ordered streaming** | Large diffs and context snapshots can exceed reasonable single-message sizes. Ordered chunk delivery with sequence numbers and a `done` flag lets agents stream results incrementally while preserving ordering guarantees. |
+| **Interrupt / redirect** | The orchestrator must be able to redirect a sub-agent mid-task (`task.redirect`) without waiting for it to finish. This requires delivering a message to a sandbox that is currently busy processing another task — a capability that file-based coordination lacks entirely. |
+| **Proxy-enforced identity** | The broker must trust that `from_sandbox` is authentic. The OpenShell proxy adds `X-Sandbox-ID` to every outbound request from a sandbox; the broker overwrites the sender field with this header. No sandbox can impersonate another. |
+| **Audit DB (full payloads)** | Every inter-sandbox message is a structured trace of agent coordination — task delegations, diffs, review feedback. Persisting full payloads feeds the training flywheel (SFT/DPO data generation) and enables post-hoc debugging of multi-agent interactions. |
+| **FTS5 payload search** | Finding all review comments mentioning a specific function, or all task assignments containing a file path, requires full-text search over payload content. SQLite FTS5 provides this without an external search engine. |
+| **Cross-sandbox isolation** | Each agent runs in its own OpenShell sandbox with independent filesystem, credentials, and network policy. The bus must route messages between isolated containers without sharing process memory or capabilities. |
+| **Custom routing logic** | The broker must enforce per-sandbox limits, track pending requests for timeout, manage channel subscriptions, and overwrite sender identity. Off-the-shelf brokers either lack these hooks or require deep customisation to add them. |
+| **Per-sandbox limits** | Runaway agents must not be able to flood the broker or exhaust resources. Per-sandbox caps on pending requests (100), channel subscriptions (50), and message size (10 MB) provide back-pressure. |
+| **Python 3.11 compatible** | The project baseline is Python 3.11 (set in `pyproject.toml`). Libraries requiring 3.13+ are incompatible with the existing sandbox images and CI. |
+| **Zero extra binary deps** | The broker runs alongside the OpenShell gateway on lightweight hosts. Avoiding C extensions (gRPC, protobuf) simplifies installation in sandbox images and reduces the attack surface. |
+
+#### Feature comparison matrix
+
+| Feature | NMB requirement | A2A SDK | MCP Streamable HTTP | AutoGen gRPC | KiboServe | FastMCP |
+|---------|:-:|:-:|:-:|:-:|:-:|:-:|
+| **WebSocket transport** | Required | No (JSON-RPC/HTTP/gRPC) | No (HTTP+SSE) | No (gRPC/HTTP/2) | No (HTTP) | No (HTTP) |
+| **OpenShell proxy compatible** | Required | Unknown | No | No (HTTP/2 framing) | No | No |
+| **Fire-and-forget send** | Required | No | No | Yes | No | No |
+| **Request-reply** | Required | Yes (task lifecycle) | No | Yes | No | No |
+| **Pub/sub channels** | Required | No | No (SSE is server-push only) | Yes (TopicId) | No | No |
+| **Ordered streaming** | Required | No | SSE (server-to-client only) | No | No | No |
+| **Interrupt / redirect** | Required | No | No | No | No | No |
+| **Proxy-enforced identity** | Required | No | No | No | No | No |
+| **Audit DB (full payloads)** | Required | No | No | No (OpenTelemetry traces only) | No | No |
+| **FTS5 payload search** | Required | No | No | No | No | No |
+| **Cross-sandbox isolation** | Required | N/A (in-process) | N/A (in-process) | No (shared process) | N/A | N/A |
+| **Custom routing logic** | Required | No (fixed task model) | No (tool invocation only) | Partial (topic routing) | No | No |
+| **Per-sandbox limits** | Required | No | No | Configurable message size | No | No |
+| **Python 3.11 compatible** | Required | Yes | Yes | Yes | No (3.13+) | Yes |
+| **Zero extra binary deps** | Desired | Yes (pure Python) | Yes | No (gRPC C extension) | Yes | Yes |
+| **Maturity** | — | Alpha (v1.0.0-alpha) | Stable | Stable | Early (v0.2.1) | Stable |
+| **Footprint** | Minimal | Medium | Small | Large (gRPC + protobuf) | Medium | Small |
+
+#### Per-library notes
+
+**Google A2A SDK** (`a2a-sdk` v1.0.0-alpha) — Designed for inter-organization
+agent interop: agent cards, task lifecycle, JSON-RPC/HTTP/gRPC transports.  The
+protocol is task-centric (send a task, get a result) — it lacks fire-and-forget
+send, pub/sub channel subscriptions, ordered streaming, and the
+interrupt/redirect patterns NMB needs.  No WebSocket transport, no audit DB, no
+proxy-enforced identity.  However, NMB message types could be made
+A2A-compatible in a future version as a thin adapter for external interop.
+
+**MCP Streamable HTTP** — Tool-oriented abstraction (expose tools, call them).
+Not a messaging bus: no point-to-point routing, no pub/sub, no request-reply
+between peers.  SSE streaming is server-to-client only.  Designed for IDE
+integrations and tool discovery, not inter-sandbox coordination.
+
+**AutoGen Distributed Runtime** (`autogen-ext[grpc]`) — Closest conceptual fit:
+a gRPC broker routing messages between agent workers with topic-based pub/sub.
+But: (1) gRPC uses HTTP/2 framing which is harder to proxy through OpenShell
+than WebSocket (see section 4), (2) tightly coupled to AutoGen's agent model
+(`@message_handler`, `AgentId`, `TopicId`) — using it without AutoGen agents
+requires extensive wrapping, (3) no audit DB (only OpenTelemetry traces, no
+full payload persistence), (4) no `X-Sandbox-ID` identity model, (5) requires
+the gRPC C extension (heavier dependency chain).  Would require forking or
+wrapping so heavily that a custom broker is simpler and more maintainable.
+
+**KiboServe** (`kiboup` v0.2.1) — Agent deployment framework, not a message
+bus.  Provides HTTP/MCP/A2A endpoints for a single agent with discovery and
+observability via KiboStudio.  No broker, no inter-sandbox routing, no pub/sub.
+Python 3.13+ requirement conflicts with our 3.11 baseline.  Useful layer for
+exposing agents to external consumers, but does not solve the inter-sandbox
+messaging problem.
+
+**FastMCP / async-openai** — OpenAPI-to-MCP bridge and OpenAI HTTP client
+respectively.  Neither addresses inter-agent messaging, message routing, or
+sandbox coordination.
+
+### 17.3  Decision
 
 Build the custom asyncio WebSocket broker as specified. The implementation is
 intentionally minimal (~500 lines for the broker, ~300 for the client). The
@@ -1334,15 +1414,49 @@ protocol. This is a thin adapter on top of NMB, not a replacement.
 
 ## 18  Implementation Plan
 
-### 18.1  Package Layout
+### 18.1  Architecture Overview
+
+```mermaid
+flowchart TB
+  subgraph broker_proc [NMB Broker Process]
+    WS[WebSocket Server port 9876]
+    ConnReg[Connection Registry]
+    MsgRouter[Message Router]
+    ChanMgr[Channel Manager]
+    PendReq[Pending Requests]
+    AuditDB["Audit DB — SQLite/Alembic"]
+  end
+
+  subgraph sandbox_a [Sandbox A]
+    AgentA[Agent]
+    ClientA[nmb client async]
+  end
+
+  subgraph sandbox_b [Sandbox B]
+    AgentB[Agent]
+    ClientB[nmb client async]
+  end
+
+  AgentA <--> ClientA
+  AgentB <--> ClientB
+  ClientA <-->|"messages.local:9876"| WS
+  ClientB <-->|"messages.local:9876"| WS
+  WS --> ConnReg
+  WS --> MsgRouter
+  WS --> ChanMgr
+  WS --> PendReq
+  MsgRouter --> AuditDB
+```
+
+### 18.2  Package Layout
 
 ```
 src/nemoclaw_escapades/nmb/
-├── __init__.py               # Public exports
+├── __init__.py               # Public exports (MessageBus, NMBConnectionError, models)
 ├── models.py                 # Wire protocol types (dataclasses + enums)
 ├── broker.py                 # Asyncio WebSocket broker server
 ├── client.py                 # Async MessageBus client
-├── sync.py                   # Synchronous wrapper
+├── sync.py                   # Synchronous wrapper (pump-and-sentinel pattern)
 ├── cli.py                    # nmb-client CLI (argparse)
 └── audit/
     ├── __init__.py
@@ -1355,7 +1469,11 @@ src/nemoclaw_escapades/nmb/
             └── 001_initial_schema.py
 ```
 
-### 18.2  Dependencies
+Supporting files: `policies/nmb-enabled.yaml` (OpenShell policy template),
+`pyproject.toml` (dependencies + `nmb-client` entry point),
+`Makefile` (`run-broker` and `typecheck` targets).
+
+### 18.3  Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
@@ -1363,43 +1481,97 @@ src/nemoclaw_escapades/nmb/
 | `aiosqlite` | `>=0.20.0` | Async SQLite for audit DB |
 | `alembic` | `>=1.13.0` | DB migrations for audit schema |
 
-### 18.3  Build Phases
+### 18.4  Build Phases
 
 **Phase 1 — Wire protocol types** (`nmb/models.py`):
-`Op`, `ErrorCode`, `DeliveryStatus` enums; `NMBMessage` and `PendingRequest`
-dataclasses; `parse_frame()` / `serialize_frame()` helpers; per-op validation.
+
+- `Op` enum: send, request, reply, subscribe, unsubscribe, publish, stream,
+  deliver, ack, error, timeout
+- `ErrorCode` enum: TARGET_OFFLINE, TARGET_UNKNOWN, REQUEST_TIMEOUT,
+  PAYLOAD_TOO_LARGE, RATE_LIMITED, CHANNEL_FULL, INVALID_FRAME
+- `DeliveryStatus` enum: delivered, error, timeout
+- `NMBMessage` dataclass with all wire fields; `PendingRequest` dataclass
+- `parse_frame(raw) -> NMBMessage` / `serialize_frame(msg) -> str`
+- Per-op required-field validation; 10 MB payload size check
 
 **Phase 2 — Audit DB with Alembic** (`nmb/audit/`):
-`AuditDB` class wrapping `aiosqlite` (WAL mode, log/query/export methods).
-Alembic migration `001_initial_schema` creates `messages` table, `connections`
-table, five indexes, and the FTS5 virtual table.
+
+- `AuditDB` class wrapping `aiosqlite` (WAL mode):
+  `log_message()`, `log_connection()`, `log_disconnection()`,
+  `query()`, `export_jsonl()`
+- Auto-runs `alembic upgrade head` on `open()` (subprocess)
+- Alembic migration `001_initial_schema`: `messages` table, `connections`
+  table, five indexes, FTS5 virtual table `messages_fts`
 
 **Phase 3 — Broker** (`nmb/broker.py`):
-`NMBBroker` class: WebSocket server, connection registry, message router,
-channel manager, pending-request tracker with timeout tasks, identity
-enforcement, disconnect cleanup, configurable limits. Runnable via
-`python -m nemoclaw_escapades.nmb.broker`.
+
+- `NMBBroker` class using `BrokerConfig` (from `config.py`)
+- `websockets.serve()` with `process_request` to extract `X-Sandbox-ID`
+- Connection registry: `dict[str, ServerConnection]`
+- Channel manager: `dict[str, set[str]]`
+- Pending requests: `dict[str, TrackedPending]` with `asyncio.Task` timeouts
+- Dispatch on `msg.op`: send → route + ACK; request → route + track + timeout;
+  reply → route to requester + cancel timeout; subscribe/unsubscribe → channel
+  management; publish → fan-out; stream → forward
+- Identity enforcement: overwrite `from_sandbox` on every inbound frame
+- Disconnect: unregister, publish `sandbox.shutdown`, expire pending
+- `__main__` entry point: `--port`, `--audit-db`, `--health`, `--query`,
+  `--export-jsonl`
 
 **Phase 4 — Async client** (`nmb/client.py`):
-`MessageBus` class: `connect`, `send`, `request` (Future-based reply),
-`reply`, `subscribe` (AsyncIterator), `publish`, `stream`, `listen`
-(AsyncIterator), `close`. Background receive task dispatches to futures and
-queues.
+
+- `MessageBus` class:
+  - `connect(url, sandbox_id)` — WebSocket with `X-Sandbox-ID` header
+  - `send(to, type, payload)` — fire-and-forget
+  - `request(to, type, payload, timeout)` — Future-based reply with
+    client-side `asyncio.wait_for` fallback (prevents indefinite hang on
+    broker crash)
+  - `reply(original, type, payload)` — keyed to original request id
+  - `subscribe(channel)` — `AsyncIterator[NMBMessage]`
+  - `publish(channel, type, payload)` — pub/sub publish
+  - `stream(to, type, chunks)` — ordered streaming with sequence numbers
+  - `listen()` — `AsyncIterator[NMBMessage]` for unmatched deliveries
+  - `close()` — graceful disconnect
+- Background receive task dispatches to futures (request-reply) and
+  `asyncio.Queue` (listen/subscribe); `_fail_pending_futures()` fires in
+  the `finally` block so no future hangs after connection loss
 
 **Phase 5 — Sync wrapper** (`nmb/sync.py`):
-Thread-backed synchronous `MessageBus` mirroring the async API. Methods
-submit coroutines via `run_coroutine_threadsafe`.
+
+- `MessageBus` class mirroring the async API
+- Background daemon thread running `asyncio.run_forever()`
+- Simple methods (`send`, `request`, `reply`, `publish`) submit coroutines
+  via `run_coroutine_threadsafe` and block on `future.result()`
+- `listen()` and `subscribe()` use the **pump-and-sentinel** pattern:
+  a single `_pump` coroutine runs in the background loop, reads from the
+  async iterator, and pushes each message into a `queue.Queue`.  When the
+  async iterator exhausts (connection close, cancellation), the pump puts
+  `None` as a sentinel.  The synchronous caller blocks on `queue.get()`;
+  receiving `None` signals clean exit.  This avoids PEP 479 violations
+  (`StopIteration` inside a coroutine) and ensures the async subscription
+  lifecycle is managed once, not per-message
 
 **Phase 6 — CLI tool** (`nmb/cli.py`):
-`nmb-client` entry point (registered in `pyproject.toml`). Subcommands:
-`send`, `request`, `listen`, `subscribe`, `publish`. Uses sync wrapper.
-Sandbox ID from `$NMB_SANDBOX_ID` or `--sandbox-id`.
+
+- `nmb-client` entry point registered in `pyproject.toml`
+  `[project.scripts]`
+- Subcommands: `send`, `request`, `listen`, `subscribe`, `publish`
+- Uses sync `MessageBus`; sandbox ID from `$NMB_SANDBOX_ID` or
+  `--sandbox-id`
+- JSON output per line for piping
 
 **Phase 7 — Tests + policy + wiring**:
-`test_nmb_models`, `test_nmb_audit`, `test_nmb_broker`, `test_nmb_client`.
-`policies/nmb-enabled.yaml` template. Makefile `run-broker` target.
 
-### 18.4  Deferred (not in v1)
+- `test_nmb_models` — parse/serialize round-trip, validation, error cases
+- `test_nmb_audit` — migration smoke test, log/query/export, payload toggle
+- `test_nmb_broker` — integration: connect, send, request-reply, timeout,
+  pub/sub, health, disconnect cleanup
+- `test_nmb_client` — client against embedded broker: send+listen,
+  request-reply, pub/sub
+- `policies/nmb-enabled.yaml` — OpenShell policy template
+- `Makefile`: `run-broker` and `typecheck` targets
+
+### 18.5  Deferred (not in v1)
 
 - Multi-host TLS/auth (sections 3.2–3.4, 13.2–13.4)
 - Coordinator extensions (section 14: `task.fork`, `peers.list`, task CRUD)

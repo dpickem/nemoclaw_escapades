@@ -7,7 +7,8 @@ import asyncio
 import pytest
 import websockets
 
-from nemoclaw_escapades.nmb.broker import BrokerConfig, NMBBroker
+from nemoclaw_escapades.config import BrokerConfig
+from nemoclaw_escapades.nmb.broker import NMBBroker
 from nemoclaw_escapades.nmb.models import NMBMessage, Op, parse_frame, serialize_frame
 
 

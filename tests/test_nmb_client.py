@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from nemoclaw_escapades.nmb.broker import BrokerConfig, NMBBroker
+from nemoclaw_escapades.config import BrokerConfig
+from nemoclaw_escapades.nmb.broker import NMBBroker
 from nemoclaw_escapades.nmb.client import MessageBus, NMBConnectionError
 
 

@@ -110,13 +110,9 @@ class AuditDB:
             msg: The message that was routed.
             delivery_status: Outcome of the delivery attempt.
         """
-        payload_json = json.dumps(msg.payload) if msg.payload else ""
-        if not self.persist_payloads:
-            stored_payload = ""
-            payload_size = len(payload_json.encode()) if payload_json else 0
-        else:
-            stored_payload = payload_json
-            payload_size = len(payload_json.encode()) if payload_json else 0
+        payload_json = json.dumps(msg.payload) if msg.payload is not None else ""
+        payload_size = len(payload_json.encode()) if payload_json else 0
+        stored_payload = payload_json if self.persist_payloads else ""
 
         await self._db.execute(
             """

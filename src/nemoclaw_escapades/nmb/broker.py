@@ -32,6 +32,11 @@ import websockets
 from websockets.asyncio.server import Server, ServerConnection
 from websockets.http11 import Request, Response
 
+from nemoclaw_escapades.config import (
+    DEFAULT_NMB_AUDIT_DB_PATH,
+    DEFAULT_NMB_PORT,
+    BrokerConfig,
+)
 from nemoclaw_escapades.nmb.audit.db import AuditDB
 from nemoclaw_escapades.nmb.models import (
     DeliveryStatus,
@@ -45,43 +50,6 @@ from nemoclaw_escapades.nmb.models import (
 )
 
 logger = logging.getLogger("nmb.broker")
-
-# ---------------------------------------------------------------------------
-# Broker configuration
-# ---------------------------------------------------------------------------
-
-DEFAULT_PORT = 9876
-DEFAULT_AUDIT_DB = "~/.nemoclaw/nmb/audit.db"
-MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
-MAX_PENDING_PER_SANDBOX = 100
-MAX_CHANNELS_PER_SANDBOX = 50
-DEFAULT_REQUEST_TIMEOUT = 300.0
-
-
-@dataclass
-class BrokerConfig:
-    """Runtime configuration for the NMB broker.
-
-    Attributes:
-        host: Bind address.
-        port: Bind port.
-        audit_db_path: Path to the SQLite audit database.
-        persist_payloads: Whether to store full payloads in the audit DB.
-        max_message_size: Maximum allowed payload size in bytes.
-        max_pending_per_sandbox: Maximum in-flight requests per sandbox.
-        default_request_timeout: Default timeout for request-reply in seconds.
-        max_channels_per_sandbox: Maximum channel subscriptions per sandbox.
-    """
-
-    host: str = "0.0.0.0"
-    port: int = DEFAULT_PORT
-    audit_db_path: str = DEFAULT_AUDIT_DB
-    persist_payloads: bool = True
-    max_message_size: int = MAX_MESSAGE_SIZE
-    max_pending_per_sandbox: int = MAX_PENDING_PER_SANDBOX
-    default_request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    max_channels_per_sandbox: int = MAX_CHANNELS_PER_SANDBOX
-
 
 # ---------------------------------------------------------------------------
 # Tracked pending request (adds the timeout task handle)
@@ -228,7 +196,7 @@ class NMBBroker:
         except websockets.ConnectionClosed:
             pass
         finally:
-            await self._unregister(sandbox_id)
+            await self._unregister(sandbox_id, websocket)
 
     def _register(self, sandbox_id: str, ws: ServerConnection) -> None:
         """Register a newly connected sandbox in the connection registry.
@@ -249,19 +217,26 @@ class NMBBroker:
         if self._audit:
             asyncio.create_task(self._audit.log_connection(sandbox_id))
 
-    async def _unregister(self, sandbox_id: str) -> None:
+    async def _unregister(self, sandbox_id: str, ws: ServerConnection) -> None:
         """Unregister a disconnected sandbox and clean up all associated state.
 
-        Removes channel subscriptions, cancels pending request timeouts,
-        publishes a ``sandbox.shutdown`` event to the ``system`` channel,
-        and logs the disconnection in the audit DB.
+        Only proceeds if *ws* is still the registered connection for
+        *sandbox_id*.  On reconnect, ``_register`` replaces the entry
+        with the new WebSocket; when the old handler's ``finally`` block
+        fires, the stale connection is silently ignored.
 
         Args:
             sandbox_id: The identity of the disconnected sandbox.
+            ws: The specific WebSocket connection being closed.
         """
-        ws = self._connections.pop(sandbox_id, None)
-        if ws is not None:
+        # If a newer connection owns this sandbox_id, this is a stale
+        # cleanup from a replaced connection — skip everything.
+        if self._connections.get(sandbox_id) is not ws:
             self._ws_to_sandbox.pop(id(ws), None)
+            return
+
+        self._connections.pop(sandbox_id, None)
+        self._ws_to_sandbox.pop(id(ws), None)
 
         # Clean up channel subscriptions
         for ch in list(self._sandbox_channels.get(sandbox_id, set())):
@@ -369,7 +344,12 @@ class NMBBroker:
             return
 
         deliver = self._make_deliver(msg)
-        await target_ws.send(serialize_frame(deliver))
+        try:
+            await target_ws.send(serialize_frame(deliver))
+        except websockets.ConnectionClosed:
+            await self._send_error(ws, msg.id, ErrorCode.TARGET_OFFLINE, f"{msg.to} disconnected")
+            await self._audit_msg(msg, DeliveryStatus.ERROR)
+            return
         await self._send_ack(ws, msg.id)
         await self._audit_msg(msg, DeliveryStatus.DELIVERED)
 
@@ -404,7 +384,17 @@ class NMBBroker:
         self._pending_counts[sender_id] = count + 1
 
         deliver = self._make_deliver(msg)
-        await target_ws.send(serialize_frame(deliver))
+        try:
+            await target_ws.send(serialize_frame(deliver))
+        except websockets.ConnectionClosed:
+            # Clean up the pending tracking we just set up
+            self._pending.pop(msg.id, None)
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
+            self._pending_counts[sender_id] = max(0, self._pending_counts.get(sender_id, 1) - 1)
+            await self._send_error(ws, msg.id, ErrorCode.TARGET_OFFLINE, f"{msg.to} disconnected")
+            await self._audit_msg(msg, DeliveryStatus.ERROR)
+            return
         await self._send_ack(ws, msg.id)
         await self._audit_msg(msg, DeliveryStatus.DELIVERED)
 
@@ -439,7 +429,11 @@ class NMBBroker:
             return
 
         deliver = self._make_deliver(msg)
-        await target_ws.send(serialize_frame(deliver))
+        try:
+            await target_ws.send(serialize_frame(deliver))
+        except websockets.ConnectionClosed:
+            await self._audit_msg(msg, DeliveryStatus.ERROR)
+            return
         await self._audit_msg(msg, DeliveryStatus.DELIVERED)
 
     async def _handle_subscribe(
@@ -537,7 +531,10 @@ class NMBBroker:
             return
 
         deliver = self._make_deliver(msg)
-        await target_ws.send(serialize_frame(deliver))
+        try:
+            await target_ws.send(serialize_frame(deliver))
+        except websockets.ConnectionClosed:
+            await self._send_error(ws, msg.id, ErrorCode.TARGET_OFFLINE, f"{msg.to} disconnected")
 
     # ------------------------------------------------------------------
     # Timeout handling
@@ -710,10 +707,10 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(description="NMB Broker — NemoClaw Message Bus")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port")
+    parser.add_argument("--port", type=int, default=DEFAULT_NMB_PORT, help="Bind port")
     parser.add_argument(
         "--audit-db",
-        default=DEFAULT_AUDIT_DB,
+        default=DEFAULT_NMB_AUDIT_DB_PATH,
         help="Path to audit SQLite DB",
     )
     parser.add_argument(

@@ -4,6 +4,31 @@ For agents that don't use asyncio (e.g. Claude Code integrations
 via subprocess).  Runs a background event loop in a daemon thread
 and proxies calls via ``run_coroutine_threadsafe``.
 
+**Pump-and-sentinel pattern** — ``listen()`` and ``subscribe()`` need to
+bridge an async iterator (running in the background event loop) to a
+synchronous ``Iterator`` consumed by the caller's thread.  The naive
+approach — wrapping each ``async for`` yield in a separate coroutine —
+has two problems:
+
+1. **PEP 479**: ``raise StopIteration`` inside a coroutine is converted
+   to ``RuntimeError`` (mandatory since Python 3.7), so using it to
+   signal iterator exhaustion crashes instead of stopping cleanly.
+2. **Subscription churn**: For ``subscribe()``, each call to the async
+   method sends a ``SUBSCRIBE`` frame and creates a queue; when the
+   coroutine returns after one message, the ``finally`` block sends
+   ``UNSUBSCRIBE`` and tears down the queue.  Every single message
+   would trigger a full subscribe/receive/unsubscribe cycle with a
+   race window where published messages are silently lost.
+
+The pump-and-sentinel pattern solves both.  A single ``_pump`` coroutine
+runs in the background loop for the full lifetime of the iterator.  It
+reads from the async iterator and pushes each message into a thread-safe
+``queue.Queue``.  When the async iterator exhausts (connection close,
+cancellation, error), the pump pushes ``None`` as a sentinel.  The
+synchronous caller blocks on ``queue.get()``; receiving ``None`` signals
+clean exit.  ``task.cancel()`` in the ``finally`` block ensures the pump
+stops if the caller breaks out of the ``for`` loop early.
+
 Example::
 
     from nemoclaw_escapades.nmb.sync import MessageBus
@@ -19,6 +44,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import queue as queue_mod
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -144,23 +170,36 @@ class MessageBus:
     def listen(self) -> Iterator[NMBMessage]:
         """Yield incoming deliver messages (blocking).
 
+        Reads from the async client's listen queue one message at a
+        time.  Stops when the connection is closed.
+
         Yields:
             ``NMBMessage`` instances delivered to this sandbox.
         """
+        queue: queue_mod.Queue[NMBMessage | None] = queue_mod.Queue()
 
-        async def _drain() -> NMBMessage:
-            async for msg in self._bus.listen():
-                return msg
-            raise StopIteration
-
-        while True:
+        async def _pump() -> None:
             try:
-                yield self._run(_drain())
-            except StopIteration:
-                return
+                async for msg in self._bus.listen():
+                    queue.put(msg)
+            finally:
+                queue.put(None)
+
+        task = asyncio.run_coroutine_threadsafe(_pump(), self._loop_or_raise)
+        try:
+            while True:
+                item = queue.get()
+                if item is None:
+                    return
+                yield item
+        finally:
+            task.cancel()
 
     def subscribe(self, channel: str) -> Iterator[NMBMessage]:
         """Subscribe to a channel and yield messages (blocking).
+
+        Manages the async subscription lifecycle in the background loop
+        so subscribe/unsubscribe happen exactly once, not per message.
 
         Args:
             channel: Channel name to subscribe to.
@@ -168,17 +207,24 @@ class MessageBus:
         Yields:
             ``NMBMessage`` instances published to the channel.
         """
+        queue: queue_mod.Queue[NMBMessage | None] = queue_mod.Queue()
 
-        async def _drain() -> NMBMessage:
-            async for msg in self._bus.subscribe(channel):
-                return msg
-            raise StopIteration
-
-        while True:
+        async def _pump() -> None:
             try:
-                yield self._run(_drain())
-            except StopIteration:
-                return
+                async for msg in self._bus.subscribe(channel):
+                    queue.put(msg)
+            finally:
+                queue.put(None)
+
+        task = asyncio.run_coroutine_threadsafe(_pump(), self._loop_or_raise)
+        try:
+            while True:
+                item = queue.get()
+                if item is None:
+                    return
+                yield item
+        finally:
+            task.cancel()
 
     # ------------------------------------------------------------------
     # Internals
@@ -194,6 +240,17 @@ class MessageBus:
         if self._async_bus is None:
             raise NMBConnectionError("Not connected — call connect() first")
         return self._async_bus
+
+    @property
+    def _loop_or_raise(self) -> asyncio.AbstractEventLoop:
+        """Return the background event loop.
+
+        Raises:
+            NMBConnectionError: If the background loop is not running.
+        """
+        if self._loop is None:
+            raise NMBConnectionError("Not connected — call connect() first")
+        return self._loop
 
     def _run(self, coro: Any) -> Any:
         """Submit a coroutine to the background loop and block until it completes.

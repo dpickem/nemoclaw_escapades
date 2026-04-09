@@ -243,12 +243,13 @@ def parse_frame(raw: str) -> NMBMessage:
             "Missing required field 'op'",
         )
 
+    raw_op = data.pop("op")
     try:
-        op = Op(data.pop("op"))
+        op = Op(raw_op)
     except ValueError:
         raise FrameValidationError(
             ErrorCode.INVALID_FRAME,
-            f"Unknown op: {data.get('op')}",
+            f"Unknown op: {raw_op}",
         )
 
     # Map JSON keys to dataclass field names
