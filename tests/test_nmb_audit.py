@@ -102,6 +102,50 @@ class TestAuditDB:
             lines = f.readlines()
         assert len(lines) == 3
 
+    async def test_fts_search_returns_matching_payloads(self, audit_db: AuditDB) -> None:
+        for i, keyword in enumerate(["alpha bravo", "charlie delta", "bravo echo"]):
+            msg = NMBMessage(
+                op=Op.SEND,
+                id=f"fts-{i}",
+                from_sandbox="a",
+                to="b",
+                type="t",
+                timestamp=float(i),
+                payload={"text": keyword},
+            )
+            await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
+
+        rows = await audit_db.query(
+            "SELECT * FROM messages_fts WHERE messages_fts MATCH :term",
+            {"term": "bravo"},
+        )
+        payloads = {r["payload"] for r in rows}
+        assert len(rows) == 2
+        assert any("alpha" in p for p in payloads)
+        assert any("echo" in p for p in payloads)
+
+    async def test_fts_index_empty_without_payload_persistence(self, tmp_path: Path) -> None:
+        db = AuditDB(str(tmp_path / "no_payload_fts.db"), persist_payloads=False)
+        await db.open()
+        try:
+            msg = NMBMessage(
+                op=Op.SEND,
+                id="fts-np-1",
+                from_sandbox="a",
+                to="b",
+                type="t",
+                timestamp=1.0,
+                payload={"secret": "data"},
+            )
+            await db.log_message(msg, DeliveryStatus.DELIVERED)
+            rows = await db.query(
+                "SELECT * FROM messages_fts WHERE messages_fts MATCH :term",
+                {"term": "secret"},
+            )
+            assert len(rows) == 0
+        finally:
+            await db.close()
+
     async def test_export_jsonl_with_since(self, audit_db: AuditDB, tmp_path: Path) -> None:
         for i in range(5):
             msg = NMBMessage(

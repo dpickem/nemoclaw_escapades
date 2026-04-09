@@ -3,6 +3,12 @@
 # Grants access to messages.local:9876 (resolved by the OpenShell proxy
 # to the NMB broker on the host).  Pair with the sandbox's existing
 # network policy (e.g. policies/orchestrator.yaml).
+#
+# The broker uses WebSocket (long-lived bidirectional), so we need
+# access: full (opaque CONNECT tunnel) — same pattern as slack_websocket
+# in orchestrator.yaml.  Do NOT combine with protocol: rest / tls: terminate;
+# those are for HTTP REST interception and are mutually exclusive with
+# access: full (see Lesson #8 in the M1 blog post).
 version: 1
 
 network_policies:
@@ -11,10 +17,7 @@ network_policies:
     endpoints:
       - host: messages.local
         port: 9876
-        protocol: rest
-        tls: terminate
-        enforcement: enforce
         access: full
     binaries:
       - path: /usr/local/bin/nmb-client
-      - path: /usr/bin/python3
+      - path: /usr/local/bin/python*
