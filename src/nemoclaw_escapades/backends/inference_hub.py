@@ -150,7 +150,7 @@ class InferenceHubBackend(BackendBase):
                 reraise=True,
             ):
                 with attempt:
-                    return await self._send_request(payload, request.model)
+                    return await self._send_request(payload, request.model, request.request_id)
         except _RetryableError as exc:
             raise InferenceError(str(exc), category=exc.category, raw=exc.raw) from exc
 
@@ -165,7 +165,9 @@ class InferenceHubBackend(BackendBase):
     # Single-attempt HTTP call
     # ------------------------------------------------------------------
 
-    async def _send_request(self, payload: dict[str, object], model: str) -> InferenceResponse:
+    async def _send_request(
+        self, payload: dict[str, object], model: str, request_id: str = ""
+    ) -> InferenceResponse:
         """Execute one HTTP POST to ``/chat/completions``.
 
         This method represents a *single* network attempt.  Tenacity
@@ -173,10 +175,11 @@ class InferenceHubBackend(BackendBase):
         exhausted.
 
         Args:
-            payload: JSON body for the OpenAI-compatible completions
-                     endpoint (model, messages, temperature, max_tokens).
-            model:   Model identifier, included in log lines for
-                     traceability.
+            payload:    JSON body for the OpenAI-compatible completions
+                        endpoint (model, messages, temperature, max_tokens).
+            model:      Model identifier, included in log lines for
+                        traceability.
+            request_id: Correlation ID for structured logging.
 
         Returns:
             A parsed ``InferenceResponse`` on HTTP 200.
@@ -189,13 +192,16 @@ class InferenceHubBackend(BackendBase):
         """
         start = time.monotonic()
         try:
-            logger.info("Inference call starting", extra={"model": model})
+            logger.info(
+                "Inference call starting",
+                extra={"request_id": request_id, "model": model},
+            )
 
             response = await self._client.post("/chat/completions", json=payload)
             latency_ms = (time.monotonic() - start) * 1000
 
             if response.status_code == 200:
-                return self._parse_response(response, latency_ms)
+                return self._parse_response(response, latency_ms, request_id)
 
             category = self._categorize_status(response.status_code)
 
@@ -281,7 +287,9 @@ class InferenceHubBackend(BackendBase):
     # Response parsing and helpers
     # ------------------------------------------------------------------
 
-    def _parse_response(self, response: httpx.Response, latency_ms: float) -> InferenceResponse:
+    def _parse_response(
+        self, response: httpx.Response, latency_ms: float, request_id: str = ""
+    ) -> InferenceResponse:
         """Deserialise a successful API response into an ``InferenceResponse``.
 
         Extracts the assistant message content, token usage counters,
@@ -292,6 +300,7 @@ class InferenceHubBackend(BackendBase):
             response:   The raw ``httpx.Response`` with status 200.
             latency_ms: Wall-clock time of this HTTP round-trip in
                         milliseconds.
+            request_id: Correlation ID for structured logging.
 
         Returns:
             A fully populated ``InferenceResponse``.
@@ -322,6 +331,7 @@ class InferenceHubBackend(BackendBase):
         logger.info(
             "Inference call completed",
             extra={
+                "request_id": request_id,
                 "latency_ms": round(latency_ms, 1),
                 "model": data.get("model", "unknown"),
                 "prompt_tokens": usage.prompt_tokens,

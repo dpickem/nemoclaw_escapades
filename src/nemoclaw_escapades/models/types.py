@@ -125,6 +125,7 @@ class InferenceRequest:
     model: str
     temperature: float = 0.7
     max_tokens: int = 2048
+    request_id: str = ""
 
 
 @dataclass
