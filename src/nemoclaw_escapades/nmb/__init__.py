@@ -7,8 +7,6 @@ from nemoclaw_escapades.nmb.models import (
     NMBMessage,
     Op,
     PendingRequest,
-    parse_frame,
-    serialize_frame,
 )
 
 __all__ = [
@@ -19,6 +17,4 @@ __all__ = [
     "NMBMessage",
     "Op",
     "PendingRequest",
-    "parse_frame",
-    "serialize_frame",
 ]

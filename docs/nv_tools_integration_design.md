@@ -374,10 +374,9 @@ running sandbox — the sandbox must be recreated. However, provider
 `openshell provider update`, and the new values take effect on the next
 sandbox creation. Network policies are the only hot-reloadable component.
 
-Three strategies, in order of complexity:
+Five strategies, in order of complexity:
 
-**Strategy A (recommended): Pre-authenticate on the host, inject via
-provider.**
+**Strategy A: Pre-authenticate on the host, inject via provider.**
 
 Following the same pattern as §6.1, OAuth tokens are pre-obtained on
 the host and injected into the sandbox as an OpenShell provider — no
@@ -435,6 +434,16 @@ openshell provider create --name nv-tools-oauth-tokens ...  # with fresh tokens
 
 A Makefile target (`make refresh-nv-tools-oauth`) can automate the
 extract-and-update cycle.
+
+**Limitation:** OpenShell `--type generic` providers inject credentials
+via the L7 proxy, which cannot rewrite POST request bodies. OAuth2 token
+refresh requires a POST with `client_id`, `client_secret`, and
+`refresh_token` in the body — the proxy cannot inject these dynamically.
+This means Strategy A either requires the refresh token to be accessible
+on the sandbox filesystem (reducing isolation) or depends on the upcoming
+v2 Providers with native OAuth refresh support (confirmed on the
+OpenShell roadmap, RFC pending). See Strategy E for the recommended
+alternative.
 
 **Strategy B: SSH tunnel + device-code flow.** For services that support device-code flow, the
 sandbox prints a URL and code to the orchestrator's logs; the user
@@ -518,10 +527,140 @@ intervention.
 - Con: browser-redirect flows require a one-time URL paste-back until
   a relay endpoint is available
 
-**Decision:** Strategy A — provider-based token injection with host-side
-pre-authentication. It is the simplest approach and works reliably.
-Strategy D is a future enhancement for device-code flows where Slack
-interaction is natural. Strategy C as the long-term target.
+**Strategy E (recommended): Host-side token server.**
+
+A lightweight HTTP server runs on the host, holds the refresh token,
+and serves short-lived access tokens to the sandbox on demand. The
+sandbox **never sees the refresh token** — only ~1-hour access tokens
+fetched via `GET /token` before each nv-tools invocation. This pattern
+was proven in the
+[gogcli-skill demo](https://github.com/brevdev/nemoclaw-demos/pull/2)
+for Google Workspace services and avoids the L7 proxy limitation that
+affects Strategy A.
+
+```
+sandbox (nv-tools wrapper) ──GET /token──► host token server ──OAuth2 refresh──► service APIs
+```
+
+**Setup:**
+
+1. Pre-authenticate on the host (`nv-tools auth login <service>`),
+   same as Strategy A step 1.
+2. Start a host-side token server that reads the cached refresh token
+   and exposes two endpoints:
+   - `GET /token` — returns a fresh access token (auto-refreshes when
+     within 5 minutes of expiry)
+   - `GET /health` — liveness check
+3. Push a thin wrapper script into the sandbox that fetches a token
+   from the host server before each nv-tools invocation:
+
+```bash
+#!/bin/sh
+_TOKEN=$(curl -sf "http://${HOST_IP}:${TOKEN_PORT}/token") || {
+    echo "error: could not reach token server" >&2
+    exit 1
+}
+exec env SERVICE_ACCESS_TOKEN="$_TOKEN" nv-tools "$@"
+```
+
+4. Add a network policy allowing the sandbox to reach the token
+   server on the host:
+
+```yaml
+nv_tools_token_server:
+    name: nv-tools-token-server
+    endpoints:
+      - host: <host-ip>
+        port: 9100
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/token" }
+          - allow: { method: GET, path: "/health" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+      - { path: /usr/local/bin/nv-tools }
+```
+
+**Token server implementation:**
+
+The token server is a single-file Python HTTP server (~100 lines)
+that caches access tokens in memory and refreshes them proactively.
+The reference implementation
+([`gog-token-server.py`](https://github.com/brevdev/nemoclaw-demos/pull/2))
+demonstrates the pattern:
+
+```python
+# Simplified — see reference for full implementation
+_lock = threading.Lock()
+_access_token: str = ""
+_expires_at: float = 0.0
+
+def get_access_token(client_id, client_secret, refresh_token) -> str:
+    global _access_token, _expires_at
+    with _lock:
+        if _access_token and time.monotonic() < _expires_at - 300:
+            return _access_token
+        _access_token, _expires_at = _exchange(
+            client_id, client_secret, refresh_token
+        )
+        return _access_token
+```
+
+**Token lifecycle:**
+
+- The token server caches access tokens in memory and refreshes them
+  proactively (5-minute buffer before expiry).
+- No sandbox recreation is needed for token refresh — the host server
+  handles it continuously.
+- If the refresh token itself expires (rare), re-run
+  `nv-tools auth login <service>` on the host and restart the token
+  server. The sandbox is unaffected.
+
+**Defense-in-depth: read-only network policies.**
+
+As an additional safety layer, sandbox network policies can restrict
+HTTP methods per service endpoint — e.g., allowing only GET for
+read-only services. This complements the write approval gate (§10):
+even if the LLM constructs a write command that somehow bypasses
+approval, the network policy blocks the mutating API call at the
+sandbox level.
+
+```yaml
+# Example: read-only Jira access at the network level
+nv_tools_jira:
+    endpoints:
+      - host: jira.example.com
+        port: 443
+        rules:
+          - allow: { method: GET, path: "/**" }
+          # - allow: { method: POST, path: "/**" }   # uncomment to enable writes
+          # - allow: { method: PUT, path: "/**" }
+```
+
+Write methods can be commented out by default and selectively enabled
+per service as the write approval gate (§10) matures. This follows the
+pattern established in the
+[gogcli-skill `policy.yaml`](https://github.com/brevdev/nemoclaw-demos/pull/2).
+
+- Pro: refresh token never enters the sandbox — strongest isolation
+- Pro: no sandbox recreation needed for token refresh
+- Pro: no dependency on OpenShell v2 Providers
+- Pro: proven pattern with a working reference implementation
+- Pro: read-only network policies provide defense-in-depth
+- Con: requires a host-side process (lightweight — single Python script)
+- Con: adds a network hop per invocation (~1ms on localhost)
+
+**Decision:** Strategy E — host-side token server. It provides the
+strongest credential isolation (refresh token never enters the sandbox),
+requires no sandbox recreation for token refresh, works around the L7
+proxy limitation, and has a proven reference implementation
+([brevdev/nemoclaw-demos#2](https://github.com/brevdev/nemoclaw-demos/pull/2)).
+Strategy D (Slack-mediated device-code flow) remains a natural
+complement for interactive authentication. Strategy C (full sidecar)
+is the long-term target when the service count grows. Strategy A is
+viable for development/hackathon use where credential isolation
+requirements are relaxed.
 
 ---
 
@@ -1216,6 +1355,13 @@ Implement the orchestrator-side audit database:
 - Add nv-tools service endpoints to `policies/orchestrator.yaml`
 - Add Makefile targets for building with real vs. stub nv-tools
 - Update `.env.example` with nv-tools configuration variables
+- Implement host-side token server for OAuth services (§6.2, Strategy E):
+  - Token server script (`nv-tools-token-server.py`) with `/token` and
+    `/health` endpoints
+  - Sandbox wrapper script that fetches tokens on demand
+  - Token server network policy template
+  - Read-only network policy defaults (GET only) for each service
+  - `make setup-nv-tools-oauth` target for bootstrap and re-deploy
 
 ### Phase 6 — Multi-step reasoning tests
 
@@ -1241,7 +1387,7 @@ Implement the orchestrator-side audit database:
 |---|----------|-------|
 | 1 | How many services should the stub cover initially? | Recommendation: start with jira, confluence, slack, gitlab, gerrit. Add more as use-cases demand. |
 | 2 | Should the stub return randomized or fixed canned data? | Fixed is more predictable for tests; randomized is more realistic for LLM reasoning. Consider: fixed by default, randomized via `--randomize` flag. |
-| 3 | ~~How should nv-tools credentials be injected into the sandbox?~~ | **Resolved in §6.** API tokens: single `generic` OpenShell provider (`nv-tools-credentials`). OAuth/SSO (future): pre-authenticate on the host and inject tokens via a second provider (`nv-tools-oauth-tokens`). Providers cannot be hot-reloaded onto a running sandbox — sandbox must be recreated. |
+| 3 | ~~How should nv-tools credentials be injected into the sandbox?~~ | **Resolved in §6.** API tokens: single `generic` OpenShell provider (`nv-tools-credentials`). OAuth/SSO (future): host-side token server (Strategy E) — refresh tokens stay on the host, sandbox receives short-lived access tokens on demand via `GET /token`. This avoids the L7 proxy POST-body limitation and requires no sandbox recreation for token refresh. |
 | 4 | Should the LLM be allowed to construct `--write` commands, or should the orchestrator always strip `--write` and re-add it only after approval? | Stripping is safer — prevents the LLM from accidentally bypassing the gate. |
 | 5 | What is the right subprocess timeout per service? | Jira/Confluence: 30s. GitLab (large diffs): 60s. Slack (search can be slow): 45s. Make configurable. |
 | 6 | Should we also expose nv-tools to sub-agents (coding, review), or only to the orchestrator? | Start with orchestrator only. Sub-agents that need service access (e.g., review agent posting to Gerrit) can request it via NMB → orchestrator. |
@@ -1255,3 +1401,5 @@ Implement the orchestrator-side audit database:
 - [Design Doc](design.md) — project goals, design principles
 - [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) — tool system patterns, progressive disclosure
 - [Hermes Deep Dive](deep_dives/hermes_deep_dive.md) — skill system, progressive disclosure
+- [OpenShell OAuth2 discussion](https://nvidia.slack.com/archives/C0AE9P50JVA/p1775739593096759) — Slack thread on OAuth2 credential patterns in sandboxes, L7 proxy limitation, v2 Providers roadmap
+- [gogcli-skill PR](https://github.com/brevdev/nemoclaw-demos/pull/2) — reference implementation of host-side token server pattern for Google Workspace in NemoClaw

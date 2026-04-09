@@ -35,7 +35,7 @@ class TestAuditDB:
             op=Op.SEND,
             id="test-msg-1",
             from_sandbox="orch",
-            to="coding-1",
+            to_sandbox="coding-1",
             type="task.assign",
             timestamp=1000.0,
             payload={"prompt": "hello"},
@@ -57,7 +57,7 @@ class TestAuditDB:
                 op=Op.SEND,
                 id="np-1",
                 from_sandbox="a",
-                to="b",
+                to_sandbox="b",
                 type="t",
                 timestamp=1.0,
                 payload={"secret": "data"},
@@ -87,7 +87,7 @@ class TestAuditDB:
                 op=Op.SEND,
                 id=f"export-{i}",
                 from_sandbox="a",
-                to="b",
+                to_sandbox="b",
                 type="t",
                 timestamp=float(i),
                 payload={},
@@ -108,7 +108,7 @@ class TestAuditDB:
                 op=Op.SEND,
                 id=f"fts-{i}",
                 from_sandbox="a",
-                to="b",
+                to_sandbox="b",
                 type="t",
                 timestamp=float(i),
                 payload={"text": keyword},
@@ -132,7 +132,7 @@ class TestAuditDB:
                 op=Op.SEND,
                 id="fts-np-1",
                 from_sandbox="a",
-                to="b",
+                to_sandbox="b",
                 type="t",
                 timestamp=1.0,
                 payload={"secret": "data"},
@@ -146,13 +146,90 @@ class TestAuditDB:
         finally:
             await db.close()
 
+    async def test_update_delivery_status(self, audit_db: AuditDB) -> None:
+        """update_delivery_status changes the row without creating a duplicate."""
+        msg = NMBMessage(
+            op=Op.REQUEST,
+            id="upd-status-1",
+            from_sandbox="a",
+            to_sandbox="b",
+            type="slow.request",
+            timestamp=1.0,
+            payload={},
+        )
+        await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
+
+        await audit_db.update_delivery_status("upd-status-1", DeliveryStatus.TIMEOUT)
+
+        rows = await audit_db.query(
+            "SELECT delivery_status FROM messages WHERE id = :id",
+            {"id": "upd-status-1"},
+        )
+        assert len(rows) == 1
+        assert rows[0]["delivery_status"] == "timeout"
+
+    async def test_background_writer_batch_commit(self, audit_db: AuditDB) -> None:
+        """Background writer should batch-commit enqueued messages."""
+        await audit_db.start_background_writer()
+        try:
+            for i in range(5):
+                msg = NMBMessage(
+                    op=Op.SEND,
+                    id=f"bg-{i}",
+                    from_sandbox="a",
+                    to_sandbox="b",
+                    type="t",
+                    timestamp=float(i),
+                    payload={"i": i},
+                )
+                audit_db.enqueue_message(msg, DeliveryStatus.DELIVERED)
+
+            # Give the background writer time to flush
+            import asyncio
+
+            await asyncio.sleep(0.3)
+
+            rows = await audit_db.query("SELECT COUNT(*) AS cnt FROM messages")
+            assert rows[0]["cnt"] == 5
+        finally:
+            await audit_db.stop_background_writer()
+
+    async def test_background_writer_status_update(self, audit_db: AuditDB) -> None:
+        """Background writer should handle interleaved inserts and updates."""
+        msg = NMBMessage(
+            op=Op.REQUEST,
+            id="bg-upd-1",
+            from_sandbox="a",
+            to_sandbox="b",
+            type="t",
+            timestamp=1.0,
+            payload={},
+        )
+        await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
+
+        await audit_db.start_background_writer()
+        try:
+            audit_db.enqueue_status_update("bg-upd-1", DeliveryStatus.TIMEOUT)
+
+            import asyncio
+
+            await asyncio.sleep(0.3)
+
+            rows = await audit_db.query(
+                "SELECT delivery_status FROM messages WHERE id = :id",
+                {"id": "bg-upd-1"},
+            )
+            assert rows[0]["delivery_status"] == "timeout"
+        finally:
+            await audit_db.stop_background_writer()
+
     async def test_export_jsonl_with_since(self, audit_db: AuditDB, tmp_path: Path) -> None:
         for i in range(5):
             msg = NMBMessage(
                 op=Op.SEND,
                 id=f"since-{i}",
                 from_sandbox="a",
-                to="b",
+                to_sandbox="b",
                 type="t",
                 timestamp=float(i * 100),
                 payload={},

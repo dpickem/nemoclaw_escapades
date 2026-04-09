@@ -1,4 +1,9 @@
-"""SQLAlchemy ORM models for the NMB audit database."""
+"""SQLAlchemy ORM models for the NMB audit database.
+
+These classes mirror the tables created by the Alembic migrations in
+``alembic/versions/``.  The application never issues DDL directly —
+schema changes go through Alembic.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +12,35 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    pass
+    """Shared declarative base for all audit ORM models."""
 
 
 class MessageRow(Base):
-    """ORM model mirroring the ``messages`` audit table."""
+    """A single audited message routed through the broker.
+
+    Every ``send``, ``request``, ``reply``, ``publish``, and ``stream``
+    that passes through the broker is persisted here (one row per
+    message).  The ``delivery_status`` column is updated in-place when
+    a request times out.
+
+    Attributes:
+        id: Message UUID (primary key, matches ``NMBMessage.id``).
+        timestamp: Unix epoch seconds when the broker received the
+            message.
+        op: Wire operation code (e.g. ``"send"``, ``"request"``).
+        from_sandbox: Authenticated sender sandbox ID.
+        to_sandbox: Target sandbox ID (``None`` for pub/sub).
+        type: Application-level message type (e.g. ``"task.assign"``).
+        reply_to: Original request ID for reply correlation
+            (``None`` unless ``op == "reply"``).
+        channel: Pub/sub channel name (``None`` for point-to-point).
+        payload: Full JSON payload string.  Empty string when
+            ``persist_payloads`` is disabled.
+        payload_size: Original payload size in bytes (always stored,
+            even when the payload itself is elided).
+        delivery_status: Outcome — ``"delivered"``, ``"error"``, or
+            ``"timeout"``.
+    """
 
     __tablename__ = "messages"
 
@@ -29,7 +58,25 @@ class MessageRow(Base):
 
 
 class ConnectionRow(Base):
-    """ORM model mirroring the ``connections`` audit table."""
+    """Connection lifecycle record for a sandbox.
+
+    A new row is inserted every time a sandbox connects, preserving
+    full connection history.  ``log_disconnection`` updates only the
+    most recent open row (``disconnected_at IS NULL``) for a given
+    sandbox.
+
+    Attributes:
+        sandbox_id: Globally unique sandbox identifier (primary key,
+            e.g. ``"coding-sandbox-1-a3f7b2c8"``).  Each launch
+            generates a new ID, so the same row is never reused.
+        connected_at: Unix epoch seconds when the connection was
+            established.
+        disconnected_at: Unix epoch seconds when the connection closed
+            (``None`` while still connected).
+        disconnect_reason: Human-readable reason for the disconnect
+            (e.g. ``"crashed"``, ``"disconnected"``).  ``None`` while
+            still connected.
+    """
 
     __tablename__ = "connections"
 

@@ -30,10 +30,41 @@ DEFAULT_MAX_TOKENS = 2048
 DEFAULT_NMB_HOST = "0.0.0.0"
 DEFAULT_NMB_PORT = 9876
 DEFAULT_NMB_AUDIT_DB_PATH = "~/.nemoclaw/nmb/audit.db"
+# Maximum WebSocket frame size accepted by the broker server.
 DEFAULT_NMB_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+# Maximum JSON payload size enforced by NMBMessage.validate().
+DEFAULT_NMB_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 DEFAULT_NMB_MAX_PENDING_PER_SANDBOX = 100
-DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT = 300.0  # seconds
 DEFAULT_NMB_MAX_CHANNELS_PER_SANDBOX = 50
+
+# ── NMB client defaults ──────────────────────────────────────────────
+
+# WebSocket endpoint exposed by the OpenShell proxy
+DEFAULT_NMB_URL = "ws://messages.local:9876"
+# Seconds the client waits for a broker ACK on send/publish/subscribe
+DEFAULT_NMB_ACK_TIMEOUT = 10.0
+# Seconds before the broker gives up sending to a slow subscriber
+DEFAULT_NMB_SUBSCRIBER_SEND_TIMEOUT = 5.0
+
+# ── NMB client retry defaults (used by tenacity) ─────────────────────
+
+DEFAULT_NMB_CONNECT_MAX_RETRIES = 5
+DEFAULT_NMB_CONNECT_WAIT_MIN = 1.0   # seconds, exponential backoff floor
+DEFAULT_NMB_CONNECT_WAIT_MAX = 30.0  # seconds, exponential backoff ceiling
+
+# ── NMB queue / buffer limits ────────────────────────────────────────
+
+# Per-client unmatched delivery buffer.  When full the oldest message is
+# dropped — matches the "1 000 then drop oldest" design policy.
+DEFAULT_NMB_LISTEN_QUEUE_SIZE = 1_000
+# Per-subscriber channel delivery buffer (same drop-oldest policy).
+DEFAULT_NMB_CHANNEL_QUEUE_SIZE = 1_000
+# Background audit write buffer.  Larger because audit can lag without
+# affecting message routing.
+DEFAULT_NMB_AUDIT_QUEUE_SIZE = 10_000
+# Maximum items flushed in a single audit batch commit.
+DEFAULT_NMB_AUDIT_BATCH_SIZE = 100
 
 
 @dataclass
