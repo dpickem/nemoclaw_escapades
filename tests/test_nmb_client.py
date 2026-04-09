@@ -39,25 +39,38 @@ async def broker_and_url() -> tuple[NMBBroker, str]:
 class TestClientConnect:
     async def test_connect_and_close(self, broker_and_url: tuple[NMBBroker, str]) -> None:
         _, url = broker_and_url
-        bus = MessageBus(sandbox_id="test-client", url=url)
+        bus = MessageBus(sandbox_id="test-client", broker_url=url)
         await bus.connect()
         await bus.close()
 
     async def test_connect_to_bad_url_raises(self) -> None:
-        bus = MessageBus(sandbox_id="test", url="ws://127.0.0.1:1")
+        bus = MessageBus(sandbox_id="test", broker_url="ws://127.0.0.1:1")
         with pytest.raises(NMBConnectionError):
             await bus.connect()
+
+    async def test_connect_with_retry_succeeds_on_first_try(
+        self, broker_and_url: tuple[NMBBroker, str]
+    ) -> None:
+        _, url = broker_and_url
+        bus = MessageBus(sandbox_id="retry-ok", broker_url=url)
+        await bus.connect_with_retry(max_retries=3, wait_min=0.05, wait_max=0.5)
+        await bus.close()
+
+    async def test_connect_with_retry_exhausted(self) -> None:
+        bus = MessageBus(sandbox_id="retry-fail", broker_url="ws://127.0.0.1:1")
+        with pytest.raises(NMBConnectionError):
+            await bus.connect_with_retry(max_retries=2, wait_min=0.05, wait_max=0.1)
 
 
 class TestClientSend:
     async def test_send_and_listen(self, broker_and_url: tuple[NMBBroker, str]) -> None:
         _, url = broker_and_url
-        sender = MessageBus(sandbox_id="sender", url=url)
-        receiver = MessageBus(sandbox_id="receiver", url=url)
+        sender = MessageBus(sandbox_id="sender", broker_url=url)
+        receiver = MessageBus(sandbox_id="receiver", broker_url=url)
         await sender.connect()
         await receiver.connect()
 
-        await sender.send("receiver", "task.assign", {"prompt": "test"})
+        await sender.send(receiver.sandbox_id, "task.assign", {"prompt": "test"})
 
         msg = None
         async for m in receiver.listen():
@@ -67,17 +80,38 @@ class TestClientSend:
         assert msg is not None
         assert msg.type == "task.assign"
         assert msg.payload == {"prompt": "test"}
-        assert msg.from_sandbox == "sender"
+        assert msg.from_sandbox.startswith("sender-")
 
         await sender.close()
         await receiver.close()
+
+    async def test_send_to_offline_target_raises(
+        self, broker_and_url: tuple[NMBBroker, str]
+    ) -> None:
+        """send() must propagate TARGET_OFFLINE as NMBConnectionError."""
+        _, url = broker_and_url
+        bus = MessageBus(sandbox_id="lonely-sender", broker_url=url)
+        await bus.connect()
+        with pytest.raises(NMBConnectionError, match="TARGET_OFFLINE"):
+            await bus.send("nobody", "ping", {})
+        await bus.close()
+
+    async def test_publish_to_empty_channel_succeeds(
+        self, broker_and_url: tuple[NMBBroker, str]
+    ) -> None:
+        """publish() to a channel with no subscribers should still ACK."""
+        _, url = broker_and_url
+        bus = MessageBus(sandbox_id="pub-empty", broker_url=url)
+        await bus.connect()
+        await bus.publish("no-subscribers", "event", {"x": 1})
+        await bus.close()
 
 
 class TestClientRequestReply:
     async def test_request_reply(self, broker_and_url: tuple[NMBBroker, str]) -> None:
         _, url = broker_and_url
-        requester = MessageBus(sandbox_id="req-client", url=url)
-        responder = MessageBus(sandbox_id="resp-client", url=url)
+        requester = MessageBus(sandbox_id="req-client", broker_url=url)
+        responder = MessageBus(sandbox_id="resp-client", broker_url=url)
         await requester.connect()
         await responder.connect()
 
@@ -90,7 +124,7 @@ class TestClientRequestReply:
         resp_task = asyncio.create_task(responder_loop())
 
         reply = await requester.request(
-            "resp-client", "review.request", {"diff": "..."}, timeout=5.0
+            responder.sandbox_id, "review.request", {"diff": "..."}, timeout=5.0
         )
 
         assert reply.type == "review.feedback"
@@ -104,8 +138,8 @@ class TestClientRequestReply:
 class TestClientPubSub:
     async def test_subscribe_and_publish(self, broker_and_url: tuple[NMBBroker, str]) -> None:
         _, url = broker_and_url
-        pub = MessageBus(sandbox_id="pub-client", url=url)
-        sub = MessageBus(sandbox_id="sub-client", url=url)
+        pub = MessageBus(sandbox_id="pub-client", broker_url=url)
+        sub = MessageBus(sandbox_id="sub-client", broker_url=url)
         await pub.connect()
         await sub.connect()
 

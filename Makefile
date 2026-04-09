@@ -188,7 +188,15 @@ test-auth: ## Verify all .env credentials against their APIs
 	@scripts/test_auth.sh
 
 .PHONY: test
-test: ## Run the test suite
+test: ## Run the unit test suite (excludes integration tests)
+	PYTHONPATH=src pytest tests/ -v --ignore=tests/integration
+
+.PHONY: test-integration
+test-integration: ## Run multi-sandbox NMB integration tests
+	PYTHONPATH=src pytest tests/integration/ -v
+
+.PHONY: test-all
+test-all: ## Run all tests (unit + integration)
 	PYTHONPATH=src pytest tests/ -v
 
 .PHONY: lint
