@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import event, insert, select, text, update
+from sqlalchemy import event, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -240,9 +240,7 @@ class AuditDB:
                 try:
                     await self._write_batch(batch)
                 except Exception:
-                    logger.warning(
-                        "Audit batch write failed (%d items)", len(batch), exc_info=True
-                    )
+                    logger.warning("Audit batch write failed (%d items)", len(batch), exc_info=True)
         except asyncio.CancelledError:
             pass
 
@@ -584,9 +582,7 @@ class AuditDB:
 
         with open(path, "w") as f:
             for row in rows:
-                row_dict = {
-                    c.key: getattr(row, c.key) for c in MessageRow.__table__.columns
-                }
+                row_dict = {c.key: getattr(row, c.key) for c in MessageRow.__table__.columns}
                 f.write(json.dumps(row_dict, default=str) + "\n")
 
         return len(rows)

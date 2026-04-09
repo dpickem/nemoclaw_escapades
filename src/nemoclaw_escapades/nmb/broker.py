@@ -301,8 +301,10 @@ class NMBBroker:
         # a client bug.  Reject the newcomer; keep the existing connection.
         if sandbox_id in self._connections:
             logger.error(
-                "Duplicate sandbox_id rejected: %s (already connected)", sandbox_id,
+                "Duplicate sandbox_id rejected: %s (already connected)",
+                sandbox_id,
             )
+
             async def _reject(w: ServerConnection) -> None:
                 try:
                     await w.close()
@@ -362,11 +364,7 @@ class NMBBroker:
         # ── Cancel pending requests originated by this sandbox ──
         # Without the requester connected, replies have nowhere to go
         # and timeout tasks would fire uselessly.
-        expired = [
-            rid
-            for rid, t in self._pending.items()
-            if t.pending.from_sandbox == sandbox_id
-        ]
+        expired = [rid for rid, t in self._pending.items() if t.pending.from_sandbox == sandbox_id]
         for rid in expired:
             tracked = self._pending.pop(rid, None)
             if tracked and tracked.timeout_task and not tracked.timeout_task.done():
@@ -484,8 +482,11 @@ class NMBBroker:
             # already disconnected.  Audit as ERROR so the sender's
             # failed delivery is visible in the audit trail.
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} not connected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} not connected",
+                audit_msg=msg,
             )
             return
 
@@ -496,8 +497,11 @@ class NMBBroker:
         except websockets.ConnectionClosed:
             # Target's WebSocket closed between the lookup and the send.
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} disconnected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} disconnected",
+                audit_msg=msg,
             )
             return
 
@@ -542,8 +546,11 @@ class NMBBroker:
         target_ws = self._connections.get(msg.to_sandbox)
         if target_ws is None:
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} not connected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} not connected",
+                audit_msg=msg,
             )
             return
 
@@ -568,8 +575,11 @@ class NMBBroker:
                 timeout_task.cancel()
             self._pending_counts[sender_id] = max(0, self._pending_counts.get(sender_id, 1) - 1)
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} disconnected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} disconnected",
+                audit_msg=msg,
             )
             return
         await self._send_ack(ws, msg.id, audit_msg=msg)
@@ -774,8 +784,11 @@ class NMBBroker:
         target_ws = self._connections.get(msg.to_sandbox)
         if target_ws is None:
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} not connected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} not connected",
+                audit_msg=msg,
             )
             return
 
@@ -784,8 +797,11 @@ class NMBBroker:
             await target_ws.send(deliver.to_json())
         except websockets.ConnectionClosed:
             await self._send_error(
-                ws, msg.id, ErrorCode.TARGET_OFFLINE,
-                f"{msg.to_sandbox} disconnected", audit_msg=msg,
+                ws,
+                msg.id,
+                ErrorCode.TARGET_OFFLINE,
+                f"{msg.to_sandbox} disconnected",
+                audit_msg=msg,
             )
 
     # ------------------------------------------------------------------
@@ -951,7 +967,7 @@ class NMBBroker:
         """
         try:
             await asyncio.wait_for(ws.send(frame), timeout=DEFAULT_NMB_SUBSCRIBER_SEND_TIMEOUT)
-        except (websockets.ConnectionClosed, asyncio.TimeoutError):
+        except (TimeoutError, websockets.ConnectionClosed):
             pass
 
     def _audit_msg(self, msg: NMBMessage, status: DeliveryStatus) -> None:

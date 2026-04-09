@@ -271,9 +271,7 @@ class TestBrokerTimeoutAudit:
 
 
 class TestBrokerFanout:
-    async def test_publish_to_multiple_subscribers_concurrently(
-        self, broker: NMBBroker
-    ) -> None:
+    async def test_publish_to_multiple_subscribers_concurrently(self, broker: NMBBroker) -> None:
         """Publish should deliver to all subscribers without serialized blocking."""
         pub = await _connect(broker, "fanout-pub")
         sub1 = await _connect(broker, "fanout-sub1")

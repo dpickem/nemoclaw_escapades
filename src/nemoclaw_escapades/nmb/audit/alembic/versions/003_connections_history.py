@@ -56,8 +56,10 @@ def downgrade() -> None:
     """)
 
     op.execute("""
-        INSERT OR REPLACE INTO connections (sandbox_id, connected_at, disconnected_at, disconnect_reason)
-        SELECT sandbox_id, MAX(connected_at), disconnected_at, disconnect_reason
+        INSERT OR REPLACE INTO connections
+            (sandbox_id, connected_at, disconnected_at, disconnect_reason)
+        SELECT sandbox_id, MAX(connected_at),
+               disconnected_at, disconnect_reason
         FROM _connections_new
         GROUP BY sandbox_id
     """)

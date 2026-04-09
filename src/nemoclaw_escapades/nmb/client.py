@@ -185,7 +185,9 @@ class MessageBus:
                 additional_headers={"X-Sandbox-ID": self.sandbox_id},
             )
         except (OSError, websockets.WebSocketException) as exc:
-            raise NMBConnectionError(f"Cannot connect to broker at {self.broker_url}: {exc}") from exc
+            raise NMBConnectionError(
+                f"Cannot connect to broker at {self.broker_url}: {exc}"
+            ) from exc
 
         self._closed = False
 
@@ -542,9 +544,7 @@ class MessageBus:
             NMBConnectionError: On connection errors or broker
                 rejections (e.g. ``TARGET_OFFLINE``).
         """
-        msg = NMBMessage(
-            op=Op.REQUEST, to_sandbox=to, type=type, payload=payload, timeout=timeout
-        )
+        msg = NMBMessage(op=Op.REQUEST, to_sandbox=to, type=type, payload=payload, timeout=timeout)
         # Register the reply future before sending so a fast reply
         # (or a broker TIMEOUT frame) is never missed.
         fut: asyncio.Future[NMBMessage] = asyncio.get_running_loop().create_future()
@@ -724,7 +724,10 @@ class MessageBus:
             try:
                 # Poll with a 1-second timeout so we re-check _closed
                 # periodically rather than blocking forever on an empty queue.
-                msg = await asyncio.wait_for(self._listen_queue.get(), timeout=_LISTEN_POLL_INTERVAL_S)
+                msg = await asyncio.wait_for(
+                    self._listen_queue.get(),
+                    timeout=_LISTEN_POLL_INTERVAL_S,
+                )
                 yield msg
             except TimeoutError:
                 continue  # Queue empty — loop back and check _closed.

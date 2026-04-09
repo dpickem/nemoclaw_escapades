@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemoclaw_escapades.config import DEFAULT_NMB_MAX_PAYLOAD_BYTES
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -189,7 +188,8 @@ class NMBMessage(BaseModel):
             if payload_bytes > DEFAULT_NMB_MAX_PAYLOAD_BYTES:
                 raise FrameValidationError(
                     ErrorCode.PAYLOAD_TOO_LARGE,
-                    f"Payload size {payload_bytes} exceeds {DEFAULT_NMB_MAX_PAYLOAD_BYTES} byte limit",
+                    f"Payload size {payload_bytes} exceeds "
+                    f"{DEFAULT_NMB_MAX_PAYLOAD_BYTES} byte limit",
                 )
 
     # ------------------------------------------------------------------
@@ -278,6 +278,3 @@ class FrameValidationError(Exception):
         """
         super().__init__(message)
         self.code = code
-
-
-

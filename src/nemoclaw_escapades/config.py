@@ -50,7 +50,7 @@ DEFAULT_NMB_SUBSCRIBER_SEND_TIMEOUT = 5.0
 # ── NMB client retry defaults (used by tenacity) ─────────────────────
 
 DEFAULT_NMB_CONNECT_MAX_RETRIES = 5
-DEFAULT_NMB_CONNECT_WAIT_MIN = 1.0   # seconds, exponential backoff floor
+DEFAULT_NMB_CONNECT_WAIT_MIN = 1.0  # seconds, exponential backoff floor
 DEFAULT_NMB_CONNECT_WAIT_MAX = 30.0  # seconds, exponential backoff ceiling
 
 # ── NMB queue / buffer limits ────────────────────────────────────────
@@ -163,8 +163,8 @@ def load_config() -> AppConfig:
 
     # In sandbox, use inference.local (OpenShell's inference proxy handles
     # auth and routing).  Locally, use the URL from .env.
-    default_base_url = SANDBOX_INFERENCE_BASE_URL if in_sandbox else os.environ.get(
-        "INFERENCE_HUB_BASE_URL", ""
+    default_base_url = (
+        SANDBOX_INFERENCE_BASE_URL if in_sandbox else os.environ.get("INFERENCE_HUB_BASE_URL", "")
     )
     model = os.environ.get("INFERENCE_MODEL", DEFAULT_INFERENCE_MODEL)
 
