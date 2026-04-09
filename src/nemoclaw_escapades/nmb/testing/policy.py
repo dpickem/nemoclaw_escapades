@@ -169,8 +169,12 @@ class PolicyBroker(NMBBroker):
                 this point; re-keyed later by the harness).
         """
         super().__init__(config)
-        # Build the lookup table from the policy list.
         self._policies: dict[str, SandboxPolicy] = {p.sandbox_id: p for p in (policies or [])}
+        # Cumulative rename ledger: display_name → unique_id.
+        # Populated by each rekey_policy call so that policies added
+        # later can have *all* prior renames applied to their own
+        # egress/ingress sets in one pass.
+        self._renames: dict[str, str] = {}
 
     def add_policy(self, policy: SandboxPolicy) -> None:
         """Register a new policy at runtime.
@@ -194,9 +198,16 @@ class PolicyBroker(NMBBroker):
         so that ``_process_request`` and ``_enforce_policy`` find the
         policy under the ID the client actually sends.
 
-        Also patches any egress/ingress rules in **other** policies
-        that reference the old name so that cross-sandbox allow-lists
-        still match after the rename.
+        Also patches egress/ingress cross-references in **all**
+        policies (including the re-keyed one) so that allow-lists
+        use the unique IDs the broker will actually see:
+
+        1. The current rename (``old`` → ``new``) is applied to
+           every other policy's egress/ingress sets.
+        2. All *prior* renames (from ``_renames``) are applied to
+           the re-keyed policy's own egress/ingress sets, so a
+           policy added late still resolves references to sandboxes
+           re-keyed earlier.
 
         Args:
             old_sandbox_id: The display name the policy was originally
@@ -204,25 +215,36 @@ class PolicyBroker(NMBBroker):
             new_sandbox_id: The globally unique ``sandbox_id`` that
                 the client will use.
         """
-        # Move the policy to the new key.
         policy = self._policies.pop(old_sandbox_id, None)
         if policy is None:
             return
         policy.sandbox_id = new_sandbox_id
         self._policies[new_sandbox_id] = policy
+        self._renames[old_sandbox_id] = new_sandbox_id
 
-        # Patch cross-references in other policies so allow-lists that
-        # mentioned the old display name now reference the unique ID.
+        # Apply THIS rename to every other policy's cross-references.
         for p in self._policies.values():
-            if p.allowed_egress_targets is not None and old_sandbox_id in p.allowed_egress_targets:
-                p.allowed_egress_targets.discard(old_sandbox_id)
-                p.allowed_egress_targets.add(new_sandbox_id)
-            if (
-                p.allowed_ingress_sources is not None
-                and old_sandbox_id in p.allowed_ingress_sources
-            ):
-                p.allowed_ingress_sources.discard(old_sandbox_id)
-                p.allowed_ingress_sources.add(new_sandbox_id)
+            if p is policy:
+                continue
+            self._apply_rename(p, old_sandbox_id, new_sandbox_id)
+
+        # Apply ALL prior renames to the newly re-keyed policy itself,
+        # so references to sandboxes re-keyed in earlier calls are
+        # translated (e.g. "orchestrator" → "orchestrator-abc123").
+        for old, new in self._renames.items():
+            if old == old_sandbox_id:
+                continue
+            self._apply_rename(policy, old, new)
+
+    @staticmethod
+    def _apply_rename(policy: SandboxPolicy, old: str, new: str) -> None:
+        """Replace *old* with *new* in a policy's egress/ingress sets."""
+        if policy.allowed_egress_targets is not None and old in policy.allowed_egress_targets:
+            policy.allowed_egress_targets.discard(old)
+            policy.allowed_egress_targets.add(new)
+        if policy.allowed_ingress_sources is not None and old in policy.allowed_ingress_sources:
+            policy.allowed_ingress_sources.discard(old)
+            policy.allowed_ingress_sources.add(new)
 
     # -- Connection policy -------------------------------------------------
     # Overrides the @staticmethod on the parent.  When ``start()``

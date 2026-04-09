@@ -33,6 +33,42 @@ class TestSandboxConnect:
         assert health_after["num_connections"] == 3
         assert any(s.startswith("coding-2-") for s in health_after["connected_sandboxes"])
 
+    async def test_add_sandbox_with_policy_references_existing_sandboxes(
+        self, harness: IntegrationHarness
+    ) -> None:
+        """A sandbox added at runtime whose egress/ingress reference
+        sandboxes that were already re-keyed during start() must still
+        route successfully (display names in the new policy must be
+        translated to unique IDs).
+        """
+        await harness.start(
+            [
+                SandboxPolicy(
+                    sandbox_id="orchestrator",
+                    allowed_ingress_sources={"coding-1", "coding-2"},
+                ),
+                SandboxPolicy(
+                    sandbox_id="coding-1",
+                    allowed_egress_targets={"orchestrator"},
+                ),
+            ]
+        )
+
+        await harness.add_sandbox(
+            SandboxPolicy(
+                sandbox_id="coding-2",
+                allowed_egress_targets={"orchestrator"},
+                allowed_ingress_sources={"orchestrator"},
+            )
+        )
+
+        orch = harness["orchestrator"]
+        coding2 = harness["coding-2"]
+
+        await coding2.send("orchestrator", "task.complete", {"from": "coding-2"})
+        msg = await orch.wait_for_message("task.complete")
+        assert msg.payload == {"from": "coding-2"}
+
 
 class TestSandboxDisconnect:
     """Disconnect and cleanup tests."""
