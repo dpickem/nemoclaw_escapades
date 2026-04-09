@@ -18,8 +18,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+from sqlalchemy import event, insert, select, text, update
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from nemoclaw_escapades.nmb.audit.models import ConnectionRow, MessageRow
 from nemoclaw_escapades.nmb.models import DeliveryStatus, NMBMessage
 
 _ALEMBIC_DIR = Path(__file__).parent / "alembic"
@@ -48,21 +55,34 @@ class AuditDB:
         """
         self.db_path: str = db_path
         self.persist_payloads: bool = persist_payloads
-        self._conn: aiosqlite.Connection | None = None
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
     async def open(self) -> None:
-        """Run Alembic migrations and open an async connection in WAL mode."""
+        """Run Alembic migrations and open an async SQLAlchemy engine in WAL mode."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._run_migrations()
-        self._conn = await aiosqlite.connect(self.db_path)
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+
+        self._engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
+
+        @event.listens_for(self._engine.sync_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn: Any, _connection_record: Any) -> None:
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            cursor.close()
+
+        self._session_factory = async_sessionmaker(
+            self._engine,
+            expire_on_commit=False,
+        )
 
     async def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
+        """Dispose of the engine and release all connections."""
+        if self._engine:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
 
     def _run_migrations(self) -> None:
         """Run ``alembic upgrade head`` synchronously.
@@ -90,10 +110,10 @@ class AuditDB:
         )
 
     @property
-    def _db(self) -> aiosqlite.Connection:
-        if self._conn is None:
+    def _session(self) -> async_sessionmaker[AsyncSession]:
+        if self._session_factory is None:
             raise RuntimeError("AuditDB is not open — call open() first")
-        return self._conn
+        return self._session_factory
 
     # ------------------------------------------------------------------
     # Message logging
@@ -114,28 +134,23 @@ class AuditDB:
         payload_size = len(payload_json.encode()) if payload_json else 0
         stored_payload = payload_json if self.persist_payloads else ""
 
-        await self._db.execute(
-            """
-            INSERT INTO messages
-                (id, timestamp, op, from_sandbox, to_sandbox, type,
-                 reply_to, channel, payload, payload_size, delivery_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                msg.id,
-                msg.timestamp or time.time(),
-                msg.op.value,
-                msg.from_sandbox,
-                msg.to,
-                msg.type,
-                msg.reply_to,
-                msg.channel,
-                stored_payload,
-                payload_size,
-                delivery_status.value,
-            ),
-        )
-        await self._db.commit()
+        async with self._session() as session:
+            session.add(
+                MessageRow(
+                    id=msg.id,
+                    timestamp=msg.timestamp or time.time(),
+                    op=msg.op.value,
+                    from_sandbox=msg.from_sandbox,
+                    to_sandbox=msg.to,
+                    type=msg.type,
+                    reply_to=msg.reply_to,
+                    channel=msg.channel,
+                    payload=stored_payload,
+                    payload_size=payload_size,
+                    delivery_status=delivery_status.value,
+                )
+            )
+            await session.commit()
 
     # ------------------------------------------------------------------
     # Connection logging
@@ -147,14 +162,14 @@ class AuditDB:
         Args:
             sandbox_id: The connecting sandbox's identity.
         """
-        await self._db.execute(
-            """
-            INSERT OR REPLACE INTO connections (sandbox_id, connected_at)
-            VALUES (?, ?)
-            """,
-            (sandbox_id, time.time()),
-        )
-        await self._db.commit()
+        async with self._session() as session:
+            stmt = (
+                insert(ConnectionRow)
+                .prefix_with("OR REPLACE")
+                .values(sandbox_id=sandbox_id, connected_at=time.time())
+            )
+            await session.execute(stmt)
+            await session.commit()
 
     async def log_disconnection(self, sandbox_id: str, reason: str = "") -> None:
         """Record a sandbox disconnecting from the broker.
@@ -163,34 +178,37 @@ class AuditDB:
             sandbox_id: The disconnecting sandbox's identity.
             reason: Optional human-readable disconnect reason.
         """
-        await self._db.execute(
-            """
-            UPDATE connections
-            SET disconnected_at = ?, disconnect_reason = ?
-            WHERE sandbox_id = ?
-            """,
-            (time.time(), reason, sandbox_id),
-        )
-        await self._db.commit()
+        async with self._session() as session:
+            stmt = (
+                update(ConnectionRow)
+                .where(ConnectionRow.sandbox_id == sandbox_id)
+                .values(disconnected_at=time.time(), disconnect_reason=reason)
+            )
+            await session.execute(stmt)
+            await session.commit()
 
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
 
-    async def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    async def query(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Run an arbitrary SELECT and return rows as dicts.
 
         Args:
-            sql: SQL query string (should be SELECT only).
-            params: Positional bind parameters.
+            sql: SQL query string (should be SELECT only).  Use
+                ``:name`` style bind parameters.
+            params: Named bind parameters.
 
         Returns:
             A list of row dicts keyed by column name.
         """
-        cursor = await self._db.execute(sql, params)
-        cols = [d[0] for d in cursor.description] if cursor.description else []
-        rows = await cursor.fetchall()
-        return [dict(zip(cols, row)) for row in rows]
+        async with self._session() as session:
+            result = await session.execute(text(sql), params or {})
+            return [dict(row) for row in result.mappings()]
 
     async def export_jsonl(self, path: str, since: float | None = None) -> int:
         """Export messages to a JSONL file.
@@ -203,15 +221,18 @@ class AuditDB:
         Returns:
             Number of messages exported.
         """
-        sql = "SELECT * FROM messages"
-        params: tuple[Any, ...] = ()
+        stmt = select(MessageRow).order_by(MessageRow.timestamp)
         if since is not None:
-            sql += " WHERE timestamp >= ?"
-            params = (since,)
-        sql += " ORDER BY timestamp"
+            stmt = stmt.where(MessageRow.timestamp >= since)
 
-        rows = await self.query(sql, params)
+        async with self._session() as session:
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+
         with open(path, "w") as f:
             for row in rows:
-                f.write(json.dumps(row, default=str) + "\n")
+                row_dict = {
+                    c.key: getattr(row, c.key) for c in MessageRow.__table__.columns
+                }
+                f.write(json.dumps(row_dict, default=str) + "\n")
         return len(rows)

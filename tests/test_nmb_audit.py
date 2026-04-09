@@ -42,7 +42,7 @@ class TestAuditDB:
         )
         await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
 
-        rows = await audit_db.query("SELECT * FROM messages WHERE id = ?", ("test-msg-1",))
+        rows = await audit_db.query("SELECT * FROM messages WHERE id = :id", {"id": "test-msg-1"})
         assert len(rows) == 1
         assert rows[0]["from_sandbox"] == "orch"
         assert rows[0]["to_sandbox"] == "coding-1"
@@ -71,13 +71,13 @@ class TestAuditDB:
 
     async def test_log_connection_and_disconnection(self, audit_db: AuditDB) -> None:
         await audit_db.log_connection("sandbox-a")
-        q = "SELECT * FROM connections WHERE sandbox_id = ?"
-        rows = await audit_db.query(q, ("sandbox-a",))
+        q = "SELECT * FROM connections WHERE sandbox_id = :sid"
+        rows = await audit_db.query(q, {"sid": "sandbox-a"})
         assert len(rows) == 1
         assert rows[0]["disconnected_at"] is None
 
         await audit_db.log_disconnection("sandbox-a", "crashed")
-        rows = await audit_db.query(q, ("sandbox-a",))
+        rows = await audit_db.query(q, {"sid": "sandbox-a"})
         assert rows[0]["disconnect_reason"] == "crashed"
         assert rows[0]["disconnected_at"] is not None
 

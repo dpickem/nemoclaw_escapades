@@ -13,10 +13,14 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine
 
+from nemoclaw_escapades.nmb.audit.models import Base
+
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
 
 db_path = os.environ.get("NMB_AUDIT_DB_PATH", "nmb_audit.db")
 config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
@@ -25,7 +29,7 @@ config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (emit SQL to stdout)."""
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=None, literal_binds=True)
+    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()
 
@@ -35,7 +39,7 @@ def run_migrations_online() -> None:
     connectable = create_engine(config.get_main_option("sqlalchemy.url", ""))
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=None)
+        context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
 
