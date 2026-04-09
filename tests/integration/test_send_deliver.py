@@ -39,9 +39,7 @@ class TestSendDeliver:
         assert msg.payload == {"diff": "--- a/..."}
         assert msg.from_sandbox.startswith("coding-1-")
 
-    async def test_bidirectional_exchange(
-        self, two_sandbox_harness: IntegrationHarness
-    ) -> None:
+    async def test_bidirectional_exchange(self, two_sandbox_harness: IntegrationHarness) -> None:
         """Full round-trip: assign → progress → complete."""
         orch = two_sandbox_harness["orchestrator"]
         worker = two_sandbox_harness["coding-1"]
@@ -56,9 +54,7 @@ class TestSendDeliver:
         msg = await orch.wait_for_message("task.complete")
         assert msg.payload == {"result": "done"}
 
-    async def test_send_to_offline_allowed_target(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_send_to_offline_allowed_target(self, harness: IntegrationHarness) -> None:
         """Sending to an allowed but offline target returns TARGET_OFFLINE."""
         await harness.start(
             [

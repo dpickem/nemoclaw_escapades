@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nemoclaw_escapades.nmb.client import MessageBus, NMBConnectionError
+from nemoclaw_escapades.nmb.client import NMBConnectionError
 from nemoclaw_escapades.nmb.models import Op
 from nemoclaw_escapades.nmb.testing import IntegrationHarness, SandboxPolicy
 
@@ -56,9 +56,7 @@ class TestIngressPolicy:
         msg = await orch.wait_for_message("task.complete")
         assert msg.payload == {"ok": True}
 
-    async def test_ingress_from_blocked_source(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_ingress_from_blocked_source(self, harness: IntegrationHarness) -> None:
         """review-1 has egress to orch, but orch blocks ingress from review-1."""
         await harness.start(
             [
@@ -113,9 +111,7 @@ class TestChannelPolicy:
             async for _ in worker.subscribe("progress.review-1"):
                 break
 
-    async def test_wildcard_channel_match(
-        self, two_sandbox_harness: IntegrationHarness
-    ) -> None:
+    async def test_wildcard_channel_match(self, two_sandbox_harness: IntegrationHarness) -> None:
         """orchestrator has progress.* — should match progress.coding-1."""
         import asyncio
 
@@ -146,9 +142,7 @@ class TestChannelPolicy:
 class TestOpPolicy:
     """Op restrictions: which operations a sandbox may use."""
 
-    async def test_allowed_op_succeeds(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_allowed_op_succeeds(self, harness: IntegrationHarness) -> None:
         await harness.start(
             [
                 SandboxPolicy(
@@ -162,9 +156,7 @@ class TestOpPolicy:
         msg = await harness["target"].wait_for_message("ping")
         assert msg.payload == {}
 
-    async def test_blocked_op_denied(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_blocked_op_denied(self, harness: IntegrationHarness) -> None:
         """Sandbox restricted to SEND cannot use REQUEST."""
         await harness.start(
             [
@@ -182,18 +174,12 @@ class TestOpPolicy:
 class TestConnectionPolicy:
     """Connection-level policy: can_connect."""
 
-    async def test_allowed_sandbox_connects(
-        self, harness: IntegrationHarness
-    ) -> None:
-        await harness.start(
-            [SandboxPolicy(sandbox_id="allowed")]
-        )
+    async def test_allowed_sandbox_connects(self, harness: IntegrationHarness) -> None:
+        await harness.start([SandboxPolicy(sandbox_id="allowed")])
         health = harness.broker.health()
         assert health["num_connections"] == 1
 
-    async def test_blocked_sandbox_cannot_connect(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_blocked_sandbox_cannot_connect(self, harness: IntegrationHarness) -> None:
         """A sandbox with can_connect=False is rejected at handshake."""
         await harness.start(
             [

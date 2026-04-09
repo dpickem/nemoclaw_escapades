@@ -14,26 +14,32 @@ pytestmark = pytest.mark.integration
 class TestCodingReviewLoop:
     """End-to-end coding → review → fix → approve workflow from §11."""
 
-    async def test_single_review_iteration(
-        self, three_sandbox_harness: IntegrationHarness
-    ) -> None:
+    async def test_single_review_iteration(self, three_sandbox_harness: IntegrationHarness) -> None:
         """Orchestrator assigns code, reviews it, gets approval."""
         orch = three_sandbox_harness["orchestrator"]
         coder = three_sandbox_harness["coding-1"]
         reviewer = three_sandbox_harness["review-1"]
 
         # 1) Assign task
-        await orch.send("coding-1", "task.assign", {
-            "prompt": "Implement feature X",
-            "context_files": [{"path": "src/main.py"}],
-        })
+        await orch.send(
+            "coding-1",
+            "task.assign",
+            {
+                "prompt": "Implement feature X",
+                "context_files": [{"path": "src/main.py"}],
+            },
+        )
         task = await coder.wait_for_message("task.assign")
         assert task.payload["prompt"] == "Implement feature X"
 
         # 2) Coder completes
-        await coder.send("orchestrator", "task.complete", {
-            "diff": "--- a/src/main.py\n+++ b/src/main.py",
-        })
+        await coder.send(
+            "orchestrator",
+            "task.complete",
+            {
+                "diff": "--- a/src/main.py\n+++ b/src/main.py",
+            },
+        )
         complete = await orch.wait_for_message("task.complete")
 
         # 3) Orchestrator requests review
@@ -72,14 +78,19 @@ class TestCodingReviewLoop:
 
         async def reviewer_rejects() -> None:
             msg = await reviewer.wait_for_message("review.request")
-            await reviewer.reply(msg, "review.feedback", {
-                "verdict": "request_changes",
-                "comments": ["Fix naming conventions"],
-            })
+            await reviewer.reply(
+                msg,
+                "review.feedback",
+                {
+                    "verdict": "request_changes",
+                    "comments": ["Fix naming conventions"],
+                },
+            )
 
         reject_task = asyncio.create_task(reviewer_rejects())
         feedback = await orch.request(
-            "review-1", "review.request",
+            "review-1",
+            "review.request",
             {"diff": v1.payload["diff"]},
             timeout=5.0,
         )
@@ -90,9 +101,13 @@ class TestCodingReviewLoop:
         # --- Round 2: fix → review (approve) ---
 
         coder.received.clear()
-        await orch.send("coding-1", "task.assign", {
-            "prompt": "Fix: " + str(feedback.payload["comments"]),
-        })
+        await orch.send(
+            "coding-1",
+            "task.assign",
+            {
+                "prompt": "Fix: " + str(feedback.payload["comments"]),
+            },
+        )
         fix_task = await coder.wait_for_message("task.assign")
         assert "Fix" in fix_task.payload["prompt"]
 
@@ -107,7 +122,8 @@ class TestCodingReviewLoop:
 
         accept_task = asyncio.create_task(reviewer_accepts())
         approval = await orch.request(
-            "review-1", "review.request",
+            "review-1",
+            "review.request",
             {"diff": v2.payload["diff"]},
             timeout=5.0,
         )
@@ -138,15 +154,9 @@ class TestCodingReviewLoop:
         await coder.wait_for_message("task.assign")
 
         # Coder publishes progress
-        await coder.publish(
-            "progress.coding-1", "task.progress", {"pct": 25, "status": "started"}
-        )
-        await coder.publish(
-            "progress.coding-1", "task.progress", {"pct": 50, "status": "halfway"}
-        )
-        await coder.publish(
-            "progress.coding-1", "task.progress", {"pct": 100, "status": "done"}
-        )
+        await coder.publish("progress.coding-1", "task.progress", {"pct": 25, "status": "started"})
+        await coder.publish("progress.coding-1", "task.progress", {"pct": 50, "status": "halfway"})
+        await coder.publish("progress.coding-1", "task.progress", {"pct": 100, "status": "done"})
 
         await asyncio.wait_for(sub_task, timeout=5.0)
 

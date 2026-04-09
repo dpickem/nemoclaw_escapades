@@ -170,9 +170,7 @@ class PolicyBroker(NMBBroker):
         """
         super().__init__(config)
         # Build the lookup table from the policy list.
-        self._policies: dict[str, SandboxPolicy] = {
-            p.sandbox_id: p for p in (policies or [])
-        }
+        self._policies: dict[str, SandboxPolicy] = {p.sandbox_id: p for p in (policies or [])}
 
     def rekey_policy(self, old_sandbox_id: str, new_sandbox_id: str) -> None:
         """Re-index a policy under a new (unique) ``sandbox_id``.
@@ -206,7 +204,10 @@ class PolicyBroker(NMBBroker):
             if p.allowed_egress_targets is not None and old_sandbox_id in p.allowed_egress_targets:
                 p.allowed_egress_targets.discard(old_sandbox_id)
                 p.allowed_egress_targets.add(new_sandbox_id)
-            if p.allowed_ingress_sources is not None and old_sandbox_id in p.allowed_ingress_sources:
+            if (
+                p.allowed_ingress_sources is not None
+                and old_sandbox_id in p.allowed_ingress_sources
+            ):
                 p.allowed_ingress_sources.discard(old_sandbox_id)
                 p.allowed_ingress_sources.add(new_sandbox_id)
 
@@ -249,9 +250,7 @@ class PolicyBroker(NMBBroker):
 
     # -- Routing policy (overrides _dispatch) ------------------------------
 
-    async def _dispatch(
-        self, sender_id: str, ws: ServerConnection, raw: str
-    ) -> None:
+    async def _dispatch(self, sender_id: str, ws: ServerConnection, raw: str) -> None:
         """Parse, validate, enforce policy, then route.
 
         Identical to the parent's ``_dispatch`` except for the
@@ -378,8 +377,7 @@ class PolicyBroker(NMBBroker):
                         ws,
                         msg.id,
                         ErrorCode.POLICY_DENIED,
-                        f"Ingress from '{sender_id}' denied for sandbox "
-                        f"'{target_id}'",
+                        f"Ingress from '{sender_id}' denied for sandbox '{target_id}'",
                     )
                     return False
 
@@ -392,8 +390,7 @@ class PolicyBroker(NMBBroker):
                         ws,
                         msg.id,
                         ErrorCode.POLICY_DENIED,
-                        f"Channel '{msg.channel}' not allowed for sandbox "
-                        f"'{sender_id}'",
+                        f"Channel '{msg.channel}' not allowed for sandbox '{sender_id}'",
                     )
                     return False
 

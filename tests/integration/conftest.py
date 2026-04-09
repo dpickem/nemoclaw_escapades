@@ -6,7 +6,6 @@ import pytest
 
 from nemoclaw_escapades.nmb.testing import IntegrationHarness, SandboxPolicy
 
-
 # ---------------------------------------------------------------------------
 # Base harness (tests call start() with their own policies)
 # ---------------------------------------------------------------------------

@@ -40,10 +40,9 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-
-from collections.abc import Callable
 
 from nemoclaw_escapades.config import BrokerConfig
 from nemoclaw_escapades.nmb.client import MessageBus
@@ -241,9 +240,7 @@ class SandboxHandle:
         """
         return await self.bus.request(self._resolve(to), type, payload, timeout)
 
-    async def reply(
-        self, original: NMBMessage, type: str, payload: dict[str, Any]
-    ) -> None:
+    async def reply(self, original: NMBMessage, type: str, payload: dict[str, Any]) -> None:
         """Reply to a received request.
 
         Args:
@@ -253,9 +250,7 @@ class SandboxHandle:
         """
         await self.bus.reply(original, type, payload)
 
-    async def publish(
-        self, channel: str, type: str, payload: dict[str, Any]
-    ) -> None:
+    async def publish(self, channel: str, type: str, payload: dict[str, Any]) -> None:
         """Publish to a channel.
 
         Args:
@@ -276,9 +271,7 @@ class SandboxHandle:
         """
         return self.bus.subscribe(channel)
 
-    async def stream(
-        self, to: str, type: str, chunks: Any
-    ) -> None:
+    async def stream(self, to: str, type: str, chunks: Any) -> None:
         """Stream ordered chunks to a target.
 
         Args:

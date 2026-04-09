@@ -26,9 +26,7 @@ class TestRequestReply:
 
         review_task = asyncio.create_task(reviewer_responds())
 
-        reply = await orch.request(
-            "review-1", "review.request", {"diff": "..."}, timeout=5.0
-        )
+        reply = await orch.request("review-1", "review.request", {"diff": "..."}, timeout=5.0)
 
         assert reply.type == "review.feedback"
         assert reply.payload == {"verdict": "approve"}
@@ -46,17 +44,13 @@ class TestRequestReply:
 
         coder_task = asyncio.create_task(coder_responds())
 
-        reply = await orch.request(
-            "coding-1", "task.assign", {"prompt": "fix bug"}, timeout=5.0
-        )
+        reply = await orch.request("coding-1", "task.assign", {"prompt": "fix bug"}, timeout=5.0)
 
         assert reply.type == "task.complete"
         assert reply.payload == {"diff": "fixed"}
         await coder_task
 
-    async def test_request_timeout_fires(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_request_timeout_fires(self, harness: IntegrationHarness) -> None:
         """Broker fires a timeout frame when no reply arrives."""
         await harness.start(
             [
@@ -65,9 +59,7 @@ class TestRequestReply:
             ],
         )
         with pytest.raises(TimeoutError):
-            await harness["requester"].request(
-                "silent", "slow.op", {}, timeout=0.5
-            )
+            await harness["requester"].request("silent", "slow.op", {}, timeout=0.5)
 
     async def test_concurrent_requests_to_different_targets(
         self, three_sandbox_harness: IntegrationHarness

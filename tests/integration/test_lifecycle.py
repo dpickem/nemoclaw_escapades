@@ -6,7 +6,6 @@ import asyncio
 
 import pytest
 
-from nemoclaw_escapades.nmb.models import NMBMessage
 from nemoclaw_escapades.nmb.testing import IntegrationHarness, SandboxPolicy
 
 pytestmark = pytest.mark.integration
@@ -24,15 +23,11 @@ class TestSandboxConnect:
         assert any(s.startswith("orchestrator-") for s in connected)
         assert any(s.startswith("coding-1-") for s in connected)
 
-    async def test_add_sandbox_at_runtime(
-        self, two_sandbox_harness: IntegrationHarness
-    ) -> None:
+    async def test_add_sandbox_at_runtime(self, two_sandbox_harness: IntegrationHarness) -> None:
         health_before = two_sandbox_harness.broker.health()
         assert health_before["num_connections"] == 2
 
-        await two_sandbox_harness.add_sandbox(
-            SandboxPolicy(sandbox_id="coding-2")
-        )
+        await two_sandbox_harness.add_sandbox(SandboxPolicy(sandbox_id="coding-2"))
 
         health_after = two_sandbox_harness.broker.health()
         assert health_after["num_connections"] == 3
@@ -93,9 +88,7 @@ class TestSandboxDisconnect:
 class TestSandboxReconnect:
     """Reconnection behaviour."""
 
-    async def test_reconnect_after_disconnect(
-        self, harness: IntegrationHarness
-    ) -> None:
+    async def test_reconnect_after_disconnect(self, harness: IntegrationHarness) -> None:
         await harness.start(
             [
                 SandboxPolicy(sandbox_id="orchestrator"),
@@ -117,12 +110,8 @@ class TestSandboxReconnect:
         msg = await harness["worker"].wait_for_message("ping")
         assert msg.payload == {"after": "reconnect"}
 
-    async def test_audit_records_connection_history(
-        self, harness: IntegrationHarness
-    ) -> None:
-        await harness.start(
-            [SandboxPolicy(sandbox_id="audited")]
-        )
+    async def test_audit_records_connection_history(self, harness: IntegrationHarness) -> None:
+        await harness.start([SandboxPolicy(sandbox_id="audited")])
 
         unique_id = harness["audited"].bus.sandbox_id
 
@@ -132,8 +121,7 @@ class TestSandboxReconnect:
 
         assert harness.broker._audit is not None
         rows = await harness.broker._audit.query(
-            "SELECT sandbox_id, disconnect_reason "
-            "FROM connections WHERE sandbox_id = :sid",
+            "SELECT sandbox_id, disconnect_reason FROM connections WHERE sandbox_id = :sid",
             {"sid": unique_id},
         )
         assert len(rows) >= 1

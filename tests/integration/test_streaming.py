@@ -39,9 +39,7 @@ class TestStreaming:
         assert data_chunks[2].seq == 2
         assert data_chunks[0].payload == {"chunk": "part-0", "index": 0}
 
-    async def test_stream_preserves_ordering(
-        self, two_sandbox_harness: IntegrationHarness
-    ) -> None:
+    async def test_stream_preserves_ordering(self, two_sandbox_harness: IntegrationHarness) -> None:
         orch = two_sandbox_harness["orchestrator"]
         worker = two_sandbox_harness["coding-1"]
 
