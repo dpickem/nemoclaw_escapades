@@ -172,6 +172,19 @@ class PolicyBroker(NMBBroker):
         # Build the lookup table from the policy list.
         self._policies: dict[str, SandboxPolicy] = {p.sandbox_id: p for p in (policies or [])}
 
+    def add_policy(self, policy: SandboxPolicy) -> None:
+        """Register a new policy at runtime.
+
+        Use this for sandboxes added after the broker was constructed
+        (e.g. via ``IntegrationHarness.add_sandbox``).  The policy is
+        indexed by ``policy.sandbox_id`` — call :meth:`rekey_policy`
+        afterwards to translate the display name to the unique ID.
+
+        Args:
+            policy: The sandbox policy to register.
+        """
+        self._policies[policy.sandbox_id] = policy
+
     def rekey_policy(self, old_sandbox_id: str, new_sandbox_id: str) -> None:
         """Re-index a policy under a new (unique) ``sandbox_id``.
 

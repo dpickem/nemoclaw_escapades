@@ -624,16 +624,15 @@ class MessageBus:
             if queue in queues:
                 queues.remove(queue)
             if not queues:
-                # Last subscriber for this channel — remove the entry
-                # so _dispatch_deliver stops looking here.
+                # Last local subscriber for this channel — remove the
+                # entry so _dispatch_deliver stops looking here, and
+                # tell the broker to stop routing this channel to us.
                 self._channel_queues.pop(channel, None)
-
-            # Tell the broker to stop routing this channel to us.
-            unsub = NMBMessage(op=Op.UNSUBSCRIBE, channel=channel)
-            try:
-                await self._conn.send(unsub.to_json())
-            except (NMBConnectionError, websockets.ConnectionClosed):
-                pass  # Already disconnected — nothing to unsubscribe from.
+                unsub = NMBMessage(op=Op.UNSUBSCRIBE, channel=channel)
+                try:
+                    await self._conn.send(unsub.to_json())
+                except (NMBConnectionError, websockets.ConnectionClosed):
+                    pass
 
     async def publish(self, channel: str, type: str, payload: dict[str, Any]) -> None:
         """Publish a message to a channel.

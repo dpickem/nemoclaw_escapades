@@ -499,9 +499,14 @@ class IntegrationHarness:
         bus = MessageBus(sandbox_id=display_name, broker_url=self._broker_url)
 
         if self._broker:
+            self._broker.add_policy(policy)
             self._broker.rekey_policy(display_name, bus.sandbox_id)
 
         self._display_to_unique[display_name] = bus.sandbox_id
+
+        if not policy.can_connect:
+            return SandboxHandle(display_name, bus, policy, self._resolve)
+
         await bus.connect()
         handle = SandboxHandle(display_name, bus, policy, self._resolve)
         await handle.start_collecting()
