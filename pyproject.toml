@@ -32,6 +32,11 @@ dev = [
 [project.scripts]
 nmb-client = "nemoclaw_escapades.nmb.cli:main"
 
+[tool.nemoclaw-escapades]
+# External CLI tools not installable via pip — pinned here so scripts and
+# docs can reference a single source of truth for required versions.
+openshell = ">=0.0.21"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/nemoclaw_escapades"]
 
