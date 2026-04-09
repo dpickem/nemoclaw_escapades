@@ -15,7 +15,6 @@ from pathlib import Path
 
 # ── Defaults (single source of truth — no magic strings elsewhere) ─
 
-DEFAULT_INFERENCE_BASE_URL = "https://inference-api.nvidia.com/v1"
 SANDBOX_INFERENCE_BASE_URL = "https://inference.local/v1"
 DEFAULT_INFERENCE_MODEL = "azure/anthropic/claude-opus-4-6"  # hyphenated, not dotted
 DEFAULT_INFERENCE_TIMEOUT_S = 60
@@ -45,7 +44,7 @@ class SlackConfig:
 
 @dataclass
 class InferenceConfig:
-    base_url: str = DEFAULT_INFERENCE_BASE_URL
+    base_url: str = ""
     api_key: str = ""
     model: str = DEFAULT_INFERENCE_MODEL
     timeout_s: int = DEFAULT_INFERENCE_TIMEOUT_S
@@ -123,6 +122,8 @@ def load_config() -> AppConfig:
         missing.append("SLACK_APP_TOKEN")
     if not api_key and not in_sandbox:
         missing.append("INFERENCE_HUB_API_KEY")
+    if not os.environ.get("INFERENCE_HUB_BASE_URL") and not in_sandbox:
+        missing.append("INFERENCE_HUB_BASE_URL")
     if missing:
         raise ValueError(
             f"Missing required environment variables: {', '.join(missing)}. "
@@ -130,8 +131,10 @@ def load_config() -> AppConfig:
         )
 
     # In sandbox, use inference.local (OpenShell's inference proxy handles
-    # auth and routing).  Locally, hit the inference API directly.
-    default_base_url = SANDBOX_INFERENCE_BASE_URL if in_sandbox else DEFAULT_INFERENCE_BASE_URL
+    # auth and routing).  Locally, use the URL from .env.
+    default_base_url = SANDBOX_INFERENCE_BASE_URL if in_sandbox else os.environ.get(
+        "INFERENCE_HUB_BASE_URL", ""
+    )
     model = os.environ.get("INFERENCE_MODEL", DEFAULT_INFERENCE_MODEL)
 
     return AppConfig(

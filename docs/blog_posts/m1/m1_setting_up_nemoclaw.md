@@ -213,17 +213,20 @@ I am developing this project on macOS. In principle, this code should be able to
 | A Slack workspace | You have admin access or can create apps | — |
 | An NVIDIA account | For Inference Hub API keys | [build.nvidia.com](https://build.nvidia.com) |
 
-> **Note on NVIDIA Inference Hub naming:**
+> **Note on model availability:**
 > [build.nvidia.com](https://build.nvidia.com) is the public developer portal
-> where you browse models and create API keys. The actual inference endpoint is
-> `inference-api.nvidia.com`. Inside NVIDIA, this service is referred to as
-> the **Inference Hub** (sometimes via `inference.nvidia.com`). The API and
-> key management are shared, but the model catalogs differ:
-> `build.nvidia.com` only lists open-weight models, while the internal
-> Inference Hub also surfaces closed-source models (e.g. Claude, GPT).
-> The model name in your config (e.g. `azure/anthropic/claude-opus-4-6`)
-> must match what the endpoint actually serves — check availability for
-> your account.
+> where you browse models and create API keys. The portal only **displays**
+> open-weight models (Llama, Nemotron, Qwen, etc.), but the API behind it
+> appears to serve a much larger catalog — including closed-source models like Claude,
+> GPT, and Gemini — depending on your account. The model name in your config
+> (e.g. `azure/anthropic/claude-opus-4-6`) must match what the endpoint
+> actually serves; query
+> [`https://inference-api.nvidia.com/v1/models`](https://inference-api.nvidia.com/v1/models)
+> with your API key to see what's available to you. Any OpenAI-compatible inference provider works with this
+> project — set `INFERENCE_HUB_BASE_URL` and `INFERENCE_HUB_API_KEY` in your
+> `.env` to point at the provider of your choice (e.g.
+> [OpenRouter](https://openrouter.ai), a self-hosted vLLM instance, or the
+> NVIDIA endpoint).
 
 ### Step 1: Create a Slack App
 
@@ -296,6 +299,7 @@ Edit `.env` and fill in the three required values:
 SLACK_BOT_TOKEN=xoxb-your-token-here
 SLACK_APP_TOKEN=xapp-your-token-here
 INFERENCE_HUB_API_KEY=your-nvidia-api-key-here
+INFERENCE_HUB_BASE_URL=https://your-inference-endpoint/v1
 ```
 
 ### Step 4: Install Dependencies
@@ -405,14 +409,14 @@ openshell provider create \
     --name inference-hub \
     --type openai \
     --credential "OPENAI_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
-    --config "OPENAI_BASE_URL=https://inference-api.nvidia.com/v1"
+    --config "OPENAI_BASE_URL=$(grep INFERENCE_HUB_BASE_URL .env | cut -d= -f2-)"
 ```
 
 Let's break this down:
 
 - **`--name inference-hub`**: A logical name we'll reference later.
-- **`--type openai`**: The provider type. We use `openai` because the NVIDIA
-  Inference Hub exposes an OpenAI-compatible API (`/v1/chat/completions`).
+- **`--type openai`**: The provider type. We use `openai` because our
+  inference endpoint exposes an OpenAI-compatible API (`/v1/chat/completions`).
   Other types: `nvidia`, `anthropic`, `claude`, `generic`.
 - **`--credential "OPENAI_API_KEY=..."`**: The API key. The name
   `OPENAI_API_KEY` is required by the `openai` provider type — it's the env
@@ -420,12 +424,10 @@ Let's break this down:
   your `.env` file.
 - **`--config "OPENAI_BASE_URL=..."`**: The upstream endpoint. Without this,
   the `openai` type defaults to `api.openai.com`. We override it to point to
-  NVIDIA's inference endpoint.
+  the endpoint configured in `INFERENCE_HUB_BASE_URL`.
 
 **Why not `--type nvidia`?** The `nvidia` type defaults to
-`integrate.api.nvidia.com`, which is a **different API** from
-`inference-api.nvidia.com`. Models like `azure/anthropic/claude-opus-4-6`
-are only available on the latter, so `--type nvidia` returns 404. See
+`integrate.api.nvidia.com`, which may not match your endpoint. See
 [Lesson #10](#10-type-nvidia-vs-type-openai-for-the-inference-provider)
 for a full comparison.
 
@@ -486,12 +488,12 @@ This configures the `inference.local` proxy endpoint inside sandboxes:
 sequenceDiagram
     participant App as Sandbox App
     participant Proxy as inference.local Proxy
-    participant Hub as inference-api.nvidia.com
+    participant Hub as Upstream Endpoint
 
     App->>Proxy: POST /v1/chat/completions<br/>(no Authorization header)
     Note over Proxy: Look up provider "inference-hub"
     Note over Proxy: Add Authorization: Bearer <real-api-key>
-    Note over Proxy: Override model → azure/anthropic/claude-opus-4-6
+    Note over Proxy: Override model → configured model name
     Proxy->>Hub: POST /v1/chat/completions<br/>(real key + forced model)
     Hub-->>Proxy: Model completion
     Proxy-->>App: Response (unchanged)
@@ -630,7 +632,7 @@ endpoints:
       - allow: { method: POST, path: "/**" }
 ```
 
-Note this is `inference.local`, NOT `inference-api.nvidia.com`. The app sends
+Note this is `inference.local`, not the upstream endpoint directly. The app sends
 requests to `inference.local`; the inference routing proxy handles forwarding
 to the real upstream. Direct access to external inference endpoints is blocked
 by the proxy (Python's HTTP libraries use CONNECT tunneling, which the proxy
@@ -1354,7 +1356,7 @@ This was the hardest bug to diagnose. The OpenShell proxy supports two modes for
 
 **The problem:** Python's HTTP libraries (`httpx`, `urllib.request`, `curl`) send `CONNECT host:443` requests through an HTTPS proxy. This is standard HTTP proxy behavior. But OpenShell's proxy rejects CONNECT requests for endpoints configured with `protocol: rest`. It returns **403 Forbidden**.
 
-Node.js-based tools (Claude Code, OpenClaw) send regular HTTP requests through the proxy instead of CONNECT, which is why the [reference NemoClaw policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml) lists `inference-api.nvidia.com` with `protocol: rest` and it works — for Node.
+Node.js-based tools (Claude Code, OpenClaw) send regular HTTP requests through the proxy instead of CONNECT, which is why the [reference NemoClaw policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml) lists the inference endpoint with `protocol: rest` and it works — for Node.
 
 **The workaround for Python:** Use `inference.local` instead of hitting the inference API directly. `inference.local` is OpenShell's built-in inference proxy endpoint. The app sends requests to `https://inference.local/v1/...` and the proxy handles authentication, routing, and forwarding to the real upstream.  No CONNECT tunnel is needed because `inference.local` resolves locally inside the sandbox's network namespace.
 
@@ -1377,23 +1379,21 @@ Without this, `inference.local` returns **503 Unknown** (no route configured).
 (See also [Step 7: Register the Inference Provider](#step-7-register-the-inference-provider))
 
 OpenShell supports multiple provider types for inference routing. At first
-glance, `--type nvidia` seems like the natural choice for the NVIDIA
-Inference Hub. **It doesn't work** for models hosted on
-`inference-api.nvidia.com` — and the failure mode is a confusing 404.
+glance, `--type nvidia` seems like the natural choice. **It doesn't work**
+for many endpoints — and the failure mode is a confusing 404.
 
 **The problem with `--type nvidia`:**
 
 ```bash
-# DON'T DO THIS for inference-api.nvidia.com models
+# DON'T DO THIS unless your endpoint is integrate.api.nvidia.com
 openshell provider create \
     --name inference-hub \
     --type nvidia \
     --credential "NVIDIA_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)"
 ```
 
-- The `nvidia` type defaults to `integrate.api.nvidia.com` — a **different
-  API** from `inference-api.nvidia.com`
-- Models like `azure/anthropic/claude-opus-4-6` only exist on the latter
+- The `nvidia` type defaults to `integrate.api.nvidia.com` — which may not
+  match your actual endpoint
 - The sandbox gets `HTTP/1.1 404 Unknown` from `inference.local` and the
   error gives no hint that the upstream endpoint is wrong
 - We verified this failure in production: the provider registers fine,
@@ -1406,15 +1406,14 @@ openshell provider create \
     --name inference-hub \
     --type openai \
     --credential "OPENAI_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
-    --config "OPENAI_BASE_URL=https://inference-api.nvidia.com/v1"
+    --config "OPENAI_BASE_URL=$(grep INFERENCE_HUB_BASE_URL .env | cut -d= -f2-)"
 ```
 
 - Credential key: `OPENAI_API_KEY` (required by the `openai` type regardless
   of which provider you're actually hitting)
 - Base URL: must be overridden explicitly via `--config`, otherwise it
   defaults to `api.openai.com`
-- This works because the NVIDIA Inference Hub exposes an OpenAI-compatible
-  API (`/v1/chat/completions`)
+- This works for any OpenAI-compatible endpoint (`/v1/chat/completions`)
 
 **Comparison:**
 
@@ -1423,9 +1422,39 @@ openshell provider create \
 | Credential key name | `NVIDIA_API_KEY` | `OPENAI_API_KEY` |
 | Default base URL | `integrate.api.nvidia.com` | `api.openai.com` |
 | Configurable base URL | No | Yes, via `--config "OPENAI_BASE_URL=..."` |
-| Works with `inference-api.nvidia.com` | **No — 404** | **Yes** |
+| Works with custom endpoints | **No — 404 unless it matches the default** | **Yes** |
 | Works with `integrate.api.nvidia.com` | Yes | Yes (with config override) |
 | Inference routing (`openshell inference set`) | ✓ | ✓ |
+
+**NVIDIA exposes three surfaces for inference, but only two are API
+endpoints — and they serve completely disjoint model catalogs (zero
+overlap):**
+
+| | [build.nvidia.com](https://build.nvidia.com) | `integrate.api.nvidia.com` | `inference-api.nvidia.com` |
+|---|---|---|---|
+| **What it is** | Web portal / playground | OpenAI-compatible API | OpenAI-compatible API |
+| **Default for** | — (not an API) | `--type nvidia` | — (use `--type openai` + config) |
+| **Total models** | — | ~186 | ~139 |
+| **Closed-source** | — | None | Claude, GPT, Gemini, o1/o3/o4, Perplexity Sonar |
+| **Open-weight** | Browse & test | Llama, Nemotron, Qwen, Mistral, Gemma, DeepSeek, Phi, Granite, Kimi, etc. | Llama, Nemotron, Qwen (via `nvidia/`, `nvcf/` prefixes) |
+| **Naming scheme** | — | Flat: `meta/llama-3.3-70b-instruct` | Provider-routed: `azure/anthropic/claude-opus-4-6` |
+| **Auth for `/v1/models`** | — | Not required | Required |
+| **Shared models** | — | 0 shared between the two APIs | 0 shared between the two APIs |
+
+`build.nvidia.com` is a web UI for browsing and testing models — it is not
+an API endpoint. The API behind it is `integrate.api.nvidia.com`. API keys
+created on `build.nvidia.com` work with both API endpoints.
+
+This is why `--type nvidia` returns 404 for models like
+`azure/anthropic/claude-opus-4-6` — the two APIs don't share a single
+model, and that ID only exists on `inference-api.nvidia.com`.
+To check which models are available to you, query the `/v1/models` endpoint
+with your API key:
+
+```bash
+curl -s -H "Authorization: Bearer $INFERENCE_HUB_API_KEY" \
+    "$INFERENCE_HUB_BASE_URL/models" | python3 -m json.tool
+```
 
 **Why not `--type generic`?** The `generic` type injects credentials via env
 var placeholders, but it is not compatible with `openshell inference set`.

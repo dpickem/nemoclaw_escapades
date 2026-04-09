@@ -65,11 +65,14 @@ fi
 
 # ── Inference Hub API Key ─────────────────────────────────────────────
 
-INFERENCE_BASE="${INFERENCE_HUB_BASE_URL:-https://inference-api.nvidia.com/v1}"
+INFERENCE_BASE="${INFERENCE_HUB_BASE_URL:-}"
 MODEL="${INFERENCE_MODEL:-azure/anthropic/claude-opus-4-6}"
 
 echo "Inference Hub API Key (INFERENCE_HUB_API_KEY)"
-if check_var INFERENCE_HUB_API_KEY; then
+if [[ -z "$INFERENCE_BASE" ]]; then
+    printf "  ${FAIL} INFERENCE_HUB_BASE_URL is not set — cannot test inference\n"
+    ((failures++))
+elif check_var INFERENCE_HUB_API_KEY; then
     status=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer ${INFERENCE_HUB_API_KEY}" \
         "${INFERENCE_BASE}/models")

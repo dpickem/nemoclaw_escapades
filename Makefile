@@ -91,10 +91,8 @@ setup-gateway: ## Start the OpenShell gateway if not already running
 	} || echo "⚠  openshell CLI not found — skipping gateway setup."
 
 # Inference provider must be 'openai' type (not 'nvidia' or 'generic') so that
-# openshell inference routing works via inference.local.  The 'nvidia' type
-# defaults to integrate.api.nvidia.com which is a different API from
-# inference-api.nvidia.com where our model lives.  The 'openai' type with an
-# explicit base URL override gives us the correct endpoint.
+# openshell inference routing works via inference.local.  The 'openai' type
+# with an explicit base URL override points to the endpoint from .env.
 # Slack uses 'generic' for user-defined env var names.
 .PHONY: setup-secrets
 setup-secrets: .env ## Register inference and Slack providers with the gateway
@@ -104,7 +102,7 @@ setup-secrets: .env ## Register inference and Slack providers with the gateway
 			--name $(INFERENCE_PROVIDER) \
 			--type $(INFERENCE_TYPE) \
 			--credential "OPENAI_API_KEY=$$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
-			--config "OPENAI_BASE_URL=https://inference-api.nvidia.com/v1" \
+			--config "OPENAI_BASE_URL=$${INFERENCE_HUB_BASE_URL}" \
 		&& echo "✓ Inference provider registered." \
 		|| echo "⚠  Provider may already exist (use 'openshell provider update' to change)."; \
 		openshell inference set \

@@ -88,7 +88,7 @@ network_policies:
   # The app sends requests to https://inference.local/v1, the proxy
   # resolves the credential placeholder and forwards to the real
   # inference endpoint configured via `openshell inference set`.
-  # Direct access to inference-api.nvidia.com is blocked by the proxy;
+  # Direct access to the upstream inference endpoint is blocked by the proxy;
   # all inference traffic MUST go through inference.local.
   inference:
     name: inference

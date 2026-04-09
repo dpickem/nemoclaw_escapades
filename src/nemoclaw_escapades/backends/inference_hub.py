@@ -1,8 +1,8 @@
-"""NVIDIA Inference Hub backend.
+"""Inference Hub backend.
 
-Calls the NVIDIA Inference Hub (https://inference-api.nvidia.com) via its
-OpenAI-compatible ``/chat/completions`` endpoint.  This is the first — and
-in M1 the only — concrete ``BackendBase`` implementation.
+Calls an OpenAI-compatible ``/chat/completions`` endpoint (configured via
+``INFERENCE_HUB_BASE_URL``).  This is the first — and in M1 the only —
+concrete ``BackendBase`` implementation.
 
 Key behaviours:
 
