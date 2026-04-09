@@ -274,9 +274,9 @@ class MessageBus:
         self._pending_futures.clear()
 
         # Fail ACK futures (callers awaiting send/publish/subscribe confirmation).
-        for fut in self._pending_acks.values():
-            if not fut.done():
-                fut.set_exception(NMBConnectionError("Connection closed"))
+        for ack_fut in self._pending_acks.values():
+            if not ack_fut.done():
+                ack_fut.set_exception(NMBConnectionError("Connection closed"))
         self._pending_acks.clear()
 
     @property
@@ -415,9 +415,9 @@ class MessageBus:
             if not fut.done():
                 fut.set_exception(exc)
         elif msg.id in self._pending_acks:
-            fut = self._pending_acks.pop(msg.id)
-            if not fut.done():
-                fut.set_exception(exc)
+            ack_fut = self._pending_acks.pop(msg.id)
+            if not ack_fut.done():
+                ack_fut.set_exception(exc)
 
     def _dispatch_timeout(self, msg: NMBMessage) -> None:
         """Route a broker timeout to the matching pending request future.

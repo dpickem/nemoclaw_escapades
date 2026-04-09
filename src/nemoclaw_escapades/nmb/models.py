@@ -158,7 +158,7 @@ class NMBMessage(BaseModel):
     # Validation
     # ------------------------------------------------------------------
 
-    def validate(self) -> None:
+    def validate_frame(self) -> None:
         """Validate this frame against per-``op`` required-field rules.
 
         Checks that all fields listed in ``_REQUIRED_FIELDS`` for this

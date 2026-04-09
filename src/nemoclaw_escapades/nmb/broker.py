@@ -422,7 +422,7 @@ class NMBBroker:
 
         # ── Validate required fields for this op ──
         try:
-            msg.validate()
+            msg.validate_frame()
         except FrameValidationError as exc:
             # No audit: validation failure is a client protocol error,
             # not a delivery attempt.

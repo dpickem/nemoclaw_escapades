@@ -102,19 +102,19 @@ class TestSerializeRoundTrip:
 class TestValidation:
     def test_valid_send(self) -> None:
         msg = NMBMessage(op=Op.SEND, to_sandbox="x", type="t", payload={})
-        msg.validate()
+        msg.validate_frame()
 
     def test_missing_required_field(self) -> None:
         msg = NMBMessage(op=Op.SEND, type="t", payload={})
         with pytest.raises(FrameValidationError) as exc_info:
-            msg.validate()
+            msg.validate_frame()
         assert exc_info.value.code == ErrorCode.INVALID_FRAME
         assert "to_sandbox" in str(exc_info.value)
 
     def test_payload_too_large(self) -> None:
         msg = NMBMessage(op=Op.SEND, to_sandbox="x", type="t", payload={"data": "x" * 11_000_000})
         with pytest.raises(FrameValidationError) as exc_info:
-            msg.validate()
+            msg.validate_frame()
         assert exc_info.value.code == ErrorCode.PAYLOAD_TOO_LARGE
 
     def test_malformed_json(self) -> None:

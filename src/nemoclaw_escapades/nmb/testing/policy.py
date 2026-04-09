@@ -277,7 +277,7 @@ class PolicyBroker(NMBBroker):
 
         # ── Validate required fields ──
         try:
-            msg.validate()
+            msg.validate_frame()
         except FrameValidationError as exc:
             await self._send_error(ws, msg.id, exc.code, str(exc))
             return
