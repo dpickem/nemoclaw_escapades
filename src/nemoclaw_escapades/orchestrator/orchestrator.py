@@ -245,6 +245,7 @@ class Orchestrator:
                 model=self._config.model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
+                request_id=request_id,
             )
             result = await self._backend.complete(inference_request)
 

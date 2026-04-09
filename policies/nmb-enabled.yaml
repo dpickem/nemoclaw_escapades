@@ -1,0 +1,23 @@
+# NMB network policy — add to any sandbox that participates in NMB messaging.
+#
+# Grants access to messages.local:9876 (resolved by the OpenShell proxy
+# to the NMB broker on the host).  Pair with the sandbox's existing
+# network policy (e.g. policies/orchestrator.yaml).
+#
+# The broker uses WebSocket (long-lived bidirectional), so we need
+# access: full (opaque CONNECT tunnel) — same pattern as slack_websocket
+# in orchestrator.yaml.  Do NOT combine with protocol: rest / tls: terminate;
+# those are for HTTP REST interception and are mutually exclusive with
+# access: full (see Lesson #8 in the M1 blog post).
+version: 1
+
+network_policies:
+  nmb:
+    name: nemoclaw-message-bus
+    endpoints:
+      - host: messages.local
+        port: 9876
+        access: full
+    binaries:
+      - path: /usr/local/bin/nmb-client
+      - path: /usr/local/bin/python*

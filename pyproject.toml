@@ -14,6 +14,10 @@ dependencies = [
     "aiohttp>=3.9.0",
     "httpx>=0.27.0",
     "tenacity>=9.0.0",
+    "websockets>=13.0",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "alembic>=1.13.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +29,14 @@ dev = [
     "respx>=0.22.0",
     "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+nmb-client = "nemoclaw_escapades.nmb.cli:main"
+
+[tool.nemoclaw-escapades]
+# External CLI tools not installable via pip — pinned here so scripts and
+# docs can reference a single source of truth for required versions.
+openshell = ">=0.0.21"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nemoclaw_escapades"]

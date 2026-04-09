@@ -362,9 +362,13 @@ class SlackConnector(ConnectorBase):
         fallback_text = self._extract_fallback_text(response)
 
         if thinking_ts:
-            await self._update_message(client, channel, thinking_ts, fallback_text, blocks)
+            await self._update_message(
+                client, channel, thinking_ts, fallback_text, blocks, request.request_id
+            )
         else:
-            await self._post_message(client, channel, thread_ts, fallback_text, blocks)
+            await self._post_message(
+                client, channel, thread_ts, fallback_text, blocks, request.request_id
+            )
 
     def _is_error_rate_limited(self, channel: str) -> bool:
         """Check if error responses for this channel have exceeded the limit."""
@@ -404,17 +408,19 @@ class SlackConnector(ConnectorBase):
         ts: str,
         text: str,
         blocks: list[dict[str, Any]],
+        request_id: str = "",
     ) -> None:
         """Replace an existing message (the thinking placeholder) in-place.
 
         Falls back to posting a new message if the update fails.
 
         Args:
-            client:  Slack ``AsyncWebClient``.
-            channel: Channel ID containing the message.
-            ts:      Timestamp of the message to update.
-            text:    Plain-text fallback.
-            blocks:  Block Kit JSON dicts for the updated message.
+            client:     Slack ``AsyncWebClient``.
+            channel:    Channel ID containing the message.
+            ts:         Timestamp of the message to update.
+            text:       Plain-text fallback.
+            blocks:     Block Kit JSON dicts for the updated message.
+            request_id: Correlation ID for structured logging.
         """
         try:
             await client.chat_update(
@@ -425,14 +431,14 @@ class SlackConnector(ConnectorBase):
             )
             logger.info(
                 "Response sent (updated thinking message)",
-                extra={"channel_id": channel, "ts": ts},
+                extra={"request_id": request_id, "channel_id": channel, "ts": ts},
             )
         except Exception:
             logger.warning(
                 "Failed to update thinking message, posting new message",
                 exc_info=True,
             )
-            await self._post_message(client, channel, None, text, blocks)
+            await self._post_message(client, channel, None, text, blocks, request_id)
 
     async def _post_message(
         self,
@@ -441,15 +447,17 @@ class SlackConnector(ConnectorBase):
         thread_ts: str | None,
         text: str,
         blocks: list[dict[str, Any]],
+        request_id: str = "",
     ) -> None:
         """Post a new message (fallback when thinking update fails).
 
         Args:
-            client:    Slack ``AsyncWebClient``.
-            channel:   Channel ID.
-            thread_ts: Parent thread timestamp.
-            text:      Plain-text fallback.
-            blocks:    Block Kit JSON dicts.
+            client:     Slack ``AsyncWebClient``.
+            channel:    Channel ID.
+            thread_ts:  Parent thread timestamp.
+            text:       Plain-text fallback.
+            blocks:     Block Kit JSON dicts.
+            request_id: Correlation ID for structured logging.
         """
         try:
             await client.chat_postMessage(
@@ -460,12 +468,16 @@ class SlackConnector(ConnectorBase):
             )
             logger.info(
                 "Response sent (new message)",
-                extra={"channel_id": channel, "thread_ts": thread_ts},
+                extra={"request_id": request_id, "channel_id": channel, "thread_ts": thread_ts},
             )
         except Exception:
             logger.error(
                 "Failed to send Slack reply",
-                extra={"channel_id": channel, "error_category": "connector_error"},
+                extra={
+                    "request_id": request_id,
+                    "channel_id": channel,
+                    "error_category": "connector_error",
+                },
                 exc_info=True,
             )
 

@@ -14,6 +14,7 @@
 ## Table of Contents
 
 1. [Overview](#1--overview)
+   - [Five Key Advantages](#five-key-advantages)
 2. [The Problem OpenShell Solves](#2--the-problem-openshell-solves)
 3. [High-Level Architecture](#3--high-level-architecture)
 4. [Core Components](#4--core-components)
@@ -66,6 +67,36 @@ runtime before any action executes.
 
 Alpha stage — "single-player mode" for individual developers. Multi-tenant
 enterprise deployments planned for future versions.
+
+### Five Key Advantages
+
+1. **Out-of-process policy enforcement** — Guardrails live *outside* the agent
+   process, not inside it. Even a compromised agent cannot bypass them. This
+   solves the "agent security trilemma": getting safety, capability, and
+   autonomy simultaneously instead of picking two.
+
+2. **Defense-in-depth sandbox isolation** — Three enforcement layers stack on
+   top of each other: application-level (proxy intercepts all egress),
+   infrastructure-level (Docker containers, network namespaces, unprivileged
+   user), and kernel-level (Landlock LSM for filesystem, seccomp for syscalls).
+   An agent would have to defeat all three.
+
+3. **Privacy-aware inference routing** — The Privacy Router (`inference.local`)
+   strips any credentials the agent sends, injects the real backend credentials,
+   and routes requests based on operator-defined cost/privacy policy. The agent
+   never sees API keys and doesn't even know which model it's talking to. Models
+   can be switched at runtime without restarting the sandbox.
+
+4. **Granular, hot-reloadable policy engine** — Policies are defined per-sandbox
+   with per-binary, per-endpoint, and per-HTTP-method/path granularity. Network
+   policies can be updated on a running sandbox without rebuilding or restarting.
+   Every allow/deny decision is logged for a full audit trail.
+
+5. **Agent-agnostic with flexible deployment topology** — Works with any agent
+   (Claude Code, OpenClaw, Codex, custom code). The same CLI, policies, and
+   sandbox definitions work identically across five deployment modes: local
+   Docker, remote SSH, cloud reverse proxy, Brev managed GPU, and DGX Spark —
+   just switch the active gateway with `openshell gateway select`.
 
 ---
 

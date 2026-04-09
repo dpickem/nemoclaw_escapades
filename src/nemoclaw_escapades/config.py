@@ -15,7 +15,6 @@ from pathlib import Path
 
 # ── Defaults (single source of truth — no magic strings elsewhere) ─
 
-DEFAULT_INFERENCE_BASE_URL = "https://inference-api.nvidia.com/v1"
 SANDBOX_INFERENCE_BASE_URL = "https://inference.local/v1"
 DEFAULT_INFERENCE_MODEL = "azure/anthropic/claude-opus-4-6"  # hyphenated, not dotted
 DEFAULT_INFERENCE_TIMEOUT_S = 60
@@ -26,6 +25,16 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 2048
 
+# ── NMB broker defaults ───────────────────────────────────────────────
+
+DEFAULT_NMB_HOST = "0.0.0.0"
+DEFAULT_NMB_PORT = 9876
+DEFAULT_NMB_AUDIT_DB_PATH = "~/.nemoclaw/nmb/audit.db"
+DEFAULT_NMB_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+DEFAULT_NMB_MAX_PENDING_PER_SANDBOX = 100
+DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_NMB_MAX_CHANNELS_PER_SANDBOX = 50
+
 
 @dataclass
 class SlackConfig:
@@ -35,7 +44,7 @@ class SlackConfig:
 
 @dataclass
 class InferenceConfig:
-    base_url: str = DEFAULT_INFERENCE_BASE_URL
+    base_url: str = ""
     api_key: str = ""
     model: str = DEFAULT_INFERENCE_MODEL
     timeout_s: int = DEFAULT_INFERENCE_TIMEOUT_S
@@ -55,6 +64,31 @@ class OrchestratorConfig:
 class LogConfig:
     level: str = DEFAULT_LOG_LEVEL
     log_file: str | None = None
+
+
+@dataclass
+class BrokerConfig:
+    """Runtime configuration for the NMB broker.
+
+    Attributes:
+        host: Bind address.
+        port: Bind port.
+        audit_db_path: Path to the SQLite audit database.
+        persist_payloads: Whether to store full payloads in the audit DB.
+        max_message_size: Maximum allowed payload size in bytes.
+        max_pending_per_sandbox: Maximum in-flight requests per sandbox.
+        default_request_timeout: Default timeout for request-reply in seconds.
+        max_channels_per_sandbox: Maximum channel subscriptions per sandbox.
+    """
+
+    host: str = DEFAULT_NMB_HOST
+    port: int = DEFAULT_NMB_PORT
+    audit_db_path: str = DEFAULT_NMB_AUDIT_DB_PATH
+    persist_payloads: bool = True
+    max_message_size: int = DEFAULT_NMB_MAX_MESSAGE_SIZE
+    max_pending_per_sandbox: int = DEFAULT_NMB_MAX_PENDING_PER_SANDBOX
+    default_request_timeout: float = DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT
+    max_channels_per_sandbox: int = DEFAULT_NMB_MAX_CHANNELS_PER_SANDBOX
 
 
 @dataclass
@@ -88,6 +122,8 @@ def load_config() -> AppConfig:
         missing.append("SLACK_APP_TOKEN")
     if not api_key and not in_sandbox:
         missing.append("INFERENCE_HUB_API_KEY")
+    if not os.environ.get("INFERENCE_HUB_BASE_URL") and not in_sandbox:
+        missing.append("INFERENCE_HUB_BASE_URL")
     if missing:
         raise ValueError(
             f"Missing required environment variables: {', '.join(missing)}. "
@@ -95,8 +131,10 @@ def load_config() -> AppConfig:
         )
 
     # In sandbox, use inference.local (OpenShell's inference proxy handles
-    # auth and routing).  Locally, hit the inference API directly.
-    default_base_url = SANDBOX_INFERENCE_BASE_URL if in_sandbox else DEFAULT_INFERENCE_BASE_URL
+    # auth and routing).  Locally, use the URL from .env.
+    default_base_url = SANDBOX_INFERENCE_BASE_URL if in_sandbox else os.environ.get(
+        "INFERENCE_HUB_BASE_URL", ""
+    )
     model = os.environ.get("INFERENCE_MODEL", DEFAULT_INFERENCE_MODEL)
 
     return AppConfig(

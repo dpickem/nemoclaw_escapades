@@ -1,6 +1,12 @@
-# M1 — Building Our Own Agent: Local Orchestrator + NVIDIA Inference Hub (DRAFT)
+# M1 — Building Our Own Agent: Local Orchestrator + NVIDIA Inference Hub + Slack
+
+In this first post of the "Agent from scratch" series, we'll build the core loop of our agent, which contains a way for the user to interact with the agent (via Slack), the orchestrator (which is the always-on component of the agent), and the inference backend that provides access to the brains of the system (the LLM that actually provides the reasoning power). The image below visualizes these three core components and their interaction.
 
 ![M1 architecture loop: local orchestrator to NVIDIA inference hub](./m1_slack_inference_orchestrator_loop.svg)
+
+While such a fairly simple system can easily run locally on the host system, I want to make sandboxing an explicit deliverable of this milestone. So even the orchestrator will run in its own sandbox isolated from the host system. In particular, I want to show how to use NVIDIA's recently announced [OpenShell](https://github.com/NVIDIA/OpenShell) as a sandboxing solution. The [NemoClaw Escapades repo](https://github.com/dpickem/nemoclaw_escapades) contains a number of deep dives for related open source projects (I recommend browsing these deep dives). One particular deep dive I want to point out is the [OpenShell deep dive](https://github.com/dpickem/nemoclaw_escapades/blob/main/docs/deep_dives/openshell_deep_dive.md) which goes into that package's details. Suffice it to say for now that the reason for using OpenShell is its policy definition and enforcement mechanism which provides stronger sandbox isolation than just a pure Docker container. That, and I needed an excuse for learning the latest sandboxing technology :)
+
+The image below summarizes the deliverables. No coding agent, memory, or tools yet — just a sandboxed chatbot that proves the core loop works end-to-end.
 
 ![M1 deliverables overview](./m1_foundation_deliverables_overview.svg)
 
@@ -8,62 +14,194 @@
 
 ## Table of Contents
 
-- [Step-by-Step Setup Guide](#step-by-step-setup-guide)
+- [Why This Milestone Comes First](#why-this-milestone-comes-first)
+- [What M1 Teaches](#what-m1-teaches)
+- [What Is an Agent, Anyway?](#what-is-an-agent-anyway)
+- [Deployment Model](#deployment-model)
+- [Architecture Flow](#architecture-flow)
+- [Common Setup (Steps 1–5)](#common-setup-steps-15) *(both paths)*
+  - [Project Housekeeping](#project-housekeeping)
   - [Prerequisites](#prerequisites)
   - [Step 1: Create a Slack App](#step-1-create-a-slack-app)
   - [Step 2: Get an NVIDIA Inference Hub API Key](#step-2-get-an-nvidia-inference-hub-api-key)
   - [Step 3: Clone and Configure](#step-3-clone-and-configure)
   - [Step 4: Install Dependencies](#step-4-install-dependencies)
   - [Step 5: Verify Credentials](#step-5-verify-credentials)
-  - [Step 6: Run Locally](#step-6-run-locally)
-  - [Step 7: Run All Tests](#step-7-run-all-tests)
-- [Deploying to an OpenShell Sandbox](#deploying-to-an-openshell-sandbox)
-  - [Step 8: Start the OpenShell Gateway](#step-8-start-the-openshell-gateway)
-  - [Step 9: Register the Inference Provider](#step-9-register-the-inference-provider)
-  - [Step 10: Configure Inference Routing](#step-10-configure-inference-routing)
-  - [Step 11: Register the Slack Provider](#step-11-register-the-slack-provider)
-  - [Step 12: Understand the Sandbox Network Policy](#step-12-understand-the-sandbox-network-policy)
+- [OpenShell Sandbox Setup (Steps 6–10)](#openshell-sandbox-setup-steps-610) *(sandbox path only)*
+  - [Step 6: Start the OpenShell Gateway](#step-6-start-the-openshell-gateway)
+  - [Step 7: Register the Inference Provider](#step-7-register-the-inference-provider)
+  - [Step 8: Configure Inference Routing](#step-8-configure-inference-routing)
+  - [Step 9: Register the Slack Provider](#step-9-register-the-slack-provider)
+  - [Step 10: Understand the Sandbox Network Policy](#step-10-understand-the-sandbox-network-policy)
+- [Running Locally (Steps 11–12)](#running-locally-steps-1112)
+  - [Step 11: Run Locally](#step-11-run-locally)
+  - [Step 12: Run All Tests](#step-12-run-all-tests)
+- [Running in an OpenShell Sandbox (Steps 13–15)](#running-in-an-openshell-sandbox-steps-1315)
   - [Step 13: Build and Deploy the Sandbox](#step-13-build-and-deploy-the-sandbox)
   - [Step 14: Verify the Deployment](#step-14-verify-the-deployment)
   - [Step 15: Debugging a Failed Deployment](#step-15-debugging-a-failed-deployment)
   - [Stopping and Cleaning Up](#stopping-and-cleaning-up)
   - [How Credentials Flow in the Sandbox](#how-credentials-flow-in-the-sandbox)
-- [Why This Milestone Comes First](#why-this-milestone-comes-first)
-- [What We Are Intending to Build](#what-we-are-intending-to-build)
-- [What M1 Teaches](#what-m1-teaches)
-- [Deployment Model](#deployment-model)
-- [Architecture Flow](#architecture-flow)
-- [Connector Implementation Walkthrough](#connector-implementation-walkthrough)
-  - [The connector contract](#the-connector-contract)
-  - [Event listening and filtering](#event-listening-and-filtering)
-  - [Event normalization](#event-normalization)
-  - [The thinking indicator pattern](#the-thinking-indicator-pattern)
-  - [Error propagation and rate limiting](#error-propagation-and-rate-limiting)
-  - [Rendering: RichResponse → Block Kit](#rendering-richresponse--block-kit)
-- [Orchestrator Implementation Walkthrough](#orchestrator-implementation-walkthrough)
-  - [Wiring: how the pieces connect](#wiring-how-the-pieces-connect)
-  - [The handle() method: the full agent loop](#the-handle-method-the-full-agent-loop)
-  - [Context assembly: _build_prompt](#context-assembly-_build_prompt)
-  - [Inference dispatch and transcript repair](#inference-dispatch-and-transcript-repair)
-  - [The inference backend contract](#the-inference-backend-contract)
-  - [The approval gate](#the-approval-gate)
-  - [Response construction](#response-construction)
-  - [Observability](#observability)
-- [Learning Objectives](#learning-objectives)
-- [Deliverables](#deliverables)
-- [Acceptance Criteria](#acceptance-criteria)
+- [Implementation Walkthrough](#implementation-walkthrough)
+  - [Connector Implementation Walkthrough](#connector-implementation-walkthrough)
+    - [The connector contract](#the-connector-contract)
+    - [Event listening and filtering](#event-listening-and-filtering)
+    - [Event normalization](#event-normalization)
+    - [The thinking indicator pattern](#the-thinking-indicator-pattern)
+    - [Error propagation and rate limiting](#error-propagation-and-rate-limiting)
+    - [Rendering: RichResponse → Block Kit](#rendering-richresponse-block-kit)
+  - [Orchestrator Implementation Walkthrough](#orchestrator-implementation-walkthrough)
+    - [Wiring: how the pieces connect](#wiring-how-the-pieces-connect)
+    - [The handle() method: the full agent loop](#the-handle-method-the-full-agent-loop)
+    - [Context assembly: PromptBuilder](#context-assembly-promptbuilder)
+    - [Inference dispatch and transcript repair](#inference-dispatch-and-transcript-repair)
+    - [The inference backend contract](#the-inference-backend-contract)
+    - [The approval gate](#the-approval-gate)
+    - [Response construction](#response-construction)
+    - [Observability](#observability)
+  - [Inference Backend Implementation Walkthrough](#inference-backend-implementation-walkthrough)
+    - [The BackendBase contract](#the-backendbase-contract)
+    - [HTTP client setup](#http-client-setup)
+    - [The retry loop](#the-retry-loop)
+    - [Error categorization](#error-categorization)
+    - [Adaptive wait strategy](#adaptive-wait-strategy)
+    - [Response parsing and finish_reason](#response-parsing-and-finish_reason)
+    - [Provider swappability in practice](#provider-swappability-in-practice)
 - [Why This Sets Up the Rest of the Series](#why-this-sets-up-the-rest-of-the-series)
-- [OpenShell Sandbox Deployment — Lessons Learned](#openshell-sandbox-deployment--lessons-learned)
+- [OpenShell Sandbox Deployment — Lessons Learned](#openshell-sandbox-deployment-lessons-learned)
+  - [1. The `openshell` CLI changes between versions — check subcommands](#1-the-openshell-cli-changes-between-versions-check-subcommands)
+  - [2. Dockerfiles must include `README.md` for hatchling builds](#2-dockerfiles-must-include-readmemd-for-hatchling-builds)
+  - [3. OpenShell's `--from` flag and the build context trap](#3-openshells-from-flag-and-the-build-context-trap)
+  - [4. The `python:3.11-slim` image doesn't meet OpenShell sandbox requirements](#4-the-python311-slim-image-doesnt-meet-openshell-sandbox-requirements)
+  - [5. Do NOT set `USER` or `ENTRYPOINT` in the Dockerfile](#5-do-not-set-user-or-entrypoint-in-the-dockerfile)
+  - [6. Credential injection uses opaque placeholders, not real values](#6-credential-injection-uses-opaque-placeholders-not-real-values)
+  - [7. The proxy routes ALL outbound traffic — HTTPS_PROXY is set automatically](#7-the-proxy-routes-all-outbound-traffic-https_proxy-is-set-automatically)
+  - [8. Python's CONNECT tunneling vs OpenShell's REST proxy mode](#8-pythons-connect-tunneling-vs-openshells-rest-proxy-mode)
+  - [9. Inference routing must be configured separately](#9-inference-routing-must-be-configured-separately)
+  - [10. `--type nvidia` vs `--type openai` for the inference provider](#10-type-nvidia-vs-type-openai-for-the-inference-provider)
+  - [11. The inference proxy injects the API key — the app must NOT send one](#11-the-inference-proxy-injects-the-api-key-the-app-must-not-send-one)
+  - [12. The `openshell inference set --model` **forces** the model name](#12-the-openshell-inference-set-model-forces-the-model-name)
+  - [13. Bot message spam loops from `message_changed` events](#13-bot-message-spam-loops-from-message_changed-events)
+  - [14. Error response rate limiting prevents the worst-case spam](#14-error-response-rate-limiting-prevents-the-worst-case-spam)
+  - [15. Network policy field reference for Python-based sandboxes](#15-network-policy-field-reference-for-python-based-sandboxes)
+  - [16. Sandbox provisioning is slow the first time](#16-sandbox-provisioning-is-slow-the-first-time)
+  - [17. Use `openshell doctor exec` to debug sandbox issues](#17-use-openshell-doctor-exec-to-debug-sandbox-issues)
+  - [18. Gateway lifecycle: stopped ≠ destroyed, but `start` doesn't restart](#18-gateway-lifecycle-stopped--destroyed-but-start-doesnt-restart)
+  - [19. Why HTTP credentials are sufficient for Slack Socket Mode](#19-why-http-credentials-are-sufficient-for-slack-socket-mode)
+- [Troubleshooting](#troubleshooting)
 - [Sources and References](#sources-and-references)
-- [Appendix: Original TODO Tracker](#appendix-original-todo-tracker)
+
 
 ---
 
-## Step-by-Step Setup Guide
+## Why This Milestone Comes First
 
-This guide takes you from a fresh clone to a fully working Slack bot — first
-running locally, then deployed inside an OpenShell sandbox. Every command is
-listed. Every credential is explained.
+M1 is deliberately narrow. We are starting with the minimum viable runtime that lets us see where the core pieces of an agent system actually live — and proves they work end-to-end before anything else is layered on top.
+
+Even though the project references NemoClaw in its broader research context, this milestone is **not** about deploying vanilla NemoClaw. The objective is to build and run our own orchestrator-based stack with clean, reusable, and easily understandable components. M1 just implements the bare essentials: normalize the incoming Slack event, shape the prompt, call the model through a reusable backend interface, and return a response with enough logging to debug failures. I want to build understanding, not sophistication or feature completeness at this point.
+
+Modern agentic systems hide enormous complexity from the user and make the entire system hard to understand. What is the agent loop, the surrounding infrastructure, and the tools it may
+eventually call? M1 deconstructs a multi-agent system to its bare minimum — just three components to provide a minimum viable product. If this loop is not reliable, inspectable, and easy to explain, then later work on sandboxed coding agents, review loops, memory, and self-improvement will be just as inscrutable as an off-the-shelf agentic system.
+
+## What M1 Teaches
+
+This milestone is meant to clarify the architecture of a minimal agent system by isolating four boundaries that every later milestone depends on.
+
+| Boundary | Responsibility in M1 | Why isolate it now |
+|---|---|---|
+| Connector | Translate Slack events into internal request/response objects | Prevent channel-specific logic from leaking into the core loop |
+| Orchestrator | Own context assembly, routing, retries, and response shaping | Make the "main brain" explicit from day one |
+| Inference backend | Provide one interface for model calls | Keep provider choice swappable instead of hard-coded |
+| Observability | Surface failures, retries, and runtime state | Make the system debuggable before it becomes more complex |
+
+## What Is an Agent, Anyway?
+
+Before describing what M1 builds, it helps to pin down what "agent" actually means — because the term is used loosely enough to cover everything from a chatbot to a fully autonomous coding system. NVIDIA's [glossary entry on autonomous AI agents](https://www.nvidia.com/en-us/glossary/ai-agents/) offers a useful working definition: an autonomous agent is an AI system that **reasons, plans, and executes multi-step tasks** based on a goal, built with security, privacy, and policy controls. The key distinction from a plain chatbot is the loop: the agent observes its environment, decides what to do next, acts, and then feeds the result back into its own context for the next decision.
+
+Sebastian Raschka's [Components of a Coding Agent](https://magazine.sebastianraschka.com/p/components-of-a-coding-agent) provides a practical decomposition of what a coding harness — the software scaffold around the model — actually contains. He identifies six core building blocks:
+
+| Component | Role |
+|---|---|
+| **Live repo context** | Gather workspace facts (git branch, project layout, instructions) before doing any work |
+| **Prompt shape and cache reuse** | Package stable context (system instructions, tool descriptions, workspace summary) into a reusable prefix; append only the changing parts each turn |
+| **Structured tools and permissions** | Expose a predefined set of named tools (read file, run shell, write file) with validation, path checks, and approval gates |
+| **Context reduction** | Clip large outputs, deduplicate repeated file reads, compress older transcript entries to stay within the context budget |
+| **Structured session memory** | Maintain a full transcript on disk for resumption and a smaller working memory for task continuity across turns |
+| **Bounded subagents** | Delegate subtasks to child agents that inherit enough context to be useful but run inside tighter boundaries (e.g. read-only, limited depth) |
+
+Raschka makes an important layering distinction: the **LLM** is the engine, a **reasoning model** is a beefed-up engine (more powerful, more expensive), and the **agent harness** is what helps us *use* the engine.
+
+A good harness can make a model feel significantly more capable than the same model in a plain chat interface. M1, however, does not implement all six components — it deliberately omits repo context, subagent delegation, and persistent memory (this is also because Raschka's system is a coding agent, whereas we want to build a more general personal assistant-style system). But it does establish the three that everything else depends on: the agent loop (orchestrator), the tool interface (inference backend contract), and structured observability. The later milestones layer the remaining components on top of this foundation.
+
+## Deployment Model
+
+In this milestone, I also establish the first deployment split for the system: the orchestrator and Slack connector run locally (with or without a sandbox), while model inference is hosted remotely through NVIDIA Inference Hub:
+
+- Running the control loop locally keeps the architecture easy to inspect, iterate on, and debug.
+- Using hosted inference avoids premature model-serving work while still forcing a real backend abstraction.
+- Keeping the boundary explicit gives us a cleaner path toward later always-on deployment on managed infrastructure rather than trapping the project in a laptop-only demo.
+
+Regardless of where components are hosted, this milestone makes an explicit effort to sandbox each component such that I can easily move them from a local machine to hosted infrastructure. In other words, the actual deployment mode should be transparent to the user.
+
+## Architecture Flow
+
+```mermaid
+sequenceDiagram
+    participant User as Slack User
+    participant Conn as Slack Connector
+    participant Orch as Orchestrator
+    participant Hub as NVIDIA Inference Hub
+
+    User->>Conn: Send message
+    Conn->>Orch: Normalized event payload
+    Orch->>Hub: Prompt + context
+    Hub-->>Orch: Model completion
+    Orch-->>Conn: Final response payload
+    Conn-->>User: Reply in channel
+```
+
+The interaction loop between the user and the agent is kept simple:
+
+1. A Slack user sends a message.
+2. The connector converts that platform event into a normalized payload.
+3. The orchestrator builds the prompt context and decides how to call the model.
+4. The inference backend sends that request to NVIDIA Inference Hub (or any other OpenAI-compatible API).
+5. The orchestrator shapes the result into a final response and returns it
+   through the connector to the user.
+
+This setup enables multi-turn conversations and provides chatbot-like functionality. It does not provide any tool calls or memory at this point but it gives us a working baseline for control flow, abstraction boundaries, and deployment.
+
+---
+
+## Common Setup (Steps 1–5)
+
+This guide takes you from a fresh repo clone to a fully working Slack bot. It is
+split into four parts — two setup phases and two run options. If you want to deploy the agent locally without sandboxing, you can skip the OpenShell setup. Given the central nature of OpenShell as a policy enforcement and deployment mechanism, I strongly recommend getting familiar with it - it will enable powerful use-cases down the road.
+
+| Phase | Steps | What it covers |
+|---|---|---|
+| **Common setup** | 1–5 | Credentials and dependencies needed for both deployment options |
+| **OpenShell sandbox setup** | 6–10 | Gateway, providers, inference routing, and network policy *(skip if running locally only)* |
+| **Running locally** | 11–12 | The fastest path: run the bot directly on your machine |
+| **Running in an OpenShell sandbox** | 13–15 | Build, deploy, verify, and debug the sandboxed bot |
+
+Complete Steps 1–5 first. If you also want sandboxed deployment, continue
+with Steps 6–10. Then run the bot locally (Steps 11–12), in the sandbox
+(Steps 13–15), or both.
+
+### Project Housekeeping
+
+#### Use of Makefiles
+
+I have come full-circle regarding the use of Makefiles. Early on in my career at Apple, the era of Makefiles just ended as we transitioned to CMake and to Bazel shortly after. While Bazel is an excellent build toolchain for large distributed projects, I find it overpowered for small (hobby) projects (like [Second Brain](https://github.com/dpickem/project_second_brain) or Nemoclaw Escapades). For that scale, I have really come to like Makefiles - nothing says convenience like "make install" and "make run" to bring a project to life.
+
+#### Documentation chain
+
+This project is based on the main design file in [design.md](../../design.md). Before implementing a milestone, though, I create a milestone-specific design file that contains sufficient details for implementation. Based on this sub-design document and the actual implementation, I write the corresponding blog post. So the chain of events that unfolds is the following: [design.md](../../design.md) -> [design_m1.md](../../design_m1.md) -> code -> [m1_setting_up_nemoclaw.md](./m1_setting_up_nemoclaw.md)
+
+#### Supported platforms
+
+I am developing this project on macOS. In principle, this code should be able to run on Linux as well (given the sandboxed nature of OpenShell) but I have not tested nor do I make any guarantees of interoperability.
 
 ### Prerequisites
 
@@ -74,6 +212,21 @@ listed. Every credential is explained.
 | OpenShell CLI | 0.0.21+ | `openshell --version` |
 | A Slack workspace | You have admin access or can create apps | — |
 | An NVIDIA account | For Inference Hub API keys | [build.nvidia.com](https://build.nvidia.com) |
+
+> **Note on model availability:**
+> [build.nvidia.com](https://build.nvidia.com) is the public developer portal
+> where you browse models and create API keys. The portal only **displays**
+> open-weight models (Llama, Nemotron, Qwen, etc.), but the API behind it
+> appears to serve a much larger catalog — including closed-source models like Claude,
+> GPT, and Gemini — depending on your account. The model name in your config
+> (e.g. `azure/anthropic/claude-opus-4-6`) must match what the endpoint
+> actually serves; query
+> [`https://inference-api.nvidia.com/v1/models`](https://inference-api.nvidia.com/v1/models)
+> with your API key to see what's available to you. Any OpenAI-compatible inference provider works with this
+> project — set `INFERENCE_HUB_BASE_URL` and `INFERENCE_HUB_API_KEY` in your
+> `.env` to point at the provider of your choice (e.g.
+> [OpenRouter](https://openrouter.ai), a self-hosted vLLM instance, or the
+> NVIDIA endpoint).
 
 ### Step 1: Create a Slack App
 
@@ -146,6 +299,7 @@ Edit `.env` and fill in the three required values:
 SLACK_BOT_TOKEN=xoxb-your-token-here
 SLACK_APP_TOKEN=xapp-your-token-here
 INFERENCE_HUB_API_KEY=your-nvidia-api-key-here
+INFERENCE_HUB_BASE_URL=https://your-inference-endpoint/v1
 ```
 
 ### Step 4: Install Dependencies
@@ -172,53 +326,26 @@ This script tests each credential against its API:
 
 All four checks should show ✓. If inference fails, check the model name.
 
-### Step 6: Run Locally
-
-```bash
-make run-local
-```
-
-You should see:
-
-```
-{"level": "INFO", "component": "main", "message": "Starting NemoClaw M1 agent loop"}
-{"level": "INFO", "component": "slack_connector", "message": "Slack bot authenticated"}
-{"level": "INFO", "component": "slack_bolt.AsyncApp", "message": "⚡️ Bolt app is running!"}
-```
-
-Open Slack, find your bot in DMs, and send a message. You should see:
-
-1. A "Thinking..." indicator appears immediately.
-2. After a few seconds, it's replaced with the model's response.
-
-Press `Ctrl+C` to stop the bot.
-
-### Step 7: Run All Tests
-
-```bash
-make test
-```
-
-All tests should pass. This validates the connector, orchestrator, inference
-backend, transcript repair, and approval gate without needing real credentials.
-
 ---
 
-## Deploying to an OpenShell Sandbox
+## OpenShell Sandbox Setup (Steps 6–10)
 
-The local setup (`make run-local`) is great for development, but for
-always-on deployment we use OpenShell. This section walks through the full
-sandbox deployment.
+If you want to run the bot inside a policy-enforced OpenShell sandbox (rather than just on your bare-metal local host), complete these additional setup steps. You need to configure the gateway, register credential providers, set up inference routing, and understand the network policy.
 
-### Step 8: Start the OpenShell Gateway
+### Step 6: Start the OpenShell Gateway
 
 ```bash
 openshell gateway start
 ```
 
-This downloads and starts a **k3s cluster inside Docker Desktop**. The gateway
-is a lightweight Kubernetes environment running entirely on your laptop. It
-manages sandbox lifecycle, network policies, and the credential proxy.
+This downloads and starts a **k3s cluster inside Docker Desktop**. In this
+guide, the gateway runs **locally** on your laptop — but OpenShell also
+supports remote gateways (via SSH to a Linux host, a Brev cloud GPU
+instance, or a DGX Spark) and cloud gateways (behind a reverse proxy). The
+same CLI, policies, and sandbox definitions work identically regardless of
+where the gateway runs; only the transport changes. For details, see the
+[OpenShell deep dive](../../deep_dives/openshell_deep_dive.md) section on
+remote hosting.
 
 First run downloads the gateway image (~200 MB) and initializes the cluster.
 Expect 1-2 minutes. Subsequent starts reuse the existing cluster and take
@@ -240,8 +367,24 @@ Server Status
   Version: 0.0.21
 ```
 
-If you see `connection refused`, Docker Desktop may not be running or the
-gateway container stopped. Run `openshell gateway start` again.
+If you see `connection refused`, the gateway container is likely stopped
+(e.g. after a reboot or Docker Desktop restart). As of OpenShell v0.0.21,
+`openshell gateway start` cannot restart a stopped gateway — it only asks
+"Destroy and recreate?", which re-downloads the image. Instead, restart the
+container directly:
+
+```bash
+make setup-gateway        # detects stopped container and restarts it
+openshell status          # should now show "Connected"
+```
+
+`make setup-gateway` handles this automatically: it tries `docker start`
+on the existing container, waits for k3s to initialize, and only falls
+back to a fresh `openshell gateway start` when no container exists at all.
+If you see "Connection reset by peer" instead of "Connected", wait a few
+more seconds and retry — the gateway is starting but k3s isn't ready yet.
+See [Lesson #18](#18-gateway-lifecycle-stopped--destroyed-but-start-doesnt-restart)
+for the full breakdown of this limitation.
 
 #### Understanding the gateway
 
@@ -254,9 +397,9 @@ The gateway is the central control plane. It:
 - Hosts the `inference.local` inference routing proxy
 
 Everything below depends on the gateway running. If it dies, all sandboxes
-lose connectivity.
+lose connectivity. In that sense, the gateway is the central point of failure for this entire system (the same is true for the orchestrator).
 
-### Step 9: Register the Inference Provider
+### Step 7: Register the Inference Provider
 
 OpenShell has a **provider** abstraction for managing credentials. You register
 a provider once, and it can be attached to any number of sandboxes.
@@ -266,32 +409,44 @@ openshell provider create \
     --name inference-hub \
     --type openai \
     --credential "OPENAI_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
-    --config "OPENAI_BASE_URL=https://inference-api.nvidia.com/v1"
+    --config "OPENAI_BASE_URL=$(grep INFERENCE_HUB_BASE_URL .env | cut -d= -f2-)"
 ```
 
 Let's break this down:
 
 - **`--name inference-hub`**: A logical name we'll reference later.
-- **`--type openai`**: The provider type. We use `openai` because the NVIDIA
-  Inference Hub exposes an OpenAI-compatible API (`/v1/chat/completions`).
-  Other types: `nvidia` (defaults to `integrate.api.nvidia.com`), `anthropic`,
-  `claude`, `generic`.
-- **`--credential "OPENAI_API_KEY=..."`**: The API key. The name `OPENAI_API_KEY`
-  is required by the `openai` provider type — it's the env var name OpenShell
-  uses internally for routing. The actual value comes from your `.env` file.
+- **`--type openai`**: The provider type. We use `openai` because our
+  inference endpoint exposes an OpenAI-compatible API (`/v1/chat/completions`).
+  Other types: `nvidia`, `anthropic`, `claude`, `generic`.
+- **`--credential "OPENAI_API_KEY=..."`**: The API key. The name
+  `OPENAI_API_KEY` is required by the `openai` provider type — it's the env
+  var name OpenShell uses internally for routing. The actual value comes from
+  your `.env` file.
 - **`--config "OPENAI_BASE_URL=..."`**: The upstream endpoint. Without this,
   the `openai` type defaults to `api.openai.com`. We override it to point to
-  NVIDIA's endpoint.
+  the endpoint configured in `INFERENCE_HUB_BASE_URL`.
 
 **Why not `--type nvidia`?** The `nvidia` type defaults to
-`integrate.api.nvidia.com`, which is a different API from
-`inference-api.nvidia.com`. Using `openai` gives us explicit control over the
-base URL.
+`integrate.api.nvidia.com`, which may not match your endpoint. See
+[Lesson #10](#10-type-nvidia-vs-type-openai-for-the-inference-provider)
+for a full comparison.
 
 **Why not `--type generic`?** The `generic` type works for credential injection
 via placeholders, but it cannot be used with `openshell inference set` (the
 inference routing command). Only `openai`, `nvidia`, and `anthropic` types
 support inference routing.
+
+If the provider already exists, you'll see an error. Use
+`openshell provider delete inference-hub` first, or ignore the error.
+
+> **Shortcut:** `make setup-secrets` runs Steps 7–9 (inference provider,
+> inference routing, and Slack provider) in one command.
+
+> **Persistence note:** Provider registrations are stored in a Docker volume
+> on the gateway host. They survive gateway restarts via `docker start` but
+> are **lost** if you destroy and recreate the gateway (`openshell gateway
+> start --recreate` or answering `Y` to "Destroy and recreate?"). After a
+> recreate, re-run this step and Steps 8–9 (or just `make setup-secrets`).
 
 Verify the provider:
 
@@ -309,7 +464,7 @@ Provider:
   Config keys: OPENAI_BASE_URL
 ```
 
-### Step 10: Configure Inference Routing
+### Step 8: Configure Inference Routing
 
 Registering a provider only stores the credential. You must also tell the
 gateway **how to route inference requests** from `inference.local` to the
@@ -318,17 +473,31 @@ real upstream:
 ```bash
 openshell inference set \
     --provider inference-hub \
-    --model "azure/anthropic/claude-opus-4-6"
+    --model "${INFERENCE_MODEL:-azure/anthropic/claude-opus-4-6}" \
+    --no-verify
 ```
+
+The `--no-verify` flag skips the endpoint reachability test during setup
+(useful if your network blocks the probe). The `INFERENCE_MODEL` env var
+lets you override the model without editing the command; it defaults to
+`azure/anthropic/claude-opus-4-6`.
 
 This configures the `inference.local` proxy endpoint inside sandboxes:
 
-- When the app sends `POST https://inference.local/v1/chat/completions`,
-  the proxy looks up the `inference-hub` provider.
-- The proxy adds `Authorization: Bearer <real-api-key>` to the request.
-- The proxy overrides the model field in the request body with
-  `azure/anthropic/claude-opus-4-6`.
-- The proxy forwards to `https://inference-api.nvidia.com/v1/chat/completions`.
+```mermaid
+sequenceDiagram
+    participant App as Sandbox App
+    participant Proxy as inference.local Proxy
+    participant Hub as Upstream Endpoint
+
+    App->>Proxy: POST /v1/chat/completions<br/>(no Authorization header)
+    Note over Proxy: Look up provider "inference-hub"
+    Note over Proxy: Add Authorization: Bearer <real-api-key>
+    Note over Proxy: Override model → configured model name
+    Proxy->>Hub: POST /v1/chat/completions<br/>(real key + forced model)
+    Hub-->>Proxy: Model completion
+    Proxy-->>App: Response (unchanged)
+```
 
 **The `--model` flag forces the model name.** This is important: the proxy
 overrides whatever model the app requests. If this name doesn't exactly match
@@ -345,17 +514,28 @@ Expected:
 
 ```
 Gateway inference:
-  Route: inference.local
+
   Provider: inference-hub
   Model: azure/anthropic/claude-opus-4-6
   Version: 1
   Timeout: 60s (default)
+
+System inference:
+
+  Not configured
 ```
 
 If you omit `--no-verify`, the command will test the endpoint and report
 whether it's reachable.
 
-### Step 11: Register the Slack Provider
+> **Shortcut:** This step is included in `make setup-secrets` (along with
+> Steps 7 and 9).
+
+> **Persistence note:** Like providers, inference routing config is stored in
+> the gateway's Docker volume. It persists across `docker start` restarts but
+> is lost on a gateway recreate.
+
+### Step 9: Register the Slack Provider
 
 Slack credentials use the `generic` provider type because OpenShell doesn't
 have a built-in Slack type. The `generic` type lets us define arbitrary env
@@ -379,15 +559,30 @@ SLACK_APP_TOKEN=openshell:resolve:env:SLACK_APP_TOKEN
 The HTTPS proxy resolves these placeholders to the real tokens when the Slack
 SDK makes HTTP requests with `Authorization: Bearer <placeholder>`.
 
+These HTTP credentials also cover Slack's Socket Mode (WebSocket) — see
+[Lesson #19](#19-why-http-credentials-are-sufficient-for-slack-socket-mode)
+for how.
+
 **Shortcut:** `make setup-secrets` runs all three commands (inference provider,
 inference routing, Slack provider) in one step.
 
-### Step 12: Understand the Sandbox Network Policy
+### Step 10: Understand the Sandbox Network Policy
 
 Before deploying, it's worth understanding what the sandbox is and isn't
-allowed to do. The policy lives in `policies/orchestrator.yaml`.
+allowed to do. The policy lives in `policies/orchestrator.yaml`. For
+reference, see the
+[NemoClaw reference policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml)
+(the upstream example our policy is based on) and the
+[OpenShell policy documentation](https://docs.nvidia.com/openshell/latest/sandboxes/policies.html).
 
-The network policy has three entries:
+The network policy has three entries, each using a different proxy mode
+depending on what the traffic needs:
+
+| Policy entry | Destination | Proxy mode | Why |
+|---|---|---|---|
+| `slack_api` | `slack.com` | `protocol: rest`, `tls: terminate` | Credential placeholder resolution in HTTP headers |
+| `slack_websocket` | `*.slack.com` | `access: full` (CONNECT tunnel) | Long-lived WebSocket; no header inspection needed |
+| `inference` | `inference.local` | `protocol: rest`, `tls: terminate` | API key injection + model name override |
 
 **`slack_api`** — For Slack HTTP API calls (`auth.test`, `chat.postMessage`,
 `apps.connections.open`):
@@ -418,11 +613,10 @@ endpoints:
 ```
 
 `access: full` creates a CONNECT tunnel — opaque TCP passthrough with no header
-inspection. This is necessary because Socket Mode is a long-lived WebSocket.
-The proxy's HTTP idle timeout (~2 min) would kill it if we used `protocol: rest`.
-The WebSocket doesn't need credential resolution anyway — authentication
-happens in the initial `apps.connections.open` HTTP call, which returns a
-session ticket embedded in the WebSocket URL.
+inspection. This is necessary because Socket Mode is a long-lived WebSocket
+that the proxy's HTTP idle timeout (~2 min) would kill. See
+[Lesson #19](#19-why-http-credentials-are-sufficient-for-slack-socket-mode) for
+the full two-phase authentication flow and why Slack needs both entries.
 
 **`inference`** — For model inference via the built-in proxy:
 
@@ -438,11 +632,74 @@ endpoints:
       - allow: { method: POST, path: "/**" }
 ```
 
-Note this is `inference.local`, NOT `inference-api.nvidia.com`. The app sends
+Note this is `inference.local`, not the upstream endpoint directly. The app sends
 requests to `inference.local`; the inference routing proxy handles forwarding
 to the real upstream. Direct access to external inference endpoints is blocked
 by the proxy (Python's HTTP libraries use CONNECT tunneling, which the proxy
 rejects for `protocol: rest` endpoints — see Lesson #8 below).
+
+The rules restrict the endpoint to `GET` and `POST` only. These are the only
+HTTP methods the OpenAI-compatible inference API uses: `POST` for
+`/v1/chat/completions` (the actual inference call) and `GET` for
+`/v1/models` (listing available models). Methods like `PUT`, `DELETE`, and
+`PATCH` are blocked because the inference API has no endpoints that use them
+— allowing them would widen the attack surface for no benefit. This is the
+principle of least privilege applied at the HTTP method level: only permit
+what the application actually needs.
+
+---
+
+## Running Locally (Steps 11–12)
+
+This is the fastest way to see the bot in action. No Docker, no sandbox — just a
+Python process on your machine talking to Slack and NVIDIA Inference Hub.
+
+### Step 11: Run Locally
+
+```bash
+make run-local-dev
+```
+
+You should see:
+
+```
+{"level": "INFO", "component": "main", "message": "Starting NemoClaw M1 agent loop"}
+{"level": "INFO", "component": "slack_connector", "message": "Slack bot authenticated"}
+{"level": "INFO", "component": "slack_bolt.AsyncApp", "message": "⚡️ Bolt app is running!"}
+```
+
+Test the bot in two ways:
+
+**DMs:** Click the **+** next to "Direct Messages" in the sidebar, search
+for the bot's name (whatever you named it in
+[Step 1](#step-1-create-a-slack-app), e.g. `dbot`), and select it. Send any
+message.
+
+**Channel @mentions:** Invite the bot to a channel (`/invite @dbot`), then
+mention it with `@dbot <your question>`. The bot responds in-thread to the
+message that mentioned it.
+
+In both cases you should see:
+
+1. A "Thinking..." indicator appears immediately.
+2. After a few seconds, it's replaced with the model's response.
+
+Press `Ctrl+C` twice to stop the bot.
+
+### Step 12: Run All Tests
+
+```bash
+make test
+```
+
+All tests should pass. This validates the connector, orchestrator, inference
+backend, transcript repair, and approval gate without needing real credentials.
+
+---
+
+## Running in an OpenShell Sandbox (Steps 13–15)
+
+With the gateway running, providers registered, and inference routing configured (following steps 6 - 10), you can now build the container image and deploy the bot inside a policy-enforced sandbox.
 
 ### Step 13: Build and Deploy the Sandbox
 
@@ -453,14 +710,8 @@ make setup-sandbox
 This is the main deployment command. Under the hood it:
 
 1. **Deletes** any existing `orchestrator` sandbox.
-2. **Creates a symlink** `Dockerfile -> docker/Dockerfile.orchestrator` at the
-   project root. This is needed because `openshell sandbox create --from .`
-   uses the current directory as both the Dockerfile location and build
-   context. Our Dockerfile lives in `docker/` but needs access to
-   `pyproject.toml`, `src/`, etc. at the root. (See Lesson #3 below.)
-3. **Builds the Docker image** inside the k3s cluster. This is NOT a local
-   Docker build — it happens inside the gateway's containerd. The image
-   includes Python, our app code, `iproute2`, and the `sandbox` user.
+2. **Creates a symlink** `Dockerfile -> docker/Dockerfile.orchestrator` at the project root. This is needed because `openshell sandbox create --from .` uses the current directory as both the Dockerfile location and build context. Our Dockerfile lives in `docker/` but needs access to `pyproject.toml`, `src/`, etc. at the root. (See Lesson #3 below.)
+3. **Builds the Docker image** inside the k3s cluster. This is NOT a local Docker build — it happens inside the gateway's containerd. The image includes Python, our app code, `iproute2`, and the `sandbox` user.
 4. **Pushes the image** into the cluster's image store (~50 MB).
 5. **Creates the sandbox** with:
    - The built image
@@ -470,8 +721,7 @@ This is the main deployment command. Under the hood it:
 6. **Streams the app's stdout/stderr** to your terminal.
 7. **Cleans up the symlink**.
 
-The first deploy is slow (~30-60s) because the cluster pulls base images.
-Subsequent deploys reuse cached layers and take ~10-15s.
+The first deploy is slow (~30-60s) because the cluster pulls base images. Subsequent deploys reuse cached layers and take ~10-15s.
 
 Expected output:
 
@@ -507,50 +757,7 @@ Check that:
 
 ### Step 15: Debugging a Failed Deployment
 
-If the sandbox fails, here's the debugging ladder:
-
-**Check pod status:**
-
-```bash
-openshell doctor exec -- kubectl get pods -n openshell
-```
-
-- `CrashLoopBackOff` → the container keeps crashing. Get logs:
-  ```bash
-  openshell doctor exec -- kubectl logs <pod-name> -n openshell --all-containers=true
-  ```
-- `ImagePullBackOff` → the image isn't in the cluster. Rebuild with
-  `make setup-sandbox`.
-- `Provisioning` (stuck) → usually waiting for image pull. Check with
-  `openshell sandbox list`.
-
-**Common crash-loop causes:**
-
-| Error | Cause | Fix |
-|---|---|---|
-| `sandbox user 'sandbox' not found` | Image missing `sandbox` user | Add `groupadd`/`useradd` to Dockerfile |
-| `Network namespace creation failed [...] iproute2` | Image missing `iproute2` | Add `apt-get install iproute2` to Dockerfile |
-| `ModuleNotFoundError: No module named 'aiohttp'` | Missing Python dependency | Add `aiohttp` to `pyproject.toml` |
-| `ProxyError: 403 Forbidden` | Network policy blocks the endpoint | Check `policies/orchestrator.yaml` |
-| `Authentication failed (401)` | Wrong API key or model name | Verify with `make test-auth` |
-
-**Check the applied policy:**
-
-```bash
-openshell sandbox get orchestrator
-```
-
-This shows the policy as the sandbox actually sees it — not just what's in the
-YAML file on disk.
-
-**Hot-reload the policy** (for dynamic fields like `network_policies`):
-
-```bash
-openshell policy set orchestrator --policy policies/orchestrator.yaml
-```
-
-This takes effect immediately without rebuilding the image or recreating the
-sandbox.
+If the sandbox fails to start or crash-loops, see the [Troubleshooting](#troubleshooting) section at the end of this post for a complete debugging guide covering pod status inspection, common crash-loop causes, and policy hot-reloading.
 
 ### Stopping and Cleaning Up
 
@@ -569,150 +776,25 @@ Understanding this flow is critical for debugging:
 
 The two credential paths work differently:
 
-- **Slack credentials** use placeholder resolution. The app reads
-  `SLACK_BOT_TOKEN=openshell:resolve:env:SLACK_BOT_TOKEN` from its
-  environment. When the Slack SDK sends an HTTP request with
-  `Authorization: Bearer openshell:resolve:...`, the HTTPS proxy intercepts
-  it, resolves the placeholder to the real `xoxb-...` token, and forwards
-  the request to Slack.
+- **Slack credentials** use placeholder resolution. The app reads `SLACK_BOT_TOKEN=openshell:resolve:env:SLACK_BOT_TOKEN` from its environment. When the Slack SDK sends an HTTP request with `Authorization: Bearer openshell:resolve:...`, the HTTPS proxy intercepts it, resolves the placeholder to the real `xoxb-...` token, and forwards the request to Slack.
 
-- **Inference credentials** use the built-in `inference.local` proxy. The
-  app sends requests to `https://inference.local/v1/chat/completions` with
-  no `Authorization` header at all. The proxy looks up the provider config,
-  injects the real API key, overrides the model name, and forwards to the
-  NVIDIA endpoint.
+- **Inference credentials** use the built-in `inference.local` proxy. The app sends requests to `https://inference.local/v1/chat/completions` with no `Authorization` header at all. The proxy looks up the provider config, injects the real API key, overrides the model name, and forwards to the NVIDIA endpoint.
 
 ---
 
-## Why This Milestone Comes First
+## Implementation Walkthrough
 
-If the series introduction explains why this project exists, M1 explains why
-the first implementation milestone is intentionally small. We are starting with
-the smallest useful loop that still teaches something real.
+This section walks through the three core M1 components: the Slack connector, the orchestrator, and the inference backend. All source links below point to commit [`30bd097`](https://github.com/dpickem/nemoclaw_escapades/tree/30bd097) — the final state of the M1 codebase before M2 work began.
 
-So M1 is deliberately narrow. We are not starting with a coding agent, a review
-agent, a memory system, or a self-improvement loop. We are starting with the
-minimum viable runtime that lets us see where the core pieces of an agent system
-actually live:
-
-- the connector that receives and returns messages,
-- the orchestrator that owns the agent loop,
-- the inference backend that talks to a model,
-- and the deployment/runtime choices that determine where each part runs.
-
-One of the easiest ways to get confused by modern agent projects is to blur the
-agent loop, the surrounding infrastructure, and the tools it may eventually
-call. M1 exists to make those boundaries visible.
-
-## What We Are Intending to Build
-
-M1 establishes the first production-oriented runtime loop for
-`nemoclaw_escapades`. A Slack message enters the connector, the orchestrator
-builds context and routes inference, and the response returns to Slack with
-basic observability around failures and retries.
-
-Even though the project references NemoClaw in its broader research context,
-this milestone is **not** about deploying vanilla NemoClaw. The objective is to
-build and run our own orchestrator-based stack with clean, reusable seams.
-
-In concrete terms, "builds context" in M1 means only the essentials: normalize
-the incoming Slack event, shape the prompt, call the model through a reusable
-backend interface, and return a response with enough logging to debug failures.
-That is intentionally modest. The point of M1 is not sophistication. The point
-is legibility.
-
-This is the foundation milestone. If this loop is not reliable, inspectable,
-and easy to explain, then later work on sandboxed coding agents, review loops,
-memory, and self-improvement will be built on sand.
-
-## What M1 Teaches
-
-This milestone is doing more than wiring Slack to a model endpoint. It is meant
-to clarify the shape of a minimal agent system.
-
-| Boundary | Responsibility in M1 | Why isolate it now |
-|---|---|---|
-| Connector | Translate Slack events into internal request/response objects | Prevent channel-specific logic from leaking into the core loop |
-| Orchestrator | Own context assembly, routing, retries, and response shaping | Make the "main brain" explicit from day one |
-| Inference backend | Provide one interface for model calls | Keep provider choice swappable instead of hard-coded |
-| Observability | Surface failures, retries, and runtime state | Make the system debuggable before it becomes more complex |
-
-If M1 works, we will have a clean answer to an important question for the whole
-series: what is the minimum useful agent architecture before delegation even
-enters the picture?
-
-## Deployment Model
-
-M1 also establishes the first deployment split for the system: the orchestrator
-and Slack connector run locally, while model inference is hosted remotely
-through NVIDIA Inference Hub.
-
-That split is a concrete engineering choice, not just a convenience:
-
-- Running the control loop locally keeps the architecture easy to inspect,
-  iterate on, and debug.
-- Using hosted inference avoids premature model-serving work while still
-  forcing a real backend abstraction.
-- Keeping the boundary explicit gives us a cleaner path toward later always-on
-  deployment on managed infrastructure rather than trapping the project in a
-  laptop-only demo.
-
-| Runtime Element | Where It Runs | Notes |
-|---|---|---|
-| Orchestrator | Local machine | Main agent loop, routing, and response shaping |
-| Connector (Slack) | Local machine | Ingress/egress channel adapter |
-| Model inference | NVIDIA Inference Hub | Orchestrator calls hosted model endpoints remotely |
-| Logs/observability | Local machine | First-pass operational visibility for M1 |
-
-NVIDIA Inference Hub is a good fit for this stage because it lets the project
-focus on orchestration instead of model serving. The architectural goal is not
-loyalty to one inference provider. The goal is to keep inference behind a
-generic backend contract so the orchestrator remains portable.
-
-## Architecture Flow
-
-```mermaid
-sequenceDiagram
-    participant User as Slack User
-    participant Conn as Slack Connector
-    participant Orch as Orchestrator
-    participant Hub as NVIDIA Inference Hub
-
-    User->>Conn: Send message
-    Conn->>Orch: Normalized event payload
-    Orch->>Hub: Prompt + context
-    Hub-->>Orch: Model completion
-    Orch-->>Conn: Final response payload
-    Conn-->>User: Reply in channel
-```
-
-The loop is simple on purpose:
-
-1. A Slack user sends a message.
-2. The connector converts that platform event into a normalized payload.
-3. The orchestrator builds the prompt context and decides how to call the model.
-4. The inference backend sends that request to NVIDIA Inference Hub.
-5. The orchestrator shapes the result into a final response and returns it
-   through the connector.
-
-That is the first "real" agent loop for this project. It is only one turn, but
-it gives us a working baseline for control flow, abstraction boundaries, and
-deployment.
-
-## Connector Implementation Walkthrough
+### Connector Implementation Walkthrough
 
 ![Connector event pipeline](./m1_connector_pipeline.svg)
 
-The Slack connector (`src/nemoclaw_escapades/connectors/slack.py`) is the
-boundary between Slack's event model and the orchestrator's platform-neutral
-types. It handles three responsibilities: normalizing inbound events, managing
-the response lifecycle, and rendering platform-neutral blocks into Slack's
-Block Kit format. No orchestration logic lives here. No inference logic either.
-Just the translation layer.
+The Slack connector ([`connectors/slack.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/connectors/slack.py)) is the boundary between Slack's event model and the orchestrator's platform-neutral types. It handles three responsibilities: normalizing inbound events, managing the response lifecycle, and rendering platform-neutral blocks into Slack's Block Kit format. No orchestration or inference logic live here - just the translation layer.
 
-### The connector contract
+#### The connector contract
 
-Every connector extends `ConnectorBase` (`connectors/base.py`):
+Every connector extends `ConnectorBase` ([`connectors/base.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/connectors/base.py)):
 
 ```python
 MessageHandler = Callable[[NormalizedRequest], Awaitable[RichResponse]]
@@ -728,13 +810,9 @@ class ConnectorBase(ABC):
     async def stop(self) -> None: ...
 ```
 
-The `handler` callback is the orchestrator's `handle` method — the connector
-calls `await self._handler(request)` and gets back a `RichResponse`. It never
-knows what happens between those two points. This is the central isolation
-guarantee: adding a new platform (Discord, Telegram, a web UI) means writing
-one new `ConnectorBase` subclass. Nothing else changes.
+The `handler` callback is the orchestrator's `handle` method — the connector calls `await self._handler(request)` and gets back a `RichResponse`. It never knows what happens between those two points. This is the central isolation guarantee: adding a new platform (Discord, Telegram, a web UI) means writing one new `ConnectorBase` subclass. Nothing else changes.
 
-### Event listening and filtering
+#### Event listening and filtering
 
 The Slack connector registers three Bolt listeners:
 
@@ -754,9 +832,7 @@ async def on_action(ack, body, client):
     await self._handle_with_thinking(client, request)
 ```
 
-All three funnel into the same pipeline: filter → normalise → thinking →
-orchestrate → reply. The thin closures only differ in how they extract a
-`NormalizedRequest` from the Slack payload.
+All three funnel into the same pipeline: filter → normalise → thinking → orchestrate → reply. The thin closures only differ in how they extract a `NormalizedRequest` from the Slack payload.
 
 Before any event is processed, it passes through `_should_ignore`:
 
@@ -771,20 +847,11 @@ def _should_ignore(self, event):
     return False
 ```
 
-The `subtype` check is the most important line in this method. When the bot
-posts a "Thinking…" placeholder and later replaces it with `chat_update`,
-Slack emits a `message_changed` event. If the connector processes that event,
-it triggers another inference call, which posts another update, which emits
-another event — an infinite spam loop. The fix: only process events where
-`subtype is None`. Real user messages have no subtype. Everything else —
-`bot_message`, `message_changed`, `message_deleted` — is dropped. The
-`bot_id` and user ID checks are defense-in-depth for cases where a subtype
-might be missing but the message still originates from the bot.
+The `subtype` check is the most important line in this method. When the bot posts a "Thinking…" placeholder and later replaces it with `chat_update`, Slack emits a `message_changed` event. If the connector processes that event, it triggers another inference call, which posts another update, which emits another event — an infinite spam loop. Instead, it only processes events where `subtype is None`. Real user messages have no subtype. Everything else — `bot_message`, `message_changed`, `message_deleted` — is dropped. The `bot_id` and user ID checks are defense-in-depth for cases where a subtype might be missing but the message still originates from the bot.
 
-### Event normalization
+#### Event normalization
 
-Normalization strips away all Slack-specific structure and produces a
-platform-neutral `NormalizedRequest`:
+Normalization strips away all Slack-specific structure and produces a platform-neutral `NormalizedRequest`:
 
 ```python
 @staticmethod
@@ -800,12 +867,8 @@ def _normalize(event):
     )
 ```
 
-The `thread_ts` logic deserves attention. If the message is in a thread,
-`thread_ts` is the parent message's timestamp — Slack's way of identifying
-a thread. If it's a top-level message, there is no `thread_ts`, so we fall
-back to `ts` (the message's own timestamp). This matters because the
-orchestrator uses `thread_ts` as the key for conversation history: all
-messages in a thread share the same key, giving the model full thread context.
+The `thread_ts` logic deserves attention. If the message is in a thread, `thread_ts` is the parent message's timestamp — Slack's way of identifying a thread. If it's a top-level message, there is no `thread_ts`, so we fall
+back to `ts` (the message's own timestamp). This matters because the orchestrator uses `thread_ts` as the key for conversation history: all messages in a thread share the same key, giving the model full thread context.
 
 `NormalizedRequest` itself is a plain dataclass with no Slack imports:
 
@@ -823,12 +886,9 @@ class NormalizedRequest:
     raw_event: dict[str, object] = field(default_factory=dict)
 ```
 
-The `request_id` is auto-generated and carried through every log line in the
-pipeline — orchestrator, backend, transcript repair — for end-to-end tracing.
+The `request_id` is auto-generated and carried through every log line in the pipeline — orchestrator, backend, transcript repair — for end-to-end tracing (this will become important later when we collect traces and associated descendant traces with parent traces).
 
-Action payloads (button clicks, dropdown selections) follow a parallel path
-through `_normalize_action`, which extracts the first action from Slack's
-`actions` array and wraps it in an `ActionPayload`:
+Action payloads (button clicks, dropdown selections) follow a parallel path through `_normalize_action`, which extracts the first action from Slack's `actions` array and wraps it in an `ActionPayload`:
 
 ```python
 @staticmethod
@@ -855,11 +915,9 @@ def _normalize_action(body):
     )
 ```
 
-### The thinking indicator pattern
+#### The thinking indicator pattern
 
-Most chat bots post their response only after inference completes, leaving the
-user staring at nothing for several seconds. The connector inverts this with a
-thinking indicator — an immediate visible response that gets replaced in-place:
+Most chat bots post their response only after inference completes, leaving the user staring at nothing for several seconds. The connector inverts this with a thinking indicator — an immediate visible response that gets replaced in-place:
 
 ```python
 async def _handle_with_thinking(self, client, request):
@@ -879,62 +937,28 @@ async def _handle_with_thinking(self, client, request):
 
 The flow is:
 
-1. Post ":hourglass_flowing_sand: Thinking…" via `chat_postMessage`.  Capture
-   its `ts` (Slack's message ID).
-2. Call the orchestrator, which builds context, calls the model, repairs the
-   transcript, and returns a `RichResponse`.
+1. Post ":hourglass_flowing_sand: Thinking…" via `chat_postMessage`.  Capture its `ts` (Slack's message ID).
+2. Call the orchestrator, which builds context, calls the model, repairs the transcript, and returns a `RichResponse`.
 3. Replace the thinking message in-place via `chat_update` using the saved `ts`.
 
-If the thinking message fails to post (permissions, rate limits), the connector
-falls back to posting a new message after inference returns. If the `chat_update`
-fails, it falls back again to a new message. The user always gets a response.
+If the thinking message fails to post (permissions, rate limits), the connector falls back to posting a new message after inference returns. If the `chat_update` fails, it falls back again to a new message. **The user always gets a response.**
 
-### Error propagation and rate limiting
+#### Error propagation and rate limiting
 
 ![Error propagation chain](./m1_error_propagation.svg)
 
-Errors flow from bottom to top through the full stack:
+Errors flow from bottom to top through the full stack (see the source files linked below for the complete implementation):
 
-1. The **inference backend** raises `InferenceError` with a categorized
-   `ErrorCategory` (auth, rate limit, timeout, model error, unknown).
-2. The **orchestrator** catches it and returns a `RichResponse` containing a
-   user-friendly error message — not a traceback.
-3. The **connector** receives that `RichResponse` and checks whether it looks
-   like an error:
+1. The **inference backend** ([`inference_hub.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/backends/inference_hub.py)) raises `InferenceError` with a categorized `ErrorCategory` (auth, rate limit, timeout, model error, unknown).
+2. The **orchestrator** ([`orchestrator.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/orchestrator/orchestrator.py)) catches it and returns a `RichResponse` containing a user-friendly error message — not a traceback.
+3. The **connector** ([`slack.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/connectors/slack.py)) receives that `RichResponse` and checks whether it looks like an error.
+4. If it is an error, the connector checks its **per-channel rate limiter**: at most 3 error messages per 60 seconds. If the limit is exceeded, the thinking indicator is silently deleted instead of being replaced with the error text.
 
-```python
-is_error = response.blocks and all(
-    isinstance(b, TextBlock)
-    and any(
-        phrase in (b.text or "")
-        for phrase in ("try again", "admin know", "rate-limited")
-    )
-    for b in response.blocks
-)
-```
+This prevents the worst-case failure mode: a persistently broken backend generating one error message for every inbound user message in a busy channel.
 
-4. If it is an error, the connector checks its **per-channel rate limiter**:
-   at most 3 error messages per 60 seconds.  If the limit is exceeded, the
-   thinking indicator is silently deleted instead of being replaced with the
-   error text.
+#### Rendering: RichResponse → Block Kit
 
-```python
-def _is_error_rate_limited(self, channel):
-    now = time.monotonic()
-    timestamps = self._error_timestamps[channel]
-    timestamps[:] = [t for t in timestamps if now - t < self._ERROR_WINDOW_S]
-    timestamps.append(now)
-    return len(timestamps) > self._ERROR_MAX_PER_WINDOW
-```
-
-This prevents the worst-case failure mode: a persistently broken backend
-generating one error message for every inbound user message in a busy channel.
-
-### Rendering: RichResponse → Block Kit
-
-The orchestrator returns `RichResponse` objects containing platform-neutral
-blocks. The connector's `render()` method translates each block into Slack
-Block Kit JSON.
+The orchestrator returns `RichResponse` objects containing platform-neutral blocks. The connector's `render()` method translates each block into Slack Block Kit JSON.
 
 The mapping is:
 
@@ -946,55 +970,21 @@ The mapping is:
 | `ConfirmBlock` | `section` with a `confirm` dialog accessory |
 | `FormBlock` | `header` + field `section`s with `static_select` + submit button |
 
-The most common path is `TextBlock` → `section`:
-
-```python
-if isinstance(block, TextBlock):
-    if block.style == "markdown":
-        return _section(_to_slack_markdown(block.text))
-    return _plain_section(block.text)
-```
-
-`_to_slack_markdown` handles the impedance mismatch between standard Markdown
-(which LLMs produce) and Slack's mrkdwn dialect:
-
-- `# Heading` → `*Heading*` (bold)
-- `**bold**` → `*bold*` (Slack uses single asterisks)
-- `[label](url)` → `<url|label>` (Slack link syntax)
-
-`FormBlock` is the most complex case. Slack messages cannot contain `input`
-blocks (those are modal-only), so the connector adapts: `select` fields become
-`static_select` dropdowns in a section accessory, and text fields become
-labelled sections prompting the user to reply in-thread. A submit button is
-appended when `submit_action_id` is set.
-
-The key architectural point: none of this rendering logic exists in the
-orchestrator. If a Discord connector were added, it would implement its own
-`render()` targeting Discord embeds. The orchestrator's output is always the
-same `RichResponse` regardless of destination.
+`_to_slack_markdown` handles the conversion between standard Markdown (which LLMs produce) and Slack's mrkdwn dialect. The key architectural point: none of this rendering logic exists in the orchestrator. If a Discord connector were added, it would implement its own `render()` targeting Discord embeds. The orchestrator's output is always the same `RichResponse` regardless of destination.
 
 ---
 
-## Orchestrator Implementation Walkthrough
+### Orchestrator Implementation Walkthrough
 
 ![Orchestrator pipeline](./m1_orchestrator_pipeline.svg)
 
-The orchestrator (`src/nemoclaw_escapades/orchestrator/orchestrator.py`) is the
-centre of the M1 agent loop. It owns the full request lifecycle: receive a
-platform-neutral request, build prompt context, call the inference backend,
-apply defensive output handling, check the approval gate, and return a
-platform-neutral response.
+The orchestrator ([`orchestrator.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/orchestrator/orchestrator.py)) is the centre of the M1 agent loop. It owns the full request lifecycle: receive a platform-neutral request, build prompt context, call the inference backend, apply defensive output handling, check the approval gate, and return a platform-neutral response.
 
-The orchestrator imports no platform SDK — no `slack_sdk`, no `slack_bolt`. It
-communicates with connectors through `NormalizedRequest` / `RichResponse` and
-with backends through `InferenceRequest` / `InferenceResponse`. This isolation
-is not accidental. It is the reason we can test the orchestrator without Slack
-credentials, swap inference providers without touching the control loop, and
-add new connectors without modifying the core.
+The orchestrator imports no platform SDK — no `slack_sdk`, no `slack_bolt`, no inference API. It communicates with connectors through `NormalizedRequest` / `RichResponse` and with backends through `InferenceRequest` / `InferenceResponse`. This isolation is the reason we can test the orchestrator without Slack credentials, swap inference providers without touching the control loop, and add new connectors without modifying the core.
 
-### Wiring: how the pieces connect
+#### Wiring: how the pieces connect
 
-The entry point (`main.py`) shows how the three components are assembled:
+The entry point ([`main.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/main.py)) shows how the three components are assembled:
 
 ```python
 backend = InferenceHubBackend(config.inference)
@@ -1006,15 +996,11 @@ connector = SlackConnector(
 )
 ```
 
-The orchestrator's `handle` method matches the `MessageHandler` callback
-signature. It is passed to the connector as a plain function reference — the
-connector calls it without knowing (or needing to know) anything about the
-orchestrator's internal structure.
+The orchestrator's `handle` method matches the `MessageHandler` callback signature. It is passed to the connector as a plain function reference — the connector calls it without knowing (or needing to know) anything about the orchestrator's internal structure.
 
-### The handle() method: the full agent loop
+#### The handle() method: the full agent loop
 
-`handle()` is the orchestrator's only public method. Every inbound request
-passes through it:
+`handle()` is the orchestrator's only public method. Every inbound request passes through it:
 
 ```python
 async def handle(self, request: NormalizedRequest) -> RichResponse:
@@ -1022,7 +1008,7 @@ async def handle(self, request: NormalizedRequest) -> RichResponse:
 
     try:
         # 1. Build prompt context
-        messages = self._build_prompt(thread_key, request.text)
+        messages = self._prompt.messages_for_inference(thread_key, request.text)
 
         # 2. Call inference with transcript repair
         content = await self._inference_with_repair(messages, request.request_id)
@@ -1034,10 +1020,8 @@ async def handle(self, request: NormalizedRequest) -> RichResponse:
         if not approval.approved:
             content = "I generated a response but it was not approved. ..."
 
-        # 4. Record in thread history
-        self._thread_history[thread_key].append(
-            {"role": "assistant", "content": content}
-        )
+        # 4. Commit turn to thread history (only after success)
+        self._prompt.commit_turn(thread_key, request.text, content)
 
         # 5. Shape and return
         return self._shape_response(request, content)
@@ -1048,68 +1032,48 @@ async def handle(self, request: NormalizedRequest) -> RichResponse:
         return self._error_response(request, ErrorCategory.UNKNOWN)
 ```
 
-Five steps, every one visible and testable in isolation. The outer
-`try`/`except` guarantees the method never raises — it always returns a
-`RichResponse`, even on failure. This is important because the connector is
-waiting for a response to replace the thinking indicator. An unhandled
-exception would leave a dangling "Thinking…" message in the channel forever.
+These five steps are clearly defined and testable in isolation. The outer `try`/`except` guarantees the method never raises — it always returns a `RichResponse`, even on failure. This is important because the connector is waiting for a response to replace the thinking indicator. An unhandled exception would leave a dangling "Thinking…" message in the channel forever.
 
-### Context assembly: _build_prompt
+#### Context assembly: PromptBuilder
 
 The prompt sent to the model is always: **system prompt + full thread history +
-latest user message**. `_build_prompt` constructs this list:
+latest user message**. The `PromptBuilder` class ([`prompt_builder.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/orchestrator/prompt_builder.py)) encapsulates this logic, extracted from the orchestrator so prompt construction can evolve independently of the control loop:
 
 ```python
-def _build_prompt(self, thread_key, user_text):
-    # Append the new user message to history
-    self._thread_history[thread_key].append(
-        {"role": "user", "content": user_text}
-    )
+class PromptBuilder:
+    def __init__(self, system_prompt: str, max_thread_history: int) -> None:
+        self._system_prompt = system_prompt
+        self._max_history = max_thread_history
+        self._thread_history: dict[str, list[dict[str, str]]] = defaultdict(list)
 
-    # Enforce max history length
-    history = self._thread_history[thread_key]
-    if len(history) > self._config.max_thread_history:
-        self._thread_history[thread_key] = history[-max_len:]
-        history = self._thread_history[thread_key]
+    def messages_for_inference(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
+        hist = self.history_with_user_message(thread_key, user_text)
+        return [{"role": "system", "content": self._system_prompt}] + hist
 
-    # System prompt always comes first
-    return [{"role": "system", "content": self._system_prompt}] + list(history)
+    def history_with_user_message(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
+        hist = list(self._thread_history[thread_key])
+        hist.append({"role": "user", "content": user_text})
+        if len(hist) > self._max_history:
+            return hist[-self._max_history :]
+        return hist
+
+    def commit_turn(self, thread_key: str, user_text: str, assistant_content: str) -> None:
+        hist = self.history_with_user_message(thread_key, user_text)
+        hist.append({"role": "assistant", "content": assistant_content})
+        self._thread_history[thread_key] = hist
 ```
 
-Thread history is keyed by `thread_ts` — the same key the connector derives
-during normalization. All messages in a Slack thread share the same key, so
-the model sees the full conversation context.
+The key design choice is the **commit semantics**: `messages_for_inference` builds the prompt *without* mutating history. The orchestrator only calls `commit_turn` after a successful model round-trip, so failed requests never pollute the conversation. This prevents a half-written assistant message from appearing in the context for the next user message after a crash or timeout.
 
-History is capped at a configurable maximum (default 50 messages). When
-exceeded, the oldest messages are dropped from the front. This prevents
-unbounded memory growth in long-running conversations. The cap is a simple
-sliding window — more sophisticated approaches (summarization, semantic
-compression) are deferred to M4 (memory orchestration).
+Thread history is keyed by `thread_ts` — the same key the connector derives during normalization. All messages in a Slack thread share the same key, so the model sees the full conversation context.
 
-The system prompt is loaded once at startup from a file (defaulting to
-`prompts/system_prompt.md`), with a built-in fallback:
+History is capped at a configurable maximum (default 50 messages). When exceeded, the oldest messages are dropped from the front. This prevents unbounded memory growth in long-running conversations. The cap is a simple sliding window — more sophisticated approaches (summarization, semantic compression) are deferred to M4 (memory orchestration). This kind of context management is an active area of development and research, and even more mature systems like OpenClaw and Hermes are undergoing changes and experimentation in this domain.
 
-```python
-def load_system_prompt(path):
-    p = Path(path)
-    if p.is_file():
-        return p.read_text().strip()
-    return (
-        "You are NemoClaw, a helpful AI assistant. "
-        "Be concise and direct in your responses. "
-        "You do not yet have tools or persistent memory."
-    )
-```
+The system prompt is loaded once at startup from a file (defaulting to `prompts/system_prompt.md`), with a built-in fallback. History is in-memory only. It survives across messages within a process lifetime but is lost on restart. Persistent conversation storage is an M5 concern.
 
-History is in-memory only. It survives across messages within a process
-lifetime but is lost on restart. Persistent conversation storage is a M5
-concern.
+#### Inference dispatch and transcript repair
 
-### Inference dispatch and transcript repair
-
-After building the prompt, the orchestrator calls the inference backend. But
-it doesn't just fire one request and return the result. It wraps the call in a
-transcript-repair loop that handles empty replies, truncated output, and
+After building the prompt, the orchestrator calls the inference backend. But it doesn't just fire one request and return the result. It wraps the call in a transcript-repair loop that handles empty replies, truncated output, and
 content-filter blocks:
 
 ```python
@@ -1145,8 +1109,7 @@ async def _inference_with_repair(self, messages, request_id):
     return accumulated_content  # partial, but best we have
 ```
 
-`repair_response` (`orchestrator/transcript_repair.py`) inspects the raw model
-output and returns a `RepairResult`:
+`repair_response` ([`transcript_repair.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/orchestrator/transcript_repair.py)) inspects the raw model output and returns a `RepairResult`:
 
 | Condition | Action | Continuation? |
 |---|---|---|
@@ -1155,68 +1118,20 @@ output and returns a `RepairResult`:
 | `finish_reason="content_filter"` | Replace with: "My response was filtered. Could you rephrase your request?" | No |
 | Normal response | Pass through unchanged | No |
 
-When continuation is needed, the orchestrator appends the partial output as an
-assistant message followed by a continuation prompt:
+When continuation is needed, the orchestrator appends the partial output as an assistant message followed by a continuation prompt:
 
 ```
 "Resume directly, no apology, no recap. Pick up mid-thought.
 Break remaining work into smaller pieces."
 ```
 
-This mirrors Claude Code's continuation strategy — no "I apologize for the
-interruption" padding, just a clean resume. Up to 2 continuation retries are
-attempted. Content from successive attempts is concatenated. If all retries
-are exhausted, the partial content is returned as-is.
+This mirrors Claude Code's continuation strategy — no "I apologize for the interruption" padding, just a clean resume. Up to 2 continuation retries are attempted. Content from successive attempts is concatenated. If all retries are exhausted, the partial content is returned as-is.
 
-### The inference backend contract
+#### The inference backend contract
 
-The orchestrator calls `self._backend.complete(request)` — but what happens
-inside that call is significant. The `InferenceHubBackend`
-(`backends/inference_hub.py`) wraps `httpx.AsyncClient` with tenacity-based
-retry logic:
+The orchestrator calls `self._backend.complete(request)` and receives an `InferenceResponse`. It never knows which provider is behind the call — the `BackendBase` interface isolates that entirely. The full backend implementation, including retry logic, error categorization, and the local-vs-sandbox credential split, is covered in the [Inference Backend Implementation Walkthrough](#inference-backend-implementation-walkthrough) below.
 
-```python
-async for attempt in AsyncRetrying(
-    retry=retry_if_exception_type(_RetryableError),
-    wait=self._wait_for_retry,
-    stop=stop_after_attempt(self._config.max_retries),
-    before_sleep=self._log_retry,
-    reraise=True,
-):
-    with attempt:
-        return await self._send_request(payload, request.model)
-```
-
-A single HTTP attempt (`_send_request`) can result in:
-
-| HTTP Status | Classification | Retry? |
-|---|---|---|
-| 200 | Success — parse and return | — |
-| 401, 403 | `AUTH_ERROR` — bad key or expired token | Never |
-| 429 | `RATE_LIMIT` — honour `Retry-After` header | Yes |
-| 5xx | `MODEL_ERROR` — upstream failure | Yes |
-| Timeout | `TIMEOUT` — no response in time | Yes |
-
-Retryable failures raise an internal `_RetryableError` that tenacity catches.
-Non-retryable failures (auth) raise `InferenceError` immediately, which
-tenacity does not catch — it propagates straight to the orchestrator.
-
-The wait strategy is adaptive: if the response includes a `Retry-After`
-header, that value is used verbatim. Otherwise, exponential backoff with jitter
-kicks in (initial 2 s, max 30 s, jitter ±2 s). Every retry is logged with the
-attempt number and error category.
-
-The backend also handles the local-vs-sandbox credential split. In the sandbox,
-the `inference.local` proxy injects the real API key — the app must not send
-one. Locally, the app sends the key from `.env` directly:
-
-```python
-headers = {"Content-Type": "application/json"}
-if config.api_key:
-    headers["Authorization"] = f"Bearer {config.api_key}"
-```
-
-### The approval gate
+#### The approval gate
 
 After inference succeeds, the response passes through an approval gate:
 
@@ -1226,13 +1141,9 @@ approval = await self._approval.check(
 )
 ```
 
-In M1 this is `AutoApproval` — a stub that approves everything. There are no
-tools in M1, so there are no side effects to gate. But the interface is
-scaffolded now so M2 can plug in a tiered classifier (fast-path pattern
-matching for safe reads, LLM classifier for ambiguous operations, Slack
-escalation for dangerous writes) without restructuring the loop.
+In M1 this is `AutoApproval` — a stub that approves everything. There are no tools in M1, so there are no side effects to gate. But the interface is scaffolded now so M2 can plug in a tiered classifier (fast-path pattern matching for safe reads, LLM classifier for ambiguous operations, Slack escalation for dangerous writes) without restructuring the loop.
 
-### Response construction
+#### Response construction
 
 The final step wraps the plain-text content in a platform-neutral
 `RichResponse`:
@@ -1247,12 +1158,7 @@ def _shape_response(request, content):
     )
 ```
 
-In M1 this is always a single `TextBlock`. The block-list structure exists
-because M2+ responses will include `ActionBlock` (approve/reject buttons),
-`ConfirmBlock` (dangerous-action confirmations), and `FormBlock` (structured
-input). The connector renders whatever blocks it receives — it doesn't need
-to know whether the response is a simple text reply or a multi-block
-interactive form.
+In M1 this is always a single `TextBlock`. The block-list structure exists because M2+ responses will include `ActionBlock` (approve/reject buttons), `ConfirmBlock` (dangerous-action confirmations), and `FormBlock` (structured input). The connector renders whatever blocks it receives — it doesn't need to know whether the response is a simple text reply or a multi-block interactive form.
 
 Error responses follow the same pattern but with category-specific messages:
 
@@ -1273,127 +1179,132 @@ def _error_response(request, category):
     )
 ```
 
-Each `ErrorCategory` maps to a non-technical message. The user never sees a
-Python traceback. The full exception is logged server-side with structured JSON
-(including `error_category`, `request_id`, and `latency_ms`) for debugging.
+Each `ErrorCategory` maps to a non-technical message. The user never sees a Python traceback. The full exception is logged server-side with structured JSON (including `error_category`, `request_id`, and `latency_ms`) for debugging.
 
-### Observability
+#### Observability
 
-Every step in the pipeline emits structured JSON logs. A single request
-generates a trace like:
+Every step in the pipeline emits structured JSON logs ([`logging.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/observability/logging.py)). A single request generates a trace like:
 
 ```json
 {"component": "slack_connector", "message": "Request received", "request_id": "a3f8b2c1d4e5", "user_id": "U...", "channel_id": "C..."}
 {"component": "orchestrator", "message": "Prompt built", "request_id": "a3f8b2c1d4e5", "history_length": 4}
-{"component": "inference_hub", "message": "Inference call starting", "model": "azure/anthropic/claude-opus-4-6"}
-{"component": "inference_hub", "message": "Inference call completed", "latency_ms": 2847.3, "prompt_tokens": 312, "completion_tokens": 89}
+{"component": "inference_hub", "message": "Inference call starting", "request_id": "a3f8b2c1d4e5", "model": "azure/anthropic/claude-opus-4-6"}
+{"component": "inference_hub", "message": "Inference call completed", "request_id": "a3f8b2c1d4e5", "latency_ms": 2847.3, "prompt_tokens": 312, "completion_tokens": 89}
 {"component": "orchestrator", "message": "Request completed", "request_id": "a3f8b2c1d4e5", "latency_ms": 2891.1}
-{"component": "slack_connector", "message": "Response sent (updated thinking message)"}
+{"component": "slack_connector", "message": "Response sent (updated thinking message)", "request_id": "a3f8b2c1d4e5", "channel_id": "C..."}
 ```
 
-The `request_id` ties every log line together. Token counts and latencies
-are recorded for cost and performance tracking. Error categories are logged
-so failure modes can be aggregated. All of this runs through a single
-`JSONFormatter` that writes to stdout (and optionally a file), making it easy
-to pipe into any log aggregation system.
+The `request_id` ties every log line together. Token counts and latencies are recorded for cost and performance tracking. Error categories are logged so failure modes can be aggregated. All of this runs through a single `JSONFormatter` that writes to stdout (and optionally a file), making it easy to pipe into any log aggregation system.
+
+For M1, stdout JSON logs are sufficient. A later milestone will extend this to a persistent audit log or database so request traces, token usage, and error rates can be queried after the fact — this is a prerequisite for the self-improvement loop planned in M6.
+
+### Inference Backend Implementation Walkthrough
+
+The inference backend ([`backends/`](https://github.com/dpickem/nemoclaw_escapades/tree/30bd097/src/nemoclaw_escapades/backends)) is the boundary between the orchestrator and the model provider. Its job is to turn an `InferenceRequest` into an `InferenceResponse` while hiding every provider-specific detail: authentication, retry logic, timeout enforcement, and error categorization.
+
+#### The BackendBase contract
+
+Every backend implements `BackendBase` ([`base.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/backends/base.py)):
+
+```python
+class BackendBase(ABC):
+    @abstractmethod
+    async def complete(self, request: InferenceRequest) -> InferenceResponse: ...
+
+    async def close(self) -> None: ...
+```
+
+The contract is intentionally minimal. `complete()` sends an OpenAI-format message list and returns a structured response. `close()` releases held resources. Retry logic, timeout enforcement, and error categorization are the responsibility of each concrete implementation — the orchestrator never retries on its own.
+
+Adding a new provider (OpenAI, Anthropic, a local vLLM server) means creating one new `BackendBase` subclass. Nothing else changes — the orchestrator and connector code stay untouched.
+
+#### HTTP client setup
+
+The `InferenceHubBackend` ([`inference_hub.py`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/src/nemoclaw_escapades/backends/inference_hub.py)) wraps an `httpx.AsyncClient` configured at construction time:
+
+```python
+headers: dict[str, str] = {"Content-Type": "application/json"}
+if config.api_key:
+    headers["Authorization"] = f"Bearer {config.api_key}"
+
+self._client = httpx.AsyncClient(
+    base_url=config.base_url,
+    headers=headers,
+    timeout=httpx.Timeout(config.timeout_s, connect=10.0),
+)
+```
+
+The conditional `Authorization` header handles the local-vs-sandbox credential split. Locally, the app sends the API key from `.env` directly. Inside an OpenShell sandbox, `config.api_key` is empty — the `inference.local` proxy injects the real key before forwarding upstream (see [Lesson #11](#11-the-inference-proxy-injects-the-api-key-the-app-must-not-send-one)). This means the same code works in both environments without any branching — the absence of a key is the signal.
+
+#### The retry loop
+
+The `complete()` method wraps `_send_request` in a tenacity `AsyncRetrying` loop:
+
+```python
+async for attempt in AsyncRetrying(
+    retry=retry_if_exception_type(_RetryableError),
+    wait=self._wait_for_retry,
+    stop=stop_after_attempt(self._config.max_retries),
+    before_sleep=self._log_retry,
+    reraise=True,
+):
+    with attempt:
+        return await self._send_request(payload, request.model, request.request_id)
+```
+
+#### Response parsing and finish_reason
+
+On a successful 200 response, `_parse_response` extracts the three pieces the orchestrator needs:
+
+```python
+choice = data["choices"][0]
+content = choice["message"]["content"]
+finish_reason = choice.get("finish_reason", "stop")
+```
+
+The `content` is the model's reply. The `finish_reason` is critical for the transcript-repair layer: `"stop"` means the model finished normally, `"length"` means it hit the token limit and was truncated, and `"content_filter"` means the output was blocked. The orchestrator's `_inference_with_repair` method uses this signal to decide whether to request a continuation (see [Inference dispatch and transcript repair](#inference-dispatch-and-transcript-repair)).
+
+Token usage counters (`prompt_tokens`, `completion_tokens`, `total_tokens`) are extracted and logged for cost tracking. If the response body is malformed (missing `choices`, missing `message.content`), the backend raises `InferenceError` with `MODEL_ERROR` rather than letting a `KeyError` propagate as an unclassified failure.
+
+#### Provider swappability in practice
+
+The entire backend contract is designed so the orchestrator never imports provider-specific code. Swapping NVIDIA Inference Hub for a different provider means:
+
+1. Write a new `BackendBase` subclass (e.g. `OpenAIBackend`, `VLLMBackend`).
+2. Change one line in `main.py`: `backend = NewBackend(config)`.
+3. If running in an OpenShell sandbox, register a new provider and configure
+   inference routing for the new endpoint (see
+   [Steps 7–8](#step-7-register-the-inference-provider)). The network policy
+   may also need an entry if the new provider uses a different host.
+4. Nothing else changes — the orchestrator, connector, transcript repair, and tests all work identically.
+
+Running locally without a sandbox, only steps 1–2 apply. The OpenShell layer (step 3) is an additional concern only because the sandbox mediates all outbound traffic — the application code itself is unchanged.
 
 ---
 
-## Learning Objectives
-
-M1 should teach the mechanics of channel abstraction, inference abstraction, and
-orchestrator control flow under real operational constraints.
-
-| Objective | Evidence We Expect by End of M1 |
-|---|---|
-| Channel abstraction | Slack logic remains in connector, not orchestration core |
-| Inference abstraction | Backend routes through inference hub without provider lock-in |
-| Runtime reliability | One-turn request/response works repeatedly with retries/logging |
-| Operability | Failure modes are visible and diagnosable from logs |
-
-## Deliverables
-
-The deliverables below are intentionally practical. Each one should leave
-behind a reusable piece of the stack rather than a one-off demo.
-
-| Deliverable | Description | Done When |
-|---|---|---|
-| Repo + docs baseline | Core project structure and architecture notes | New contributor can understand system boundaries quickly |
-| Slack connector | Reusable connector interface with Slack implementation | Messages can be received and replied to reliably |
-| Inference backend integration | Reusable backend interface routed through inference hub | Orchestrator can call model endpoints through one contract |
-| Local runtime deployment | Orchestrator and connector run locally against hosted inference | End-to-end flow runs from local process to NVIDIA Inference Hub |
-| Minimal orchestrator loop | End-to-end one-turn processing pipeline | Slack -> model -> Slack works with realistic prompts |
-| Architecture diagrams | Visual map of runtime responsibilities | Diagram matches actual code path and is reviewable |
-
-## Acceptance Criteria
-
-The acceptance criteria are deliberately narrow. M1 is successful if it proves
-the baseline loop and preserves clean seams for the milestones that follow.
-
-| Check | Validation Method |
-|---|---|
-| End-to-end loop works | Send a Slack message and receive model response |
-| Pluggable boundaries exist | Confirm no Slack/provider-specific logic in core orchestrator |
-| Deployment behavior is explicit | Verify orchestrator runs locally while model calls are remote via NVIDIA Inference Hub |
-| Error handling exists | Simulate auth/network/model failures and inspect logs |
-| M2 readiness | Documentation is clear enough for coding-agent milestone handoff |
-
-## Why This Sets Up the Rest of the Series
-
-M1 is the point where the architecture stops being an idea and becomes a
-running system.
-
-Once this baseline exists, the next milestones can add complexity for good
-reasons instead of for their own sake:
-
-- M2 adds sandboxed execution through a coding agent.
-- M3 adds collaboration through a review agent.
-- M4 adds memory orchestration (working, user, and knowledge lanes).
-- M5 adds professional knowledge capture from Slack and Teams into the knowledge tier.
-- M6 adds a self-improvement loop.
-
-But every one of those later steps assumes the same foundation: a clear
-connector, a clear orchestrator, a clear inference boundary, and a deployment
-model we can reason about. That is what M1 is really buying us.
-
 ## OpenShell Sandbox Deployment — Lessons Learned
 
-This section documents every issue we hit deploying the M1 orchestrator inside
-an OpenShell sandbox, in the order we encountered them. These are hard-won
-debugging nuggets that will save you hours.
+This section documents every issue we hit deploying the M1 orchestrator inside an OpenShell sandbox. These are hard-won debugging nuggets that will save you (or your agent) time.
 
 ### 1. The `openshell` CLI changes between versions — check subcommands
 
-OpenShell 0.0.6 used `provider add`, `credential set`, `sandbox remove`, and
-`sandbox stop`. By 0.0.21, these were `provider create`, `sandbox delete`, and
-there is no `credential` subcommand at all. Always run `openshell <command>
---help` before scripting against the CLI. The Makefile we shipped was written
-against a hallucinated API and every command was wrong.
+OpenShell 0.0.6 used `provider add`, `credential set`, `sandbox remove`, and `sandbox stop`. By 0.0.21, these were `provider create`, `sandbox delete`, and there is no `credential` subcommand at all. Always run `openshell <command> --help` before scripting against the CLI. The Makefile we shipped was written against a hallucinated API and every command was wrong. By the time you try out Nemoclaw Escapades the OpenShell interface may have changed in non-backwards compatible ways. The documentation for this repo (and `pyproject.toml`) will point you to the OpenShell version this project is working with.
 
 **Fix:** Run `--help` on every subcommand. Don't guess.
 
 ### 2. Dockerfiles must include `README.md` for hatchling builds
 
-Our `pyproject.toml` declares `readme = "README.md"`. Hatchling (the build
-backend) validates this at metadata generation time. If the Dockerfile only
-copies `pyproject.toml` and `src/` into the builder stage, the build fails
-with `OSError: Readme file does not exist: README.md`.
+Our `pyproject.toml` declares `readme = "README.md"`. Hatchling (the build backend) validates this at metadata generation time. If the Dockerfile only copies `pyproject.toml` and `src/` into the builder stage, the build fails with `OSError: Readme file does not exist: README.md`.
 
 **Fix:** `COPY pyproject.toml README.md ./` in the builder stage.
 
 ### 3. OpenShell's `--from` flag and the build context trap
 
-When `openshell sandbox create --from <path>` receives a Dockerfile path, it
-uses the Dockerfile's **parent directory** as the build context. If your
-Dockerfile lives in `docker/Dockerfile.orchestrator`, the context is `docker/`
-— which doesn't contain `pyproject.toml`, `src/`, or `README.md`.
+When `openshell sandbox create --from <path>` receives a Dockerfile path, it uses the Dockerfile's **parent directory** as the build context. If your Dockerfile lives in `docker/Dockerfile.orchestrator`, the context is `docker/` — which doesn't contain `pyproject.toml`, `src/`, or `README.md`.
 
-When given a directory path, OpenShell uses that directory as context and looks
-for a `Dockerfile` inside it.
+When given a directory path, OpenShell uses that directory as context and looks for a `Dockerfile` inside it.
 
-**Fix:** We create a temporary symlink `Dockerfile -> docker/Dockerfile.orchestrator`
-at the project root, pass `--from .`, and remove the symlink after. The symlink
-is in `.gitignore`. This is documented in the Makefile with a full explanation.
+**Fix:** We create a temporary symlink `Dockerfile -> docker/Dockerfile.orchestrator` at the project root, pass `--from .`, and remove the symlink after. The symlink is in `.gitignore`. This is documented in the Makefile with a full explanation.
 
 ### 4. The `python:3.11-slim` image doesn't meet OpenShell sandbox requirements
 
@@ -1420,77 +1331,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
 
 ### 5. Do NOT set `USER` or `ENTRYPOINT` in the Dockerfile
 
-OpenShell replaces the image's entrypoint with its own supervisor binary
-(`/opt/openshell/bin/openshell-sandbox`). The supervisor must start as root to
-apply Landlock policies and set up network namespaces before dropping
-privileges to the `sandbox` user (specified in the policy's `process` section).
+OpenShell replaces the image's entrypoint with its own supervisor binary (`/opt/openshell/bin/openshell-sandbox`). The supervisor must start as root to apply Landlock policies and set up network namespaces before dropping privileges to the `sandbox` user (specified in the policy's `process` section).
 
-If the Dockerfile sets `USER sandbox`, the supervisor can't apply policies and
-crash-loops. If it sets `ENTRYPOINT`, it's ignored anyway.
+If the Dockerfile sets `USER sandbox`, the supervisor can't apply policies and crash-loops. If it sets `ENTRYPOINT`, it's ignored anyway.
 
-The actual application command is passed via `-- <cmd>` on
-`openshell sandbox create`.
+The actual application command is passed via `-- <cmd>` on `openshell sandbox create`.
 
 ### 6. Credential injection uses opaque placeholders, not real values
 
-OpenShell never exposes real credentials inside the sandbox. Environment
-variables contain placeholder tokens like
-`openshell:resolve:env:SLACK_BOT_TOKEN`. The proxy resolves these placeholders
-in HTTP request headers when traffic passes through it.
+OpenShell never exposes real credentials inside the sandbox. Environment variables contain placeholder tokens like `openshell:resolve:env:SLACK_BOT_TOKEN`. The proxy resolves these placeholders in HTTP request headers when traffic passes through it.
 
-We confirmed this with a test script (`scripts/test_credential_injection.sh`)
-that creates a provider, spins up an ephemeral sandbox, and dumps `env | sort`.
-All three credentials showed placeholder values, not the real tokens from
-`.env`.
+We confirmed this with a test script (`scripts/test_credential_injection.sh`) that creates a provider, spins up an ephemeral sandbox, and dumps `env | sort`.  All three credentials showed placeholder values, not the real tokens from `.env`.
 
 ### 7. The proxy routes ALL outbound traffic — HTTPS_PROXY is set automatically
 
-Inside the sandbox, OpenShell sets `HTTPS_PROXY=http://10.200.0.1:3128` and
-installs its own CA certificate (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
-`CURL_CA_BUNDLE`). All outbound HTTPS traffic goes through this proxy, which
-enforces network policies, resolves credential placeholders, and terminates
-TLS.
+Inside the sandbox, OpenShell sets `HTTPS_PROXY=http://10.200.0.1:3128` and installs its own CA certificate (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`). All outbound HTTPS traffic goes through this proxy, which enforces network policies, resolves credential placeholders, and terminates TLS.
 
 ### 8. Python's CONNECT tunneling vs OpenShell's REST proxy mode
 
-This was the hardest bug to diagnose. The OpenShell proxy supports two modes
-for endpoints:
+This was the hardest bug to diagnose. The OpenShell proxy supports two modes for endpoints:
 
-- **`protocol: rest` + `tls: terminate`**: The proxy expects the client to send
-  a regular HTTP request. The proxy terminates TLS itself and can inspect/modify
-  headers (resolving credential placeholders).
-- **`access: full`**: The proxy creates a CONNECT tunnel (opaque TCP
-  passthrough). No header inspection.
+- **`protocol: rest` + `tls: terminate`**: The proxy expects the client to send a regular HTTP request. The proxy terminates TLS itself and can inspect/modify headers (resolving credential placeholders).
+- **`access: full`**: The proxy creates a CONNECT tunnel (opaque TCP passthrough). No header inspection.
 
-**The problem:** Python's HTTP libraries (`httpx`, `urllib.request`, `curl`)
-send `CONNECT host:443` requests through an HTTPS proxy. This is standard HTTP
-proxy behavior. But OpenShell's proxy rejects CONNECT requests for endpoints
-configured with `protocol: rest`. It returns **403 Forbidden**.
+**The problem:** Python's HTTP libraries (`httpx`, `urllib.request`, `curl`) send `CONNECT host:443` requests through an HTTPS proxy. This is standard HTTP proxy behavior. But OpenShell's proxy rejects CONNECT requests for endpoints configured with `protocol: rest`. It returns **403 Forbidden**.
 
-Node.js-based tools (Claude Code, OpenClaw) send regular HTTP requests through
-the proxy instead of CONNECT, which is why the
-[reference NemoClaw policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml)
-lists `inference-api.nvidia.com` with `protocol: rest` and it works — for Node.
+Node.js-based tools (Claude Code, OpenClaw) send regular HTTP requests through the proxy instead of CONNECT, which is why the [reference NemoClaw policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml) lists the inference endpoint with `protocol: rest` and it works — for Node.
 
-**The workaround for Python:** Use `inference.local` instead of hitting the
-inference API directly. `inference.local` is OpenShell's built-in inference
-proxy endpoint. The app sends requests to `https://inference.local/v1/...` and
-the proxy handles authentication, routing, and forwarding to the real upstream.
-No CONNECT tunnel is needed because `inference.local` resolves locally inside
-the sandbox's network namespace.
+**The workaround for Python:** Use `inference.local` instead of hitting the inference API directly. `inference.local` is OpenShell's built-in inference proxy endpoint. The app sends requests to `https://inference.local/v1/...` and the proxy handles authentication, routing, and forwarding to the real upstream.  No CONNECT tunnel is needed because `inference.local` resolves locally inside the sandbox's network namespace.
 
 For Slack, the split is:
-- `slack.com` with `protocol: rest` + `tls: terminate` for HTTP API calls
-  (auth.test, chat.postMessage, apps.connections.open)
-- `*.slack.com` with `access: full` for the long-lived Socket Mode WebSocket
-  (the `access: full` CONNECT tunnel avoids the proxy's HTTP idle timeout
-  killing the connection — same pattern as Discord in the reference policy)
+- `slack.com` with `protocol: rest` + `tls: terminate` for HTTP API calls (auth.test, chat.postMessage, apps.connections.open)
+- `*.slack.com` with `access: full` for the long-lived Socket Mode WebSocket (the `access: full` CONNECT tunnel avoids the proxy's HTTP idle timeout killing the connection — same pattern as Discord in the reference policy)
 
 ### 9. Inference routing must be configured separately
 
-Having an inference provider registered (`openshell provider create`) is not
-enough. You must also configure **inference routing** so the gateway knows how
-to forward requests from `inference.local` to the real upstream:
+Having an inference provider registered (`openshell provider create`) is not enough. You must also configure **inference routing** so the gateway knows how to forward requests from `inference.local` to the real upstream:
 
 ```bash
 openshell inference set --provider inference-hub --model "azure/anthropic/claude-opus-4-6"
@@ -1498,36 +1374,102 @@ openshell inference set --provider inference-hub --model "azure/anthropic/claude
 
 Without this, `inference.local` returns **503 Unknown** (no route configured).
 
-### 10. The `nvidia` provider type defaults to `integrate.api.nvidia.com`
+### 10. `--type nvidia` vs `--type openai` for the inference provider
 
-If you create a provider with `--type nvidia`, the inference routing defaults to
-`https://integrate.api.nvidia.com/v1`. Our endpoint is
-`https://inference-api.nvidia.com/v1` — a different API.
+(See also [Step 7: Register the Inference Provider](#step-7-register-the-inference-provider))
 
-**Fix:** Use `--type openai` with an explicit base URL:
+OpenShell supports multiple provider types for inference routing. At first
+glance, `--type nvidia` seems like the natural choice. **It doesn't work**
+for many endpoints — and the failure mode is a confusing 404.
+
+**The problem with `--type nvidia`:**
+
+```bash
+# DON'T DO THIS unless your endpoint is integrate.api.nvidia.com
+openshell provider create \
+    --name inference-hub \
+    --type nvidia \
+    --credential "NVIDIA_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)"
+```
+
+- The `nvidia` type defaults to `integrate.api.nvidia.com` — which may not
+  match your actual endpoint
+- The sandbox gets `HTTP/1.1 404 Unknown` from `inference.local` and the
+  error gives no hint that the upstream endpoint is wrong
+- We verified this failure in production: the provider registers fine,
+  `openshell inference get` shows the routing, but every inference call 404s
+
+**The fix — use `--type openai` with an explicit base URL:**
 
 ```bash
 openshell provider create \
     --name inference-hub \
     --type openai \
-    --credential "OPENAI_API_KEY=<key>" \
-    --config "OPENAI_BASE_URL=https://inference-api.nvidia.com/v1"
+    --credential "OPENAI_API_KEY=$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
+    --config "OPENAI_BASE_URL=$(grep INFERENCE_HUB_BASE_URL .env | cut -d= -f2-)"
 ```
 
-The `openai` type works because the NVIDIA Inference Hub exposes an
-OpenAI-compatible API.
+- Credential key: `OPENAI_API_KEY` (required by the `openai` type regardless
+  of which provider you're actually hitting)
+- Base URL: must be overridden explicitly via `--config`, otherwise it
+  defaults to `api.openai.com`
+- This works for any OpenAI-compatible endpoint (`/v1/chat/completions`)
+
+**Comparison:**
+
+| Aspect | `--type nvidia` | `--type openai` |
+|---|---|---|
+| Credential key name | `NVIDIA_API_KEY` | `OPENAI_API_KEY` |
+| Default base URL | `integrate.api.nvidia.com` | `api.openai.com` |
+| Configurable base URL | No | Yes, via `--config "OPENAI_BASE_URL=..."` |
+| Works with custom endpoints | **No — 404 unless it matches the default** | **Yes** |
+| Works with `integrate.api.nvidia.com` | Yes | Yes (with config override) |
+| Inference routing (`openshell inference set`) | ✓ | ✓ |
+
+**NVIDIA exposes three surfaces for inference, but only two are API
+endpoints — and they serve completely disjoint model catalogs (zero
+overlap):**
+
+| | [build.nvidia.com](https://build.nvidia.com) | `integrate.api.nvidia.com` | `inference-api.nvidia.com` |
+|---|---|---|---|
+| **What it is** | Web portal / playground | OpenAI-compatible API | OpenAI-compatible API |
+| **Default for** | — (not an API) | `--type nvidia` | — (use `--type openai` + config) |
+| **Total models** | — | ~186 | ~139 |
+| **Closed-source** | — | None | Claude, GPT, Gemini, o1/o3/o4, Perplexity Sonar |
+| **Open-weight** | Browse & test | Llama, Nemotron, Qwen, Mistral, Gemma, DeepSeek, Phi, Granite, Kimi, etc. | Llama, Nemotron, Qwen (via `nvidia/`, `nvcf/` prefixes) |
+| **Naming scheme** | — | Flat: `meta/llama-3.3-70b-instruct` | Provider-routed: `azure/anthropic/claude-opus-4-6` |
+| **Auth for `/v1/models`** | — | Not required | Required |
+| **Shared models** | — | 0 shared between the two APIs | 0 shared between the two APIs |
+
+`build.nvidia.com` is a web UI for browsing and testing models — it is not
+an API endpoint. The API behind it is `integrate.api.nvidia.com`. API keys
+created on `build.nvidia.com` work with both API endpoints.
+
+This is why `--type nvidia` returns 404 for models like
+`azure/anthropic/claude-opus-4-6` — the two APIs don't share a single
+model, and that ID only exists on `inference-api.nvidia.com`.
+To check which models are available to you, query the `/v1/models` endpoint
+with your API key:
+
+```bash
+curl -s -H "Authorization: Bearer $INFERENCE_HUB_API_KEY" \
+    "$INFERENCE_HUB_BASE_URL/models" | python3 -m json.tool
+```
+
+**Why not `--type generic`?** The `generic` type injects credentials via env
+var placeholders, but it is not compatible with `openshell inference set`.
+Without inference routing, the sandbox has no `inference.local` endpoint —
+the app would have to call the upstream API directly, which Python's HTTP
+libraries route through a CONNECT tunnel that the proxy rejects (see
+[Lesson #8](#8-pythons-connect-tunneling-vs-openshells-rest-proxy-mode)).
 
 ### 11. The inference proxy injects the API key — the app must NOT send one
 
-When using `inference.local`, the proxy adds `Authorization: Bearer <real-key>`
-to the request before forwarding upstream. If the app also sends an
-`Authorization` header (even an empty `Bearer `), it conflicts.
+When using `inference.local`, the proxy adds `Authorization: Bearer <real-key>` to the request before forwarding upstream. If the app also sends an `Authorization` header (even an empty `Bearer `), it conflicts.
 
-With an empty API key, `httpx` rejects the header entirely:
-`Illegal header value b'Bearer '`.
+With an empty API key, `httpx` rejects the header entirely: `Illegal header value b'Bearer '`.
 
-**Fix:** Only add the `Authorization` header when the app has a real key (local
-development). In the sandbox, omit it and let the proxy inject it:
+**Fix:** Only add the `Authorization` header when the app has a real key (local development). In the sandbox, omit it and let the proxy inject it:
 
 ```python
 headers = {"Content-Type": "application/json"}
@@ -1537,24 +1479,15 @@ if config.api_key:
 
 ### 12. The `openshell inference set --model` **forces** the model name
 
-The `--model` parameter on `openshell inference set` overrides whatever model
-the app requests. If you configure `claude-opus-4.6` (dotted) but the API
-expects `claude-opus-4-6` (hyphenated), every request fails with **401** even
-though the key is valid.
+The `--model` parameter on `openshell inference set` overrides whatever model the app requests. If you configure `claude-opus-4.6` (dotted) but the API expects `claude-opus-4-6` (hyphenated), every request fails with **401** even though the key is valid.
 
-**Fix:** The model name in the routing config must exactly match what the
-upstream API accepts. Verify with `make test-auth` or a direct curl.
+**Fix:** The model name in the routing config must exactly match what the upstream API accepts. Verify with `make test-auth` or a direct curl.
 
 ### 13. Bot message spam loops from `message_changed` events
 
-When the bot posts a "Thinking..." placeholder and then updates it with
-`chat_update`, Slack generates a `message_changed` event. Our original
-`_should_ignore` filter only caught `subtype=bot_message`, not
-`message_changed`. Each error response update triggered a new processing cycle,
-creating an infinite spam loop.
+When the bot posts a "Thinking..." placeholder and then updates it with `chat_update`, Slack generates a `message_changed` event. Our original `_should_ignore` filter only caught `subtype=bot_message`, not `message_changed`. Each error response update triggered a new processing cycle, creating an infinite spam loop.
 
-**Fix:** Filter ALL events with any `subtype` — only process events where
-`subtype` is `None` (real user messages):
+**Fix:** Filter ALL events with any `subtype` — only process events where `subtype` is `None` (real user messages):
 
 ```python
 if event.get("subtype") is not None:
@@ -1563,16 +1496,11 @@ if event.get("subtype") is not None:
 
 ### 14. Error response rate limiting prevents the worst-case spam
 
-Even with proper message filtering, a persistently failing backend can still
-generate error messages for every inbound user message in a busy channel. We
-added a per-channel rate limiter: at most 3 error messages per 60 seconds.
-After that, error responses are silently suppressed (the thinking indicator is
-deleted).
+Even with proper message filtering, a persistently failing backend can still generate error messages for every inbound user message in a busy channel. We added a per-channel rate limiter: at most 3 error messages per 60 seconds. After that, error responses are silently suppressed (the thinking indicator is deleted).
 
 ### 15. Network policy field reference for Python-based sandboxes
 
-Here is the minimum viable policy structure for a Python app in OpenShell,
-based on everything we learned:
+Here is the minimum viable policy structure for a Python app in OpenShell, based on everything we learned. The full policy used by this project lives at [`policies/orchestrator.yaml`](https://github.com/dpickem/nemoclaw_escapades/blob/30bd097/policies/orchestrator.yaml).
 
 ```yaml
 network_policies:
@@ -1620,11 +1548,7 @@ network_policies:
 
 ### 16. Sandbox provisioning is slow the first time
 
-The first `openshell sandbox create` pulls images into the k3s cluster's
-containerd store (separate from Docker Desktop's cache). The OpenShell base
-image is ~1 GB and custom images need to be built and pushed. Expect 1-3
-minutes for the first sandbox. Subsequent creates reuse cached layers and
-take seconds.
+The first `openshell sandbox create` pulls images into the k3s cluster's containerd store (separate from Docker Desktop's cache). The OpenShell base image is ~1 GB and custom images need to be built and pushed. Expect 1-3 minutes for the first sandbox. Subsequent creates reuse cached layers and take seconds.
 
 ### 17. Use `openshell doctor exec` to debug sandbox issues
 
@@ -1636,15 +1560,168 @@ openshell doctor exec -- kubectl describe pod <name> -n openshell
 openshell doctor exec -- kubectl logs <name> -n openshell --all-containers=true
 ```
 
-This is how we discovered the `sandbox user not found` and `iproute2 missing`
-errors — the `openshell logs` command only showed the sidecar, not the crash
-reason.
+This is how we discovered the `sandbox user not found` and `iproute2 missing` errors — the `openshell logs` command only showed the sidecar, not the crash reason.
 
-### 18. Test scripts must work on macOS bash 3.2
+### 18. Gateway lifecycle: stopped ≠ destroyed, but `start` doesn't restart
 
-macOS ships bash 3.2 which doesn't support `declare -A` (associative arrays).
-Shell scripts targeting macOS must avoid bash 4+ features or use
-`#!/usr/bin/env zsh`.
+(See also [Step 6: Start the OpenShell Gateway](#step-6-start-the-openshell-gateway))
+
+The gateway is a Docker container running k3s. It can be in one of three states: **running**, **stopped** (container exists but is not running), or **destroyed** (container removed). The `openshell` CLI does not handle all transitions cleanly:
+
+| Situation | What happens |
+|---|---|
+| No gateway exists | `openshell gateway start` creates one from scratch. Downloads the image (~200 MB, 1-2 min). |
+| Gateway is running | `openshell gateway start` detects it and does nothing. `openshell status` works. |
+| Gateway is stopped (any reason) | `openshell gateway start` does **not** restart it. It asks "Destroy and recreate? [y/N]". |
+
+This is true even after a clean `openshell gateway stop` — the CLI has no "restart a stopped container" path as of v0.0.21. Verified:
+
+```
+$ openshell gateway stop          # clean stop
+✓ Gateway openshell stopped.
+$ openshell gateway start         # try to restart
+! Gateway 'openshell' already exists (stopped).
+Destroy and recreate? [y/N] N
+Keeping existing gateway.          # ← still stopped, connection refused
+```
+
+The "Destroy and recreate?" prompt gives you two options, both bad. Your real options are:
+
+1. **Answer `Y`** (or pass `--recreate`): destroys the container *and* the cached image, then re-downloads everything (~200 MB, 1-2 min). Providers and inference routing config are lost — you must re-run Steps 7-10.
+
+2. **Answer `N`**: the stopped container stays stopped. `openshell status` still returns `connection refused`. This is almost never what you want.
+
+3. **Restart the Docker container directly**:
+   `docker start openshell-cluster-openshell`, then verify with `openshell status`. The container name follows the pattern `openshell-cluster-<gateway-name>` (default name is `openshell`). This is the fastest path — it preserves the image, all provider registrations, and inference routing config. The downside is that it sidesteps the CLI.
+
+**Our recommendation:** Always use `docker start openshell-cluster-openshell` to bring back a stopped gateway. Reserve `--recreate` for cases where the gateway is genuinely broken and you need a fresh start. This is an OpenShell v0.0.21 limitation — the CLI has no working restart path for stopped gateways.
+
+The Makefile's `setup-gateway` target automates this three-way check: if the gateway is already running it does nothing; if the container exists but is stopped it restarts it via `docker start` (preserving providers and routing); and only if no container exists at all does it fall back to a fresh `openshell gateway start`. Running `make setup-gateway` (or any target that depends on it, like `make setup` or `make run-local-sandbox`) handles the right path automatically.
+
+### 19. Why HTTP credentials are sufficient for Slack Socket Mode
+
+(See also [Step 9: Register the Slack Provider](#step-9-register-the-slack-provider)
+and [Step 10: Understand the Sandbox Network Policy](#step-10-understand-the-sandbox-network-policy))
+
+At first glance it's surprising that registering HTTP credentials
+(`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`) is enough for a WebSocket-based
+connection. The reason is that Slack Socket Mode authenticates in two
+phases, each using a different proxy mode:
+
+```mermaid
+sequenceDiagram
+    participant App as Sandbox App
+    participant Proxy as OpenShell Proxy
+    participant API as slack.com
+    participant WS as wss-primary.slack.com
+
+    rect rgb(239, 246, 255)
+    Note over App,API: slack_api — protocol: rest, tls: terminate
+    App->>Proxy: POST apps.connections.open<br/>Authorization: Bearer openshell:resolve:…
+    Note over Proxy: Terminate TLS, inspect headers<br/>Resolve placeholder → real xapp-… token
+    Proxy->>API: POST apps.connections.open<br/>Authorization: Bearer xapp-real-token
+    API-->>Proxy: 200 OK + wss:// URL with session ticket
+    Proxy-->>App: 200 OK + wss:// URL
+    end
+
+    rect rgb(245, 243, 255)
+    Note over App,WS: slack_websocket — access: full (CONNECT tunnel)
+    App->>Proxy: CONNECT wss-primary.slack.com:443
+    Note over Proxy: Opaque TCP passthrough<br/>No header inspection
+    Proxy->>WS: TCP tunnel established
+    App-->>WS: WebSocket upgrade (ticket in URL, no Auth header)
+    Note over App,WS: Long-lived WebSocket — events stream continuously
+    end
+```
+
+1. **HTTP handshake** (`slack_api` policy) — the SDK calls
+   `apps.connections.open` over HTTPS, sending the `SLACK_APP_TOKEN` in the
+   `Authorization` header. The OpenShell proxy intercepts this request
+   (`protocol: rest`, `tls: terminate`), resolves the
+   `openshell:resolve:env:SLACK_APP_TOKEN` placeholder to the real token, and
+   forwards to `slack.com`. The YAML:
+
+```yaml
+endpoints:
+  - host: slack.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    tls: terminate
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+```
+
+2. **WebSocket connection** (`slack_websocket` policy) — the HTTP response
+   includes a one-time WebSocket URL (`wss://wss-primary.slack.com/...`) with
+   an embedded session ticket in the URL itself. The subsequent WebSocket
+   connection authenticates via this ticket — no `Authorization` header is
+   needed. The proxy creates an opaque CONNECT tunnel (`access: full`) with no
+   header inspection. This avoids the proxy's HTTP idle timeout (~2 min)
+   killing the long-lived connection. The YAML:
+
+```yaml
+endpoints:
+  - host: "*.slack.com"
+    port: 443
+    access: full
+```
+
+This is why the network policy needs two separate entries for Slack:
+`slack_api` for credential resolution via REST interception, and
+`slack_websocket` for the long-lived WebSocket via CONNECT tunnel.
+
+---
+
+## Troubleshooting
+
+If the sandbox fails to start or crash-loops, use this debugging ladder to isolate the issue.
+
+**Check pod status:**
+
+```bash
+openshell doctor exec -- kubectl get pods -n openshell
+```
+
+- `CrashLoopBackOff` → the container keeps crashing. Get logs:
+  ```bash
+  openshell doctor exec -- kubectl logs <pod-name> -n openshell --all-containers=true
+  ```
+- `ImagePullBackOff` → the image isn't in the cluster. Rebuild with
+  `make setup-sandbox`.
+- `Provisioning` (stuck) → usually waiting for image pull. Check with
+  `openshell sandbox list`.
+
+**Common crash-loop causes:**
+
+| Error | Cause | Fix |
+|---|---|---|
+| `sandbox user 'sandbox' not found` | Image missing `sandbox` user | Add `groupadd`/`useradd` to Dockerfile |
+| `Network namespace creation failed [...] iproute2` | Image missing `iproute2` | Add `apt-get install iproute2` to Dockerfile |
+| `ModuleNotFoundError: No module named 'aiohttp'` | Missing Python dependency | Add `aiohttp` to `pyproject.toml` |
+| `ProxyError: 403 Forbidden` | Network policy blocks the endpoint | Check `policies/orchestrator.yaml` |
+| `Authentication failed (401)` | Wrong API key or model name | Verify with `make test-auth` |
+
+**Check the applied policy:**
+
+```bash
+openshell sandbox get orchestrator
+```
+
+This shows the policy as the sandbox actually sees it — not just what's in the
+YAML file on disk.
+
+**Hot-reload the policy** (for dynamic fields like `network_policies`):
+
+```bash
+openshell policy set orchestrator --policy policies/orchestrator.yaml
+```
+
+This takes effect immediately without rebuilding the image or recreating the
+sandbox.
+
+---
 
 ## Sources and References
 
@@ -1657,18 +1734,3 @@ Shell scripts targeting macOS must avoid bash 4+ features or use
 - [OpenShell Provider & Credential Docs](https://docs.nvidia.com/openshell/latest/sandboxes/manage-providers.html)
 - [NemoClaw Reference Policy](https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml)
 
-## Appendix: Original TODO Tracker
-
-These items were identified during the initial outline of this post. The table
-below tracks their status and where in the post they are addressed.
-
-| # | Item | Status | Covered In |
-|---|---|---|---|
-| 1 | **Slack permissions walkthrough** — OAuth scopes, bot vs user token, event subscriptions, Socket Mode vs HTTP endpoint, workspace installation flow, minimum permission set | ✅ Done | [Step 1: Create a Slack App](#step-1-create-a-slack-app) |
-| 2 | **NVIDIA Inference Hub setup walkthrough** — Account creation, API keys, endpoint/model selection, backend configuration | ✅ Done | [Step 2: Get an NVIDIA Inference Hub API Key](#step-2-get-an-nvidia-inference-hub-api-key) |
-| 3 | **Local development environment setup** — Prerequisites, dependencies, env vars, clone-to-first-run, smoke test | ✅ Done | [Prerequisites](#prerequisites), [Steps 3–7](#step-3-clone-and-configure) |
-| 4 | **Connector implementation walkthrough** — Event normalization, response formatting, error propagation | ✅ Done | [Connector Implementation Walkthrough](#connector-implementation-walkthrough) |
-| 5 | **Orchestrator implementation walkthrough** — Context assembly, prompt shaping, inference dispatch, retry logic, response construction | ✅ Done | [Orchestrator Implementation Walkthrough](#orchestrator-implementation-walkthrough) |
-| 6 | **Inference backend interface walkthrough** — Generic backend contract, Inference Hub adapter, provider swappability | ✅ Done | [Steps 9–10](#step-9-register-the-inference-provider), [Lessons 9–12](#9-inference-routing-must-be-configured-separately) |
-| 7 | **Observability and logging setup** — What gets logged, where logs live, how to read them, failure mode simulation | ✅ Done | [Step 6: Run Locally](#step-6-run-locally), [Step 15: Debugging](#step-15-debugging-a-failed-deployment), [Lesson 14](#14-error-response-rate-limiting-prevents-the-worst-case-spam) |
-| 8 | **End-to-end demo / screenshots** — Annotated screenshots or recorded walkthrough of a message flowing through the system | ✅ Done | [Step 6: Run Locally](#step-6-run-locally), [Step 14: Verify the Deployment](#step-14-verify-the-deployment) |

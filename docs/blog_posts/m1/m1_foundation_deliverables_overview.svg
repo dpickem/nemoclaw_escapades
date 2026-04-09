@@ -74,7 +74,7 @@
   <rect x="570" y="378" width="380" height="100" rx="14" fill="#ede9fe" stroke="#c4b5fd"/>
   <text class="checkmark" x="590" y="420">✓</text>
   <text class="cardTitle" x="618" y="420">Local + Sandbox Deployment</text>
-  <text class="cardText" x="590" y="450">make run-local, make setup-sandbox,</text>
+  <text class="cardText" x="590" y="450">make run-local-dev, make setup-sandbox,</text>
   <text class="cardText" x="590" y="470">OpenShell gateway + policies</text>
 
   <!-- Card 7: Tests -->
