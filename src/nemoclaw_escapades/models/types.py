@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Error categorization
@@ -115,17 +116,80 @@ class RichResponse:
 
 
 # ---------------------------------------------------------------------------
-# Inference types
+# Tool types
 # ---------------------------------------------------------------------------
 
 
 @dataclass
+class FunctionDefinition:
+    """Schema for a single function exposed to the model.
+
+    Mirrors the ``function`` object inside an OpenAI tool definition.
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass
+class ToolDefinition:
+    """OpenAI-format tool definition sent in inference requests.
+
+    Wraps a ``FunctionDefinition`` with the ``type`` discriminator
+    expected by the chat-completions API.
+    """
+
+    function: FunctionDefinition
+    type: str = "function"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to the dict shape the inference API expects."""
+        return {
+            "type": self.type,
+            "function": {
+                "name": self.function.name,
+                "description": self.function.description,
+                "parameters": self.function.parameters,
+            },
+        }
+
+
+@dataclass
+class ToolCall:
+    """A single tool invocation requested by the model."""
+
+    id: str
+    name: str
+    arguments: str  # JSON-encoded argument string from the model
+
+
+@dataclass
+class ToolResult:
+    """Result of executing a tool call, fed back to the model."""
+
+    tool_call_id: str
+    content: str
+    is_error: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Inference types
+# ---------------------------------------------------------------------------
+
+# Messages may contain tool_calls (assistant role) or tool_call_id (tool role),
+# so the value type must be Any rather than str.
+Message = dict[str, Any]
+
+
+@dataclass
 class InferenceRequest:
-    messages: list[dict[str, str]]
+    messages: list[Message]
     model: str
     temperature: float = 0.7
     max_tokens: int = 2048
     request_id: str = ""
+    tools: list[ToolDefinition] | None = None
 
 
 @dataclass
@@ -141,7 +205,8 @@ class InferenceResponse:
     model: str
     usage: TokenUsage
     latency_ms: float
-    finish_reason: str = "stop"  # "stop", "length", "content_filter", etc.
+    finish_reason: str = "stop"  # "stop", "length", "content_filter", "tool_calls"
+    tool_calls: list[ToolCall] | None = None
     raw_response: dict[str, object] = field(default_factory=dict)
 
 
@@ -156,6 +221,22 @@ class ApprovalResult:
 
     approved: bool
     reason: str | None = None
+
+
+@dataclass
+class PendingApproval:
+    """State saved when write tool calls are blocked pending user approval.
+
+    Captures the full agent-loop context so execution can resume after
+    the user approves (or be discarded on denial).
+    """
+
+    tool_calls: list[ToolCall]
+    working_messages: list[Message]
+    assistant_message: Message
+    request_id: str
+    description: str
+    original_user_text: str = ""
 
 
 # ---------------------------------------------------------------------------

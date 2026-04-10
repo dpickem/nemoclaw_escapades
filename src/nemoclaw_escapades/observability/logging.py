@@ -15,6 +15,11 @@ from typing import Any
 class JSONFormatter(logging.Formatter):
     """Formats log records as single-line JSON objects."""
 
+    # Attributes that belong to the LogRecord itself (not user-supplied extra).
+    _BUILTIN_ATTRS: frozenset[str] = frozenset(
+        logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+    )
+
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
@@ -24,31 +29,11 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        extra_keys = {
-            "latency_ms",
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "attempt",
-            "wait_s",
-            "error_category",
-            "status_code",
-            "model",
-            "thread_ts",
-            "user_id",
-            "channel_id",
-            "finish_reason",
-            "history_length",
-            "continuation_attempt",
-            "reason",
-            "channel",
-            "ts",
-            "content_length",
-            "action",
-        }
-        for key in extra_keys:
-            value = getattr(record, key, None)
-            if value is not None:
+        # Include every extra field the caller passed, without needing
+        # an explicit allowlist.  This ensures new fields (tool, toolset,
+        # duration_ms, etc.) appear automatically.
+        for key, value in record.__dict__.items():
+            if key not in self._BUILTIN_ATTRS and key not in log_entry:
                 log_entry[key] = value
 
         if record.exc_info and record.exc_info[1]:
@@ -81,7 +66,22 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
         root.addHandler(file_handler)
 
 
-def get_logger(component: str) -> logging.LoggerAdapter[logging.Logger]:
+class _MergingAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
+    """LoggerAdapter that merges caller ``extra`` with the adapter's own.
+
+    The stdlib ``LoggerAdapter.process()`` *replaces* the caller's
+    extra with ``self.extra``, silently discarding per-call fields
+    like ``tool`` or ``toolset``.  This subclass merges both dicts.
+    """
+
+    def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
+        extra: dict[str, Any] = dict(self.extra) if self.extra else {}
+        extra.update(kwargs.get("extra") or {})
+        kwargs["extra"] = extra
+        return msg, kwargs
+
+
+def get_logger(component: str) -> _MergingAdapter:
     """Return a logger adapter pre-bound with a component name."""
     logger = logging.getLogger(f"nemoclaw.{component}")
-    return logging.LoggerAdapter(logger, {"component": component})
+    return _MergingAdapter(logger, {"component": component})

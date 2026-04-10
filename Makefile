@@ -28,7 +28,7 @@ IMAGE_NAME := nemoclaw-orchestrator
 IMAGE_TAG  := latest
 DOCKERFILE := docker/Dockerfile.orchestrator
 
-# OpenShell
+# OpenShell — gateway, sandbox, providers
 GATEWAY_NAME       := openshell
 GATEWAY_CONTAINER  := openshell-cluster-$(GATEWAY_NAME)
 SANDBOX_NAME       := orchestrator
@@ -38,10 +38,13 @@ INFERENCE_TYPE     := openai
 SLACK_PROVIDER     := slack-credentials
 DEFAULT_MODEL      := azure/anthropic/claude-opus-4-6
 
+# Jira integration
+JIRA_PROVIDER := jira-credentials
+
 # Python entry points
 MAIN_MODULE   := nemoclaw_escapades.main
 BROKER_MODULE := nemoclaw_escapades.nmb.broker
-AUDIT_DB      := .nmb-audit.db
+AUDIT_DB      := .audit.db
 
 # ---------------------------------------------------------------------------
 # Help
@@ -57,7 +60,7 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 
 .PHONY: setup
-setup: install setup-gateway setup-secrets setup-sandbox ## One-time: deps + gateway + providers + sandbox
+setup: install setup-gateway setup-secrets setup-jira-provider setup-sandbox ## One-time: deps + gateway + providers + sandbox
 
 .PHONY: install
 install: ## Install the package and dev dependencies
@@ -94,59 +97,70 @@ setup-gateway: ## Start the OpenShell gateway if not already running
 # openshell inference routing works via inference.local.  The 'openai' type
 # with an explicit base URL override points to the endpoint from .env.
 # Slack uses 'generic' for user-defined env var names.
+# All provider targets are idempotent: delete-then-create ensures a
+# clean state regardless of whether the provider already exists.
 .PHONY: setup-secrets
 setup-secrets: .env ## Register inference and Slack providers with the gateway
 	@echo "Registering providers..."
 	@command -v openshell >/dev/null 2>&1 && { \
+		openshell provider delete $(INFERENCE_PROVIDER) >/dev/null 2>&1 || true; \
 		openshell provider create \
 			--name $(INFERENCE_PROVIDER) \
 			--type $(INFERENCE_TYPE) \
 			--credential "OPENAI_API_KEY=$$(grep INFERENCE_HUB_API_KEY .env | cut -d= -f2-)" \
 			--config "OPENAI_BASE_URL=$${INFERENCE_HUB_BASE_URL}" \
-		&& echo "✓ Inference provider registered." \
-		|| echo "⚠  Provider may already exist (use 'openshell provider update' to change)."; \
+		&& echo "✓ Inference provider registered."; \
 		openshell inference set \
 			--provider $(INFERENCE_PROVIDER) \
 			--model "$${INFERENCE_MODEL:-$(DEFAULT_MODEL)}" \
 			--no-verify \
-		&& echo "✓ Inference routing configured (inference.local → $(INFERENCE_PROVIDER))." \
-		|| echo "⚠  Inference routing may already be configured."; \
+		&& echo "✓ Inference routing configured (inference.local → $(INFERENCE_PROVIDER))."; \
+		openshell provider delete $(SLACK_PROVIDER) >/dev/null 2>&1 || true; \
 		openshell provider create \
 			--name $(SLACK_PROVIDER) \
 			--type generic \
 			--credential "SLACK_BOT_TOKEN=$$(grep SLACK_BOT_TOKEN .env | cut -d= -f2-)" \
 			--credential "SLACK_APP_TOKEN=$$(grep SLACK_APP_TOKEN .env | cut -d= -f2-)" \
-		&& echo "✓ Slack provider registered." \
-		|| echo "⚠  Provider may already exist."; \
+		&& echo "✓ Slack provider registered."; \
 	} || echo "⚠  openshell CLI not found — skipping provider registration."
 
-# OpenShell's `--from` flag accepts a Dockerfile path or a directory:
-#   - Dockerfile path  → parent directory becomes the build context
-#   - Directory path   → that directory is the context; must contain a `Dockerfile`
-#
-# We keep Dockerfiles under docker/ for organisation (multiple images planned),
-# but the build context must be the project root so COPY can reach pyproject.toml,
-# README.md, src/, etc.  Passing `--from docker/Dockerfile.orchestrator` would set
-# context to docker/, which lacks those files.
-#
-# Workaround: create a temporary symlink at the project root so `--from .` finds
-# a Dockerfile while using `.` as the context.  The symlink is removed immediately
-# after and is listed in .gitignore so it never gets committed.
-# Note: `openshell sandbox create` starts the sandbox immediately — there is
-# no separate "create then start" step.  The -- <cmd> argument becomes the
-# sandbox entrypoint and begins running as soon as the sandbox is created.
+.PHONY: setup-jira-provider
+setup-jira-provider: .env ## Register Jira credentials provider with the gateway
+	@command -v openshell >/dev/null 2>&1 && { \
+		AUTH=$$(grep '^JIRA_AUTH=' .env | cut -d= -f2-); \
+		if [ -z "$$AUTH" ]; then \
+			echo "⚠  JIRA_AUTH not set in .env — skipping."; \
+		else \
+			openshell provider delete $(JIRA_PROVIDER) >/dev/null 2>&1 || true; \
+			openshell provider create \
+				--name $(JIRA_PROVIDER) \
+				--type generic \
+				--credential "JIRA_AUTH=$$AUTH" \
+			&& echo "✓ Jira provider registered."; \
+		fi; \
+	} || echo "⚠  openshell CLI not found."
+
+# OpenShell's `--from` flag accepts a Dockerfile path or a directory.
+# We symlink docker/Dockerfile.orchestrator to ./Dockerfile so the build
+# context is the project root.  The symlink is cleaned up immediately.
 .PHONY: setup-sandbox
 setup-sandbox: ## Build image, create sandbox, and start the app inside it
 	@echo "Creating orchestrator sandbox..."
 	@command -v openshell >/dev/null 2>&1 && { \
 		openshell sandbox delete $(SANDBOX_NAME) 2>/dev/null || true; \
 		ln -sf $(DOCKERFILE) Dockerfile; \
+		JIRA_FLAG=""; \
+		if openshell provider get $(JIRA_PROVIDER) >/dev/null 2>&1; then \
+			JIRA_FLAG="--provider $(JIRA_PROVIDER)"; \
+			echo "  Attaching Jira credentials provider."; \
+		fi; \
 		openshell sandbox create \
 			--name $(SANDBOX_NAME) \
 			--from . \
 			--policy $(POLICY) \
 			--provider $(INFERENCE_PROVIDER) \
 			--provider $(SLACK_PROVIDER) \
+			$$JIRA_FLAG \
 			-- python -m $(MAIN_MODULE); \
 		rm -f Dockerfile; \
 	} || echo "⚠  openshell CLI not found — skipping sandbox creation."
@@ -186,6 +200,12 @@ build: ## Build the orchestrator container image
 .PHONY: test-auth
 test-auth: ## Verify all .env credentials against their APIs
 	@scripts/test_auth.sh
+
+.PHONY: test-jira-sandbox
+test-jira-sandbox: ## Test Jira connectivity from inside the sandbox (sandbox must be running)
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+		-o "ProxyCommand=openshell ssh-proxy --gateway-name $(GATEWAY_NAME) --name $(SANDBOX_NAME)" \
+		sandbox@openshell-$(SANDBOX_NAME) "python3 /app/scripts/test_jira_sandbox.py"
 
 .PHONY: test
 test: ## Run the unit test suite (excludes integration tests)
@@ -246,8 +266,9 @@ stop-all: ## Delete ALL sandboxes in the gateway
 clean: ## Delete sandbox, providers, and local image
 	@command -v openshell >/dev/null 2>&1 && { \
 		openshell sandbox delete $(SANDBOX_NAME) 2>/dev/null || true; \
-		openshell provider delete $(INFERENCE_PROVIDER) 2>/dev/null || true; \
-		openshell provider delete $(SLACK_PROVIDER) 2>/dev/null || true; \
+		openshell provider delete $(INFERENCE_PROVIDER) >/dev/null 2>&1 || true; \
+		openshell provider delete $(SLACK_PROVIDER) >/dev/null 2>&1 || true; \
+		openshell provider delete $(JIRA_PROVIDER) >/dev/null 2>&1 || true; \
 	} || true
 	@docker rmi $(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
 

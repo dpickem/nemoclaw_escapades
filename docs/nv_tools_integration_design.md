@@ -1,8 +1,17 @@
 # nv-tools Integration — Design Document
 
-> **Status:** Proposed
+> **Status:** Abandoned
 >
-> **Last updated:** 2026-04-08
+> **Last updated:** 2026-04-10
+>
+> **NOTE — This approach was abandoned.** Rather than wrapping nv-tools
+> as a subprocess / MCP sidecar, we now port the relevant functionality
+> directly into the `src/nemoclaw_escapades/tools/` package as native
+> async tools (e.g. `tools/jira.py`). This gives us full control over
+> the client interface, avoids the subprocess serialisation overhead,
+> and lets the orchestrator's approval gate inspect tool calls at the
+> schema level instead of parsing CLI output. The design below is kept
+> for historical context only.
 >
 > **Related:**
 > [Orchestrator Design §5](orchestrator_design.md#5--tool-system) |
@@ -303,56 +312,64 @@ from the initial implementation.
 
 Each service requires its own API token (username + token for Jira/Confluence/
 Gerrit, personal access token for GitLab, user OAuth token for Slack).
-Three injection approaches:
+Three injection approaches were evaluated:
 
-**Approach A: One OpenShell provider per service.** Each provider holds one
-token. Attached to the sandbox at creation. Matches the existing
-`inference-hub` and `slack-credentials` pattern in the Makefile.
+**~~Approach A: One OpenShell provider per service.~~** *(Does not work —
+see below.)* Each provider holds one token. Attached to the sandbox at
+creation. Matches the existing `inference-hub` and `slack-credentials`
+pattern in the Makefile.
 
-- Pro: credentials never appear in the sandbox filesystem or env vars
+- ~~Pro: credentials never appear in the sandbox filesystem or env vars~~
 - Con: five `openshell provider create` commands + five `--provider` flags
   on `sandbox create`
+- **DOES NOT WORK:** OpenShell `--type generic` providers do not inject
+  real environment variables.  The sandbox sees placeholder strings
+  (`openshell:resolve:env:VAR_NAME`) instead of actual values.  These
+  placeholders are only resolved by the L7 proxy when they appear in
+  outbound HTTP headers — they are never substituted in `os.environ`.
+  Since nv-tools reads all configuration from env vars via
+  pydantic-settings, the provider-based approach fails for every
+  service except Slack (whose token happens to be used in an HTTP
+  Authorization header).  This was verified experimentally — see §6.3.
 
-**Approach B (recommended): Single provider, multiple credentials.** One
-`generic` provider named `nv-tools-credentials` holding all tokens as
-separate `--credential` entries:
+**~~Approach B: Single provider, multiple credentials.~~** *(Does not work
+— same root cause as Approach A.)* One `generic` provider named
+`nv-tools-credentials` holding all tokens as separate `--credential`
+entries:
 
 ```bash
+# This was the original plan — it does NOT work.
+# Credentials arrive as openshell:resolve:env:... placeholders,
+# not as real values.  See §6.3 for details.
 openshell provider create \
     --name nv-tools-credentials \
     --type generic \
     --credential "JIRA_URL=$JIRA_URL" \
     --credential "JIRA_USERNAME=$JIRA_USERNAME" \
     --credential "JIRA_API_TOKEN=$JIRA_API_TOKEN" \
-    --credential "CONFLUENCE_URL=$CONFLUENCE_URL" \
-    --credential "CONFLUENCE_USERNAME=$CONFLUENCE_USERNAME" \
-    --credential "CONFLUENCE_API_TOKEN=$CONFLUENCE_API_TOKEN" \
-    --credential "GITLAB_URL=$GITLAB_URL" \
-    --credential "GITLAB_TOKEN=$GITLAB_TOKEN" \
-    --credential "GERRIT_URL=$GERRIT_URL" \
-    --credential "GERRIT_USERNAME=$GERRIT_USERNAME" \
-    --credential "GERRIT_HTTP_PASSWORD=$GERRIT_HTTP_PASSWORD" \
-    --credential "SLACK_USER_TOKEN=$SLACK_USER_TOKEN"
+    ...
 ```
 
-The sandbox is then created with `--provider nv-tools-credentials`,
-and all tokens are injected as environment variables via the OpenShell
-proxy. nv-tools reads them natively (it loads env vars via
-`pydantic-settings`).
+- **DOES NOT WORK:** Same L7 proxy placeholder issue as Approach A.
+  The `generic` provider type is designed for applications that receive
+  credentials via HTTP headers injected by the proxy (e.g. the
+  `inference-hub` provider sets the `Authorization` header).  It is
+  *not* a general-purpose env var injection mechanism.
 
-- Pro: single provider, simple management, matches existing patterns
-- Pro: credentials never touch the sandbox filesystem
-- Con: all-or-nothing (cannot attach a subset of tokens to a sandbox)
-
-**Approach C: Mounted `.env` file.** Bind-mount the host's `.env` into
-the sandbox. nv-tools reads it directly.
+**~~Approach C: Mounted `.env` file.~~** *(Not recommended.)* Bind-mount
+the host's `.env` into the sandbox. nv-tools reads it directly.
 
 - Pro: simplest; matches how nv-tools works locally
 - Con: credentials visible on the sandbox filesystem (violates the
   OpenShell security model)
+- Con: OpenShell does not support bind mounts in the sandbox policy
 
-**Decision:** Approach B. A single `nv-tools-credentials` provider keeps
-the setup simple while preserving credential isolation.
+**Decision:** None of the above.  The provider-based approaches (A and B)
+fail due to the L7 proxy placeholder issue, and file mounting (C)
+violates the security model.  See §6.2 Strategy E for the working
+solution: a host-side credential server that serves credentials over
+HTTP, accessed via SSH reverse tunnel (for testing) or network policy
+(for production).
 
 ### 6.2  OAuth / SSO services (future)
 
@@ -376,7 +393,8 @@ sandbox creation. Network policies are the only hot-reloadable component.
 
 Five strategies, in order of complexity:
 
-**Strategy A: Pre-authenticate on the host, inject via provider.**
+**~~Strategy A: Pre-authenticate on the host, inject via provider.~~**
+*(Does not work — same L7 proxy placeholder issue as §6.1.)*
 
 Following the same pattern as §6.1, OAuth tokens are pre-obtained on
 the host and injected into the sandbox as an OpenShell provider — no
@@ -435,15 +453,24 @@ openshell provider create --name nv-tools-oauth-tokens ...  # with fresh tokens
 A Makefile target (`make refresh-nv-tools-oauth`) can automate the
 extract-and-update cycle.
 
-**Limitation:** OpenShell `--type generic` providers inject credentials
-via the L7 proxy, which cannot rewrite POST request bodies. OAuth2 token
-refresh requires a POST with `client_id`, `client_secret`, and
-`refresh_token` in the body — the proxy cannot inject these dynamically.
-This means Strategy A either requires the refresh token to be accessible
-on the sandbox filesystem (reducing isolation) or depends on the upcoming
-v2 Providers with native OAuth refresh support (confirmed on the
-OpenShell roadmap, RFC pending). See Strategy E for the recommended
-alternative.
+**Why this doesn't work (two independent issues):**
+
+1. **L7 proxy placeholder issue (verified):** The `generic` provider
+   does not inject real env vars — it sets them to
+   `openshell:resolve:env:VAR_NAME` placeholders that are only resolved
+   in outbound HTTP headers.  nv-tools reads credentials from
+   `os.environ` via pydantic-settings, so it sees the placeholder
+   strings, not the real values.  This was confirmed experimentally
+   by inspecting `env` output inside a sandbox with a `generic`
+   provider attached (see §6.3).
+
+2. **POST body rewrite limitation (documented):** Even if env var
+   injection worked, the L7 proxy cannot rewrite POST request bodies.
+   OAuth2 token refresh requires a POST with `client_id`,
+   `client_secret`, and `refresh_token` in the body — the proxy cannot
+   inject these dynamically.
+
+See Strategy E for the recommended alternative.
 
 **Strategy B: SSH tunnel + device-code flow.** For services that support device-code flow, the
 sandbox prints a URL and code to the orchestrator's logs; the user
@@ -651,16 +678,162 @@ pattern established in the
 - Con: requires a host-side process (lightweight — single Python script)
 - Con: adds a network hop per invocation (~1ms on localhost)
 
-**Decision:** Strategy E — host-side token server. It provides the
-strongest credential isolation (refresh token never enters the sandbox),
-requires no sandbox recreation for token refresh, works around the L7
-proxy limitation, and has a proven reference implementation
+**Decision:** Strategy E — host-side credential server.  This is the
+**only working approach** for injecting nv-tools credentials into an
+OpenShell sandbox, since the `generic` provider's L7 proxy placeholder
+mechanism (Strategies A, B in §6.2 and Approaches A, B in §6.1) does
+not produce real environment variables.
+
+Strategy E provides the strongest credential isolation (secrets never
+enter the sandbox image or filesystem), requires no sandbox recreation
+for credential changes, and has a proven reference implementation
 ([brevdev/nemoclaw-demos#2](https://github.com/brevdev/nemoclaw-demos/pull/2)).
+The implementation uses `scripts/nv-tools-credential-server.py` on the
+host and an SSH reverse tunnel (`-R 9100:localhost:9100`) for test
+sandboxes.
+
 Strategy D (Slack-mediated device-code flow) remains a natural
-complement for interactive authentication. Strategy C (full sidecar)
-is the long-term target when the service count grows. Strategy A is
-viable for development/hackathon use where credential isolation
-requirements are relaxed.
+complement for interactive OAuth authentication. Strategy C (full
+sidecar) is the long-term target when the service count grows.
+~~Strategy A is not viable~~ — see §6.3 for details.
+
+### 6.3  Lessons Learned (Implementation)
+
+The following issues were discovered during initial implementation and
+are documented here for future reference.
+
+**OpenShell `generic` providers do not inject real environment variables.**
+The `--type generic` provider uses the L7 proxy to resolve credential
+placeholders in HTTP headers at request time.  Inside the sandbox, the
+env vars are set to `openshell:resolve:env:VAR_NAME` placeholder
+strings, not actual values.  This works for credentials passed as HTTP
+`Authorization` headers (e.g. Slack bot tokens), but not for
+applications like nv-tools that read credentials from env vars directly
+via pydantic-settings.  The provider-based approach (§6.1 Approach B)
+was attempted and failed for all services except Slack.
+
+**`openshell sandbox create` does not support `--build-arg`.**
+The internal Docker build uses the legacy builder, not BuildKit.  Build
+arguments cannot be passed through `openshell sandbox create --from .`.
+The Dockerfile uses `ARG NV_TOOLS_SOURCE=auto` with auto-detection
+(checking for `pyproject.toml` in `.nv-tools-src/`) as a workaround.
+
+**`openshell exec` does not exist.**
+Command execution inside a sandbox uses SSH via `openshell sandbox
+connect` (interactive) or `ssh` with `openshell ssh-proxy` as a
+`ProxyCommand`.  The `openshell forward` command maps host ports *into*
+the sandbox (like SSH `-L`), not the reverse.
+
+**Strategy E implementation: credential server + network policy.**
+The implemented approach uses a host-side HTTP credential server
+(`scripts/nv-tools-credential-server.py`) that reads
+`~/workspace/nv_tools/.env` and serves all nv-tools credentials as JSON
+via `GET /credentials`.  The sandbox reaches it via a network policy
+entry for the Docker host gateway IP (auto-detected at runtime by the
+Makefile and injected into the policy via `openshell policy set`).
+The test script (`scripts/test_nv_tools_sandbox.sh`) fetches credentials
+from the server, exports them as env vars, then runs `nv-tools health`
+and per-service smoke tests.
+
+Additional policy lessons:
+- `host.docker.internal` does not work as a policy hostname — the OPA
+  engine cannot resolve it.  The Makefile detects the gateway IP from
+  inside the sandbox (`python3 socket.getaddrinfo(...)`) and injects it
+  into the policy at runtime.
+- Plain HTTP endpoints require `tls: skip` in the policy.  Without it,
+  the proxy attempts TLS termination and returns 403.
+- `tls: terminate` is deprecated in recent OpenShell versions — TLS
+  termination is now automatic.  Explicit `tls: terminate` entries
+  produce a warning but still work.
+
+**VPN-gated services (GitLab, Gerrit) are not reachable from Docker
+Desktop sandboxes.**  The OpenShell sandbox runs in a k3s pod inside
+Docker Desktop's Linux VM.  The corporate VPN tunnel
+(GlobalProtect/Cisco AnyConnect) runs on the macOS host but does not
+extend into Docker's VM — the VM has its own network stack.  Services
+behind the VPN (`gitlab-master.nvidia.com`, `git-av.nvidia.com`) return
+403 from the sandbox even with correct credentials and network policies.
+
+Validated results on Docker Desktop (macOS):
+- Jira (`jirasw.nvidia.com`) — OK (not VPN-gated)
+- Confluence (`nvidia.atlassian.net`) — OK (Atlassian Cloud, not VPN-gated)
+- Slack (`slack.com`) — OK (public API)
+- GitLab (`gitlab-master.nvidia.com`) — FAIL 403 (VPN-gated)
+- Gerrit (`git-av.nvidia.com`) — FAIL 403 (VPN-gated)
+
+Four options for reaching VPN-gated services from a sandbox:
+
+1. **Host-side API proxy (recommended short-term).** Extend the
+   credential server to also proxy API requests through the host, which
+   has VPN access.  The sandbox sends `nv-tools` traffic to the proxy
+   instead of directly to the service endpoints.  Same pattern as the
+   credential server — one more endpoint per service on the host.
+
+2. **VPN passthrough for Docker.** Configure the VPN client to route
+   Docker subnets through the VPN tunnel.  GlobalProtect supports
+   "split tunnel include" rules that can add Docker's network ranges.
+   Requires VPN admin or IT configuration — may not be self-service.
+
+3. **Remote host with VPN (recommended long-term).** Run the OpenShell
+   gateway on an NVIDIA Brev instance or DGX Spark that is natively on
+   the corporate network.  All services are reachable without VPN
+   workarounds.  This is the intended production deployment model
+   (see [Hosting Deep Dive](deep_dives/hosting_deep_dive.md)).
+
+4. **Split testing.** Validate non-VPN services (Jira, Confluence,
+   Slack) inside the sandbox; validate VPN-gated services (GitLab,
+   Gerrit) with a host-side `nv-tools health` run.  Works immediately
+   but doesn't exercise the full sandbox network policy path.
+
+**Decision:** Option 3 (remote host) is the long-term target.  For
+local development on Docker Desktop, the sandbox test validates
+3/5 services end-to-end.  GitLab and Gerrit will be validated when
+the gateway moves to a VPN-connected host.
+
+### 6.4  Pivot: Direct REST Clients (Replacing nv-tools Subprocess)
+
+After extensive experimentation with the nv-tools subprocess approach
+(Strategy E credential server, OpenShell provider injection, SSH
+tunneling), we pivoted to implementing service clients directly in
+Python.  The nv-tools CLI approach had compounding problems:
+
+1. **Credential injection doesn't work for CLI tools.**  OpenShell's
+   `generic` provider resolves placeholders in HTTP headers, not in env
+   vars.  nv-tools reads credentials from env vars — the two models are
+   incompatible (§6.3).
+
+2. **The credential server workaround was fragile.**  The host-side
+   credential server + network policy approach worked but required:
+   runtime IP detection from inside the sandbox, dynamic policy
+   hot-reloading via `openshell policy set`, `tls: skip` for plain
+   HTTP, and `host.docker.internal` hostname resolution quirks.
+
+3. **`openshell sandbox create` blocks on the entrypoint.**  Creating
+   a sandbox with `-- sleep infinity` blocked the Makefile recipe
+   indefinitely, making automated test flows impossible.
+
+4. **VPN-gated services are unreachable from Docker Desktop.**  GitLab
+   and Gerrit require VPN access, but the Docker Desktop VM doesn't
+   share the host's VPN tunnel.
+
+**The direct REST approach resolves all of these.**  Each service gets
+a Python client (async httpx) that reads a pre-computed `Authorization`
+header from an env var.  The OpenShell L7 proxy resolves the
+`openshell:resolve:env:*` placeholder in the outbound HTTP header —
+this is exactly how the `inference` provider works for the
+`Authorization: Bearer` header, just applied to `Basic` auth.
+
+Implementation:
+- `src/nemoclaw_escapades/tools/jira.py` — async `JiraClient` lifted
+  from `nv_tools.clients.jira`, 8 tool handlers registered with the
+  orchestrator's `ToolRegistry`
+- Pre-computed `JIRA_AUTH=Basic <base64>` credential registered as an
+  OpenShell `generic` provider (`make setup-jira-provider`)
+- No subprocess, no credential server, no SSH tunneling
+
+This pattern extends naturally to Confluence, GitLab, Gerrit, and Slack
+as additional `tools/<service>.py` files — one async client per service,
+one pre-computed auth header per provider.
 
 ---
 
@@ -1387,7 +1560,7 @@ Implement the orchestrator-side audit database:
 |---|----------|-------|
 | 1 | How many services should the stub cover initially? | Recommendation: start with jira, confluence, slack, gitlab, gerrit. Add more as use-cases demand. |
 | 2 | Should the stub return randomized or fixed canned data? | Fixed is more predictable for tests; randomized is more realistic for LLM reasoning. Consider: fixed by default, randomized via `--randomize` flag. |
-| 3 | ~~How should nv-tools credentials be injected into the sandbox?~~ | **Resolved in §6.** API tokens: single `generic` OpenShell provider (`nv-tools-credentials`). OAuth/SSO (future): host-side token server (Strategy E) — refresh tokens stay on the host, sandbox receives short-lived access tokens on demand via `GET /token`. This avoids the L7 proxy POST-body limitation and requires no sandbox recreation for token refresh. |
+| 3 | ~~How should nv-tools credentials be injected into the sandbox?~~ | **Resolved in §6.** Host-side credential server (Strategy E) — serves all credentials via `GET /credentials` over HTTP. For testing, an SSH reverse tunnel (`-R 9100:localhost:9100`) bridges the host server into the sandbox. The `generic` provider approach was attempted and failed (see §6.3 Lessons Learned). |
 | 4 | Should the LLM be allowed to construct `--write` commands, or should the orchestrator always strip `--write` and re-add it only after approval? | Stripping is safer — prevents the LLM from accidentally bypassing the gate. |
 | 5 | What is the right subprocess timeout per service? | Jira/Confluence: 30s. GitLab (large diffs): 60s. Slack (search can be slow): 45s. Make configurable. |
 | 6 | Should we also expose nv-tools to sub-agents (coding, review), or only to the orchestrator? | Start with orchestrator only. Sub-agents that need service access (e.g., review agent posting to Gerrit) can request it via NMB → orchestrator. |

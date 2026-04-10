@@ -1,12 +1,13 @@
-"""Async SQLite audit database for the NMB broker.
+"""Unified async SQLite audit database.
 
-Every message routed through the broker is logged here with full payload
-content (configurable).  The audit DB serves double duty: operational
-debugging and training-data source for the training flywheel.
+Covers both NMB broker message auditing and orchestrator tool-call
+logging in a single database.  The audit DB serves double duty:
+operational debugging and training-data source for the training
+flywheel.
 
-Schema is managed by Alembic — the application never issues DDL directly.
-On first open, ``AuditDB`` runs ``alembic upgrade head`` to ensure the
-schema is current.
+Schema is managed by Alembic — the application never issues DDL
+directly.  On first open, ``AuditDB`` runs ``alembic upgrade head``
+to ensure the schema is current.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -29,11 +31,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from nemoclaw_escapades.config import DEFAULT_NMB_AUDIT_BATCH_SIZE, DEFAULT_NMB_AUDIT_QUEUE_SIZE
-from nemoclaw_escapades.nmb.audit.models import ConnectionRow, MessageRow
+from nemoclaw_escapades.audit.models import ConnectionRow, MessageRow, ToolCallRow
+from nemoclaw_escapades.config import DEFAULT_AUDIT_BATCH_SIZE, DEFAULT_AUDIT_QUEUE_SIZE
 from nemoclaw_escapades.nmb.models import DeliveryStatus, NMBMessage
 
-logger = logging.getLogger("nmb.audit")
+logger = logging.getLogger("audit")
 
 _ALEMBIC_DIR = Path(__file__).parent / "alembic"
 _ALEMBIC_INI = Path(__file__).parent / "alembic.ini"
@@ -47,7 +49,7 @@ def _discover_head_revision() -> str:
     is added.
 
     Returns:
-        The revision identifier of the single head (e.g. ``"003"``).
+        The revision identifier of the single head (e.g. ``"004"``).
 
     Raises:
         RuntimeError: If the script directory has no revisions or
@@ -70,13 +72,17 @@ _HEAD_REVISION: str = _discover_head_revision()
 
 
 class AuditDB:
-    """Async wrapper around the NMB audit SQLite database.
+    """Unified async wrapper around the audit SQLite database.
+
+    A single database holds NMB message records (``messages``,
+    ``connections`` tables) and orchestrator tool-call records
+    (``tool_calls`` table).
 
     Attributes:
         db_path: Filesystem path to the SQLite database file.
-        persist_payloads: Whether to store full message payloads.
-            Set to ``False`` to save disk space at the cost of losing
-            training data.
+        persist_payloads: Whether to store full message / response
+            payloads.  Set to ``False`` to save disk space at the cost
+            of losing training data.
     """
 
     def __init__(self, db_path: str, *, persist_payloads: bool = True) -> None:
@@ -86,8 +92,8 @@ class AuditDB:
             db_path: Path to the SQLite file.  Created automatically
                 by Alembic if it does not exist.
             persist_payloads: Store full JSON payloads in the
-                ``messages`` table.  When ``False``, payloads are
-                replaced with an empty string.
+                ``messages`` and ``tool_calls`` tables.  When ``False``,
+                payloads are replaced with an empty string.
         """
         self.db_path: str = db_path
         self.persist_payloads: bool = persist_payloads
@@ -144,7 +150,7 @@ class AuditDB:
             self._session_factory = None
 
     # ------------------------------------------------------------------
-    # Background batch writer
+    # Background batch writer (NMB broker hot path)
     # ------------------------------------------------------------------
 
     async def start_background_writer(self) -> None:
@@ -155,7 +161,7 @@ class AuditDB:
         drains the queue and commits in batches, keeping audit I/O off
         the message-routing hot path.
         """
-        self._write_queue = asyncio.Queue(maxsize=DEFAULT_NMB_AUDIT_QUEUE_SIZE)
+        self._write_queue = asyncio.Queue(maxsize=DEFAULT_AUDIT_QUEUE_SIZE)
         self._flush_task = asyncio.create_task(self._flush_loop())
 
     async def stop_background_writer(self) -> None:
@@ -220,9 +226,9 @@ class AuditDB:
 
         Blocks on ``Queue.get()`` for the first item (back-pressure
         friendly), then greedily pulls up to
-        ``DEFAULT_NMB_AUDIT_BATCH_SIZE - 1`` additional items without
+        ``DEFAULT_AUDIT_BATCH_SIZE - 1`` additional items without
         waiting.  The collected batch is committed in a single
-        transaction via ``_write_batch``.  Failures are logged but
+        transaction via ``_write_message_batch``.  Failures are logged but
         never propagated — the loop continues after a bad batch.
 
         Runs until cancelled by ``stop_background_writer``.
@@ -232,13 +238,13 @@ class AuditDB:
             while True:
                 first = await self._write_queue.get()
                 batch: list[Any] = [first]
-                for _ in range(DEFAULT_NMB_AUDIT_BATCH_SIZE - 1):
+                for _ in range(DEFAULT_AUDIT_BATCH_SIZE - 1):
                     try:
                         batch.append(self._write_queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
                 try:
-                    await self._write_batch(batch)
+                    await self._write_message_batch(batch)
                 except Exception:
                     logger.warning("Audit batch write failed (%d items)", len(batch), exc_info=True)
         except asyncio.CancelledError:
@@ -263,12 +269,12 @@ class AuditDB:
                 break
         if batch:
             try:
-                await self._write_batch(batch)
+                await self._write_message_batch(batch)
             except Exception:
                 logger.warning("Audit drain failed (%d items)", len(batch), exc_info=True)
 
-    async def _write_batch(self, batch: list[Any]) -> None:
-        """Write a batch of inserts and updates in a single transaction.
+    async def _write_message_batch(self, batch: list[Any]) -> None:
+        """Write a batch of ``MessageRow`` inserts and status updates in a single transaction.
 
         Inserts are added to the session first.  If the batch contains
         both inserts and updates, a ``session.flush()`` is issued
@@ -349,76 +355,6 @@ class AuditDB:
             )
             await session.execute(stmt)
             await session.commit()
-
-    def _run_migrations(self) -> None:
-        """Ensure the DB schema is at the latest Alembic revision.
-
-        First does a cheap ``SELECT`` on the ``alembic_version`` table
-        to see if the schema is already at ``_HEAD_REVISION``.  If it
-        is, the subprocess is skipped entirely (~500 ms saved).  If the
-        DB doesn't exist, has no version table, or is at an older
-        revision, falls through to ``alembic upgrade head``.
-
-        Raises:
-            subprocess.CalledProcessError: If the Alembic subprocess
-                exits non-zero.
-        """
-        if not self._needs_migration():
-            return
-
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "alembic",
-                "-c",
-                str(_ALEMBIC_INI),
-                "upgrade",
-                "head",
-            ],
-            check=True,
-            capture_output=True,
-            env={
-                **__import__("os").environ,
-                "NMB_AUDIT_DB_PATH": self.db_path,
-            },
-        )
-
-    def _needs_migration(self) -> bool:
-        """Check whether the DB schema is behind ``_HEAD_REVISION``.
-
-        Returns ``True`` (needs migration) if the DB file doesn't
-        exist, the ``alembic_version`` table is missing, or the stored
-        revision doesn't match ``_HEAD_REVISION``.  Any SQLite error
-        is treated as "needs migration" to be safe.
-
-        Returns:
-            ``False`` if the schema is already current.
-        """
-        db = Path(self.db_path)
-        if not db.exists():
-            return True
-        try:
-            with sqlite3.connect(str(db)) as conn:
-                row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-            return row is None or row[0] != _HEAD_REVISION
-        except Exception:
-            return True
-
-    @property
-    def _session(self) -> async_sessionmaker[AsyncSession]:
-        """Return the session factory, raising if the DB is not open.
-
-        Returns:
-            The ``async_sessionmaker`` created by ``open()``.
-
-        Raises:
-            RuntimeError: If ``open()`` has not been called or
-                ``close()`` has already been called.
-        """
-        if self._session_factory is None:
-            raise RuntimeError("AuditDB is not open — call open() first")
-        return self._session_factory
 
     # ------------------------------------------------------------------
     # Message logging
@@ -518,6 +454,90 @@ class AuditDB:
             await session.commit()
 
     # ------------------------------------------------------------------
+    # Tool-call logging
+    # ------------------------------------------------------------------
+
+    async def log_tool_call(
+        self,
+        *,
+        session_id: str | None = None,
+        thread_ts: str | None = None,
+        service: str,
+        command: str,
+        args: str,
+        operation_type: str,
+        approval_status: str | None = None,
+        approved_by: str | None = None,
+        approval_time_ms: float | None = None,
+        exit_code: int | None = None,
+        duration_ms: float,
+        success: bool,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        response_payload: str = "",
+    ) -> str:
+        """Log a single tool invocation.
+
+        When ``persist_payloads`` is ``False`` the response_payload
+        column is stored as an empty string, but ``payload_size`` still
+        records the original byte count.
+
+        Args:
+            session_id: Conversation session / thread identifier.
+            thread_ts: Slack thread timestamp for message correlation.
+            service: Tool service / toolset name (e.g. ``"jira"``).
+            command: Tool name or subcommand (e.g. ``"jira_search"``).
+            args: Full argument string passed to the tool.
+            operation_type: ``"READ"`` or ``"WRITE"``.
+            approval_status: ``"auto_approved"``, ``"approved"``,
+                ``"denied"``, ``"timeout"``, or ``None``.
+            approved_by: User who approved (Slack user ID).
+            approval_time_ms: Time from request to approval decision.
+            exit_code: Subprocess exit code.
+            duration_ms: Wall-clock execution time in milliseconds.
+            success: Whether the invocation succeeded.
+            error_code: Error code string if failed.
+            error_message: Error message string if failed.
+            response_payload: Full JSON response string.
+
+        Returns:
+            The generated row ID (16-character hex string).
+
+        Raises:
+            RuntimeError: If the DB is not open.
+        """
+        row_id = uuid.uuid4().hex[:16]
+        payload_size = len(response_payload.encode()) if response_payload else 0
+        stored_payload = response_payload if self.persist_payloads else ""
+
+        async with self._session() as session:
+            session.add(
+                ToolCallRow(
+                    id=row_id,
+                    timestamp=time.time(),
+                    session_id=session_id,
+                    thread_ts=thread_ts,
+                    service=service,
+                    command=command,
+                    args=args,
+                    operation_type=operation_type,
+                    approval_status=approval_status,
+                    approved_by=approved_by,
+                    approval_time_ms=approval_time_ms,
+                    exit_code=exit_code,
+                    duration_ms=duration_ms,
+                    success=1 if success else 0,
+                    error_code=error_code,
+                    error_message=error_message,
+                    response_payload=stored_payload,
+                    payload_size=payload_size,
+                )
+            )
+            await session.commit()
+
+        return row_id
+
+    # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
 
@@ -553,8 +573,12 @@ class AuditDB:
             result = await session.execute(text(sql), params or {})
             return [dict(row) for row in result.mappings()]
 
-    async def export_jsonl(self, path: str, since: float | None = None) -> int:
-        """Export messages to a JSONL file (one JSON object per line).
+    # ------------------------------------------------------------------
+    # JSONL export
+    # ------------------------------------------------------------------
+
+    async def export_messages_jsonl(self, path: str, since: float | None = None) -> int:
+        """Export NMB messages to a JSONL file (one JSON object per line).
 
         Reads all matching rows into memory, then writes them
         sequentially.  Suitable for moderate-sized databases; for very
@@ -586,3 +610,111 @@ class AuditDB:
                 f.write(json.dumps(row_dict, default=str) + "\n")
 
         return len(rows)
+
+    async def export_tool_calls_jsonl(self, path: str, since: float | None = None) -> int:
+        """Export tool calls to a JSONL file (one JSON object per line).
+
+        Reads all matching rows into memory, then writes them
+        sequentially.  Suitable for moderate-sized databases; for very
+        large exports consider streaming with a server-side cursor.
+
+        Args:
+            path: Output file path (created or overwritten).
+            since: Optional Unix epoch timestamp.  When provided, only
+                rows with ``timestamp >= since`` are exported.
+
+        Returns:
+            Number of rows written.
+
+        Raises:
+            RuntimeError: If the DB is not open.
+            OSError: If the output file cannot be written.
+        """
+        stmt = select(ToolCallRow).order_by(ToolCallRow.timestamp)
+        if since is not None:
+            stmt = stmt.where(ToolCallRow.timestamp >= since)
+
+        async with self._session() as session:
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+
+        with open(path, "w") as f:
+            for row in rows:
+                row_dict = {c.key: getattr(row, c.key) for c in ToolCallRow.__table__.columns}
+                f.write(json.dumps(row_dict, default=str) + "\n")
+
+        return len(rows)
+
+    # ------------------------------------------------------------------
+    # Migrations
+    # ------------------------------------------------------------------
+
+    def _run_migrations(self) -> None:
+        """Ensure the DB schema is at the latest Alembic revision.
+
+        First does a cheap ``SELECT`` on the ``alembic_version`` table
+        to see if the schema is already at ``_HEAD_REVISION``.  If it
+        is, the subprocess is skipped entirely (~500 ms saved).  If the
+        DB doesn't exist, has no version table, or is at an older
+        revision, falls through to ``alembic upgrade head``.
+
+        Raises:
+            subprocess.CalledProcessError: If the Alembic subprocess
+                exits non-zero.
+        """
+        if not self._needs_migration():
+            return
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "-c",
+                str(_ALEMBIC_INI),
+                "upgrade",
+                "head",
+            ],
+            check=True,
+            capture_output=True,
+            env={
+                **__import__("os").environ,
+                "AUDIT_DB_PATH": self.db_path,
+            },
+        )
+
+    def _needs_migration(self) -> bool:
+        """Check whether the DB schema is behind ``_HEAD_REVISION``.
+
+        Returns ``True`` (needs migration) if the DB file doesn't
+        exist, the ``alembic_version`` table is missing, or the stored
+        revision doesn't match ``_HEAD_REVISION``.  Any SQLite error
+        is treated as "needs migration" to be safe.
+
+        Returns:
+            ``False`` if the schema is already current.
+        """
+        db = Path(self.db_path)
+        if not db.exists():
+            return True
+        try:
+            with sqlite3.connect(str(db)) as conn:
+                row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            return row is None or row[0] != _HEAD_REVISION
+        except Exception:
+            return True
+
+    @property
+    def _session(self) -> async_sessionmaker[AsyncSession]:
+        """Return the session factory, raising if the DB is not open.
+
+        Returns:
+            The ``async_sessionmaker`` created by ``open()``.
+
+        Raises:
+            RuntimeError: If ``open()`` has not been called or
+                ``close()`` has already been called.
+        """
+        if self._session_factory is None:
+            raise RuntimeError("AuditDB is not open — call open() first")
+        return self._session_factory

@@ -1,5 +1,6 @@
-"""Observability — structured logging and error categorization."""
+"""Observability — structured logging, error categorization, and timing."""
 
 from nemoclaw_escapades.observability.logging import setup_logging
+from nemoclaw_escapades.observability.timer import Timer
 
-__all__ = ["setup_logging"]
+__all__ = ["Timer", "setup_logging"]

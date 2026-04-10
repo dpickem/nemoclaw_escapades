@@ -1,4 +1,4 @@
-"""Initial NMB audit DB schema.
+"""Initial audit DB schema.
 
 Creates the ``messages`` and ``connections`` tables, all required
 indexes, and the FTS5 virtual table for full-text payload search.

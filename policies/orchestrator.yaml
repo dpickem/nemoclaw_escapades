@@ -37,6 +37,7 @@ filesystem_policy:
     - /app/prompts
     - /tmp
     - /dev/null
+    - /app/.config              # tool config + credential cache
 
 # ---------------------------------------------------------------------------
 # Landlock (Static)
@@ -101,5 +102,97 @@ network_policies:
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  # -----------------------------------------------------------------------
+  # Service API endpoints (native async tools in src/nemoclaw_escapades/tools/)
+  #
+  # Each external service the orchestrator's tools call needs its own
+  # network policy entry.
+  #
+  # Defense-in-depth: GET is allowed for all services.  POST/PUT are
+  # commented out by default — uncomment per-service as needed.  Even
+  # if the LLM bypasses the approval gate, the network policy blocks
+  # the mutating API call.
+  # -----------------------------------------------------------------------
+
+  jira:
+    name: jira
+    endpoints:
+      - host: jirasw.nvidia.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  confluence:
+    name: confluence
+    endpoints:
+      - host: nvidia.atlassian.net       # Atlassian Cloud (CONFLUENCE_URL path: /wiki)
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          # - allow: { method: POST, path: "/**" }
+          # - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  gitlab:
+    name: gitlab
+    endpoints:
+      - host: gitlab-master.nvidia.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          # - allow: { method: POST, path: "/**" }
+          # - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  gerrit:
+    name: gerrit
+    endpoints:
+      - host: git-av.nvidia.com          # Gerrit at /r/a
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          # - allow: { method: POST, path: "/**" }
+          # - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/python* }
+
+  # Slack user API — uses the user OAuth token (SLACK_USER_TOKEN / xoxp-...),
+  # distinct from the bot token used by the connector.  Shares the same
+  # slack.com endpoint but is a separate policy entry so it can be
+  # independently disabled.
+  slack_user_api:
+    name: slack-user-api
+    endpoints:
+      - host: slack.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }   # search + history need POST
+          # Note: Slack send/remind are gated by the write approval gate,
+          # not by network policy, since they share the same POST method as reads.
     binaries:
       - { path: /usr/local/bin/python* }

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "NemoClaw Escapades — an AI agent that learns to be a better software engineer"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "slack-bolt>=1.21.0",
     "aiohttp>=3.9.0",

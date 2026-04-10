@@ -32,13 +32,13 @@ import websockets
 from websockets.asyncio.server import Server, ServerConnection
 from websockets.http11 import Request, Response
 
+from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.config import (
-    DEFAULT_NMB_AUDIT_DB_PATH,
+    DEFAULT_AUDIT_DB_PATH,
     DEFAULT_NMB_PORT,
     DEFAULT_NMB_SUBSCRIBER_SEND_TIMEOUT,
     BrokerConfig,
 )
-from nemoclaw_escapades.nmb.audit.db import AuditDB
 from nemoclaw_escapades.nmb.models import (
     DeliveryStatus,
     ErrorCode,
@@ -107,7 +107,7 @@ class NMBBroker:
        and stops the audit writer, and disposes the DB engine.
 
     Every routed message is logged to a SQLite audit DB
-    (:class:`~nemoclaw_escapades.nmb.audit.db.AuditDB`) via a
+    (:class:`~nemoclaw_escapades.audit.db.AuditDB`) via a
     non-blocking background batch writer so audit I/O never sits on
     the message-routing hot path.
 
@@ -1031,7 +1031,7 @@ def _main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_NMB_PORT, help="Bind port")
     parser.add_argument(
         "--audit-db",
-        default=DEFAULT_NMB_AUDIT_DB_PATH,
+        default=DEFAULT_AUDIT_DB_PATH,
         help="Path to audit SQLite DB",
     )
     parser.add_argument(
@@ -1101,7 +1101,7 @@ async def _admin_command(args: Any, db_path: str) -> None:
                 from datetime import UTC, datetime
 
                 since = datetime.fromisoformat(args.since).replace(tzinfo=UTC).timestamp()
-            count = await audit.export_jsonl(args.export_jsonl, since=since)
+            count = await audit.export_messages_jsonl(args.export_jsonl, since=since)
             print(f"Exported {count} messages to {args.export_jsonl}")
     finally:
         await audit.close()

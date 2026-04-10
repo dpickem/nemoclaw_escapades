@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="640" viewBox="0 0 1600 640">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .actorTitle { fill: #ffffff; font: 700 16px Arial, sans-serif; }
+      .msgLabel { fill: #1e40af; font: 600 14px Arial, sans-serif; }
+      .ackLabel { fill: #16a34a; font: 600 14px Arial, sans-serif; }
+      .errLabel { fill: #dc2626; font: 600 14px Arial, sans-serif; }
+      .timeLabel { fill: #ea580c; font: 600 14px Arial, sans-serif; }
+      .lifeline { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 6 4; fill: none; }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2; fill: none; marker-end: url(#greenHead); }
+      .arrowRed { stroke: #dc2626; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#redHead); }
+      .arrowOrange { stroke: #ea580c; stroke-width: 2; fill: none; stroke-dasharray: 8 5; marker-end: url(#orangeHead); }
+    </style>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="redHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+    <marker id="orangeHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="640"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Request-Reply Lifecycle</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">Broker-managed timeouts ensure every request gets a response &#8212; even if the target crashes</text>
+
+  <!-- Actors -->
+  <rect x="150" y="100" width="200" height="40" rx="12" fill="#2563eb"/>
+  <text class="actorTitle" x="250" y="126" text-anchor="middle">Orchestrator (Client)</text>
+
+  <rect x="600" y="100" width="200" height="40" rx="12" fill="#16a34a"/>
+  <text class="actorTitle" x="700" y="126" text-anchor="middle">NMB Broker</text>
+
+  <rect x="1050" y="100" width="200" height="40" rx="12" fill="#7c3aed"/>
+  <text class="actorTitle" x="1150" y="126" text-anchor="middle">Coding Sandbox</text>
+
+  <!-- Lifelines -->
+  <line class="lifeline" x1="250" y1="140" x2="250" y2="560"/>
+  <line class="lifeline" x1="700" y1="140" x2="700" y2="560"/>
+  <line class="lifeline" x1="1150" y1="140" x2="1150" y2="560"/>
+
+  <!-- Happy path (left half) -->
+  <rect x="80" y="155" width="750" height="20" rx="6" fill="#f0fdf4"/>
+  <text class="cardText" x="455" y="170" text-anchor="middle" fill="#16a34a">Happy Path</text>
+
+  <!-- Step 1: request -->
+  <path class="arrowBlue" d="M260 195 L690 195"/>
+  <text class="msgLabel" x="430" y="190">op: request, type: review.request</text>
+
+  <!-- Step 2: broker registers pending + timer -->
+  <rect x="610" y="205" width="180" height="36" rx="8" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="700" y="228" text-anchor="middle">register pending + timer</text>
+
+  <!-- Step 3: ack back to requester -->
+  <path class="arrowGreen" d="M690 255 L260 255"/>
+  <text class="ackLabel" x="430" y="250">op: ack</text>
+
+  <!-- Step 4: deliver to target -->
+  <path class="arrowBlue" d="M710 275 L1140 275"/>
+  <text class="msgLabel" x="900" y="270">op: deliver, type: review.request</text>
+
+  <!-- Step 5: target processes and replies -->
+  <rect x="1060" y="285" width="180" height="36" rx="8" fill="#f3e8ff" stroke="#e9d5ff"/>
+  <text class="cardText" x="1150" y="308" text-anchor="middle">process request...</text>
+
+  <!-- Step 6: reply -->
+  <path class="arrowBlue" d="M1140 340 L710 340"/>
+  <text class="msgLabel" x="900" y="335">op: reply, type: review.result</text>
+
+  <!-- Step 7: broker pops pending, cancels timer -->
+  <rect x="610" y="350" width="180" height="36" rx="8" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardText" x="700" y="373" text-anchor="middle">pop pending, cancel timer</text>
+
+  <!-- Step 8: deliver reply to requester -->
+  <path class="arrowGreen" d="M690 400 L260 400"/>
+  <text class="ackLabel" x="430" y="395">op: deliver (reply), type: review.result</text>
+
+  <!-- Timeout path (right half) -->
+  <rect x="870" y="155" width="670" height="20" rx="6" fill="#fef2f2"/>
+  <text class="cardText" x="1205" y="170" text-anchor="middle" fill="#dc2626">Timeout Path (target doesn't reply)</text>
+
+  <!-- Timeout label -->
+  <rect x="1300" y="285" width="220" height="100" rx="14" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="cardTitle" x="1410" y="316" text-anchor="middle">Timeout Task</text>
+  <text class="cardText" x="1310" y="340">sleep(timeout_seconds)</text>
+  <text class="cardText" x="1310" y="358">pop pending request</text>
+  <text class="cardText" x="1310" y="376">send timeout frame</text>
+
+  <path class="arrowOrange" d="M1300 340 L710 460"/>
+  <text class="timeLabel" x="960" y="420">timer fires if no reply</text>
+
+  <!-- timeout frame to requester -->
+  <path class="arrowRed" d="M690 480 L260 480"/>
+  <text class="errLabel" x="430" y="475">op: timeout, error_code: REQUEST_TIMEOUT</text>
+
+  <!-- Audit note -->
+  <rect x="580" y="500" width="240" height="48" rx="12" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="cardText" x="700" y="522" text-anchor="middle">Update audit: delivered</text>
+  <text class="cardText" x="700" y="540" text-anchor="middle">&#8594; timeout</text>
+
+  <!-- Bottom note -->
+  <rect x="80" y="576" width="1440" height="48" rx="18" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="596" text-anchor="middle">Client waits timeout + 5s grace period for the broker's timeout frame before raising locally.</text>
+  <text class="noteText" x="800" y="616" text-anchor="middle">The broker owns timeout enforcement &#8212; clients never need to guess whether a reply is still coming.</text>
+</svg>

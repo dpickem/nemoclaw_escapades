@@ -295,6 +295,21 @@ class SlackConnector(ConnectorBase):
             )
             await self._handle_with_thinking(client, request)
 
+        @self._app.event("app_home_opened")
+        async def on_app_home(event: dict[str, Any], client: Any) -> None:
+            user_id = event["user"]
+            logger.info("App Home opened", extra={"user_id": user_id})
+            try:
+                await client.views_publish(
+                    user_id=user_id,
+                    view={
+                        "type": "home",
+                        "blocks": self._build_home_blocks(),
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to publish App Home view", exc_info=True)
+
     async def _on_event(self, event: dict[str, Any], client: Any) -> None:
         """Shared handler for ``message`` and ``app_mention`` events.
 
@@ -331,6 +346,9 @@ class SlackConnector(ConnectorBase):
         falls back to posting a new message after the orchestrator
         returns.
 
+        The thinking placeholder is updated in real time as the
+        orchestrator executes tool calls (e.g. "Searching Jira...").
+
         Error responses are rate-limited: at most ``_ERROR_MAX_PER_WINDOW``
         error messages per channel per ``_ERROR_WINDOW_S`` seconds.  This
         prevents spam loops when the backend is persistently failing.
@@ -342,10 +360,31 @@ class SlackConnector(ConnectorBase):
         channel = request.channel_id
         thread_ts = request.thread_ts
 
+        # 1. Post a transient "Thinking…" placeholder so the user gets
+        #    instant visual feedback while the orchestrator works.
         thinking_ts = await self._post_thinking(client, channel, thread_ts)
 
-        response = await self._handler(request)
+        # 2. Build a status callback that the orchestrator calls during
+        #    tool execution (e.g. "Searching Jira…").  Each call swaps
+        #    the placeholder text in-place via chat_update.
+        async def _on_status(status: str) -> None:
+            if thinking_ts:
+                try:
+                    await client.chat_update(
+                        channel=channel,
+                        ts=thinking_ts,
+                        text=status,
+                        blocks=[_section(f":hourglass_flowing_sand: *{status}*")],
+                    )
+                except Exception:
+                    logger.debug("Failed to update thinking status", exc_info=True)
 
+        # 3. Run the full agent loop (inference + tool calls + approval).
+        response = await self._handler(request, _on_status)
+
+        # 4. If the orchestrator returned an error and we've already
+        #    sent too many error messages in this channel recently,
+        #    silently delete the placeholder to avoid spam loops.
         if response.error_category is not None and self._is_error_rate_limited(channel):
             logger.warning(
                 "Suppressing error response (rate limit)",
@@ -358,9 +397,12 @@ class SlackConnector(ConnectorBase):
                     pass
             return
 
+        # 5. Render the platform-neutral RichResponse into Block Kit JSON.
         blocks = self.render(response)
         fallback_text = self._extract_fallback_text(response)
 
+        # 6. Swap the placeholder with the real content (or post a new
+        #    message if the placeholder was never created).
         if thinking_ts:
             await self._update_message(
                 client, channel, thinking_ts, fallback_text, blocks, request.request_id
@@ -739,6 +781,45 @@ class SlackConnector(ConnectorBase):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_home_blocks() -> list[dict[str, Any]]:
+        """Build Block Kit blocks for the App Home tab."""
+        return [
+            _header(":robot_face: dbot"),
+            _section(
+                "Your AI-powered assistant for developer services — "
+                "Jira, Confluence, Slack, GitLab, Gerrit, and more."
+            ),
+            DIVIDER,
+            _header(":sparkles: What can I do?"),
+            _section(
+                ":mag: *Search & lookup*\n"
+                '_"What are my open Jira tickets?"_\n'
+                '_"Show me AVPC-61317"_\n'
+                '_"Find Confluence pages about deployment"_'
+            ),
+            _section(
+                ":hammer_and_wrench: *Take action*\n"
+                '_"Create a Jira ticket for ..."_\n'
+                '_"Transition AVPC-12345 to In Review"_\n'
+                '_"Post a summary to #my-channel"_'
+            ),
+            _section(
+                ":brain: *Analyze & summarize*\n"
+                '_"Summarize the last sprint\'s tickets"_\n'
+                '_"What changed in CL 12345?"_'
+            ),
+            DIVIDER,
+            _header(":rocket: Getting started"),
+            _section(
+                "Just send me a DM or mention *@dbot* in any channel. "
+                "I'll figure out which tools to use and ask for approval "
+                "before taking any write actions."
+            ),
+            DIVIDER,
+            _context("Built with NemoClaw Escapades  :zap:  Powered by nv-tools"),
+        ]
 
     @staticmethod
     def _extract_fallback_text(response: RichResponse) -> str:

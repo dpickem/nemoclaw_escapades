@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .apiText { fill: #1e40af; font: 700 15px monospace; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2; fill: none; marker-end: url(#greenHead); }
+      .arrowPurple { stroke: #7c3aed; stroke-width: 2; fill: none; marker-end: url(#purpleHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="purpleHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="620"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">MessageBus Client API</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">Async-first design: futures for correlation, bounded queues for backpressure, globally unique identity</text>
+
+  <!-- Send API surface -->
+  <rect x="80" y="100" width="700" height="260" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="300" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Sending Operations</text>
+
+  <rect x="110" y="158" width="300" height="54" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="apiText" x="120" y="191">send(to, type, payload)</text>
+
+  <rect x="430" y="158" width="320" height="54" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="apiText" x="440" y="191">request(to, type, payload, timeout)</text>
+
+  <rect x="110" y="228" width="300" height="54" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="apiText" x="120" y="261">reply(original, type, payload)</text>
+
+  <rect x="430" y="228" width="320" height="54" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="apiText" x="440" y="261">stream(to, type, chunks)</text>
+
+  <text class="cardText" x="110" y="310">send: fire-and-forget (ACK tracked)</text>
+  <text class="cardText" x="110" y="332">request: register future keyed by msg.id, await reply</text>
+  <text class="cardText" x="110" y="354">stream: monotonic seq, final chunk done=True</text>
+
+  <!-- Receive API surface -->
+  <rect x="820" y="100" width="700" height="260" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="820" y="100" width="300" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="850" y="126">Receiving Operations</text>
+
+  <rect x="850" y="158" width="320" height="54" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="apiText" x="860" y="191">subscribe(channel) &#8594; iterator</text>
+
+  <rect x="1190" y="158" width="300" height="54" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="apiText" x="1200" y="191">publish(channel, type, payload)</text>
+
+  <rect x="850" y="228" width="320" height="54" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="apiText" x="860" y="261">listen() &#8594; async iterator</text>
+
+  <text class="cardText" x="850" y="310">subscribe: per-channel queue, async for delivery</text>
+  <text class="cardText" x="850" y="332">listen: general delivery queue for P2P messages</text>
+  <text class="cardText" x="850" y="354">Both use bounded queues with drop-oldest on overflow</text>
+
+  <!-- Internal dispatch -->
+  <rect x="80" y="390" width="1440" height="200" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="80" y="390" width="360" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="110" y="416">Internal Receive Dispatch (_receive_loop)</text>
+
+  <!-- Receive path boxes -->
+  <rect x="110" y="450" width="260" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="240" y="476" text-anchor="middle">deliver + reply_to?</text>
+  <text class="cardText" x="240" y="498" text-anchor="middle">&#8594; resolve request future</text>
+
+  <rect x="400" y="450" width="260" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="530" y="476" text-anchor="middle">deliver + channel?</text>
+  <text class="cardText" x="530" y="498" text-anchor="middle">&#8594; channel subscriber queue</text>
+
+  <rect x="690" y="450" width="260" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="820" y="476" text-anchor="middle">deliver (other)</text>
+  <text class="cardText" x="820" y="498" text-anchor="middle">&#8594; listen() queue</text>
+
+  <rect x="980" y="450" width="220" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="1090" y="476" text-anchor="middle">ack</text>
+  <text class="cardText" x="1090" y="498" text-anchor="middle">&#8594; resolve ACK future</text>
+
+  <rect x="1230" y="450" width="260" height="60" rx="12" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="1360" y="476" text-anchor="middle">error / timeout</text>
+  <text class="cardText" x="1360" y="498" text-anchor="middle">&#8594; reject pending future</text>
+
+  <!-- Flow arrows -->
+  <text class="cardText" x="110" y="550">Priority: reply-to match &#8594; channel match &#8594; listen queue | Each path is independent and non-blocking</text>
+
+  <!-- Bottom note -->
+  <rect x="80" y="596" width="1440" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="612" text-anchor="middle">Globally unique sandbox_id = f"{name}-{8 hex random}" &#8212; each MessageBus instance is distinguishable even across reconnects</text>
+</svg>

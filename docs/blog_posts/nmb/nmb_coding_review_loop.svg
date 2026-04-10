@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .actorTitle { fill: #ffffff; font: 700 15px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 14px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 13px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .msgLabel { fill: #1e40af; font: 600 13px Arial, sans-serif; }
+      .pubLabel { fill: #16a34a; font: 600 13px Arial, sans-serif; }
+      .iterLabel { fill: #ea580c; font: 700 14px Arial, sans-serif; }
+      .lifeline { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 6 4; fill: none; }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2; fill: none; marker-end: url(#greenHead); }
+      .arrowPurple { stroke: #7c3aed; stroke-width: 2; fill: none; marker-end: url(#purpleHead); }
+      .arrowOrange { stroke: #ea580c; stroke-width: 2; fill: none; stroke-dasharray: 8 5; marker-end: url(#orangeHead); }
+    </style>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="purpleHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/>
+    </marker>
+    <marker id="orangeHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="720"/>
+
+  <text class="title" x="800" y="42" text-anchor="middle">End-to-End Coding + Review Loop</text>
+  <text class="subtitle" x="800" y="68" text-anchor="middle">The primary multi-agent workflow: assign &#8594; code &#8594; review &#8594; fix &#8594; approve (NMB design doc &#167;11)</text>
+
+  <!-- Actors -->
+  <rect x="100" y="90" width="200" height="36" rx="10" fill="#2563eb"/>
+  <text class="actorTitle" x="200" y="113" text-anchor="middle">Orchestrator</text>
+
+  <rect x="600" y="90" width="200" height="36" rx="10" fill="#7c3aed"/>
+  <text class="actorTitle" x="700" y="113" text-anchor="middle">Coding Sandbox</text>
+
+  <rect x="1100" y="90" width="200" height="36" rx="10" fill="#9333ea"/>
+  <text class="actorTitle" x="1200" y="113" text-anchor="middle">Review Sandbox</text>
+
+  <!-- Lifelines -->
+  <line class="lifeline" x1="200" y1="126" x2="200" y2="660"/>
+  <line class="lifeline" x1="700" y1="126" x2="700" y2="660"/>
+  <line class="lifeline" x1="1200" y1="126" x2="1200" y2="660"/>
+
+  <!-- Iteration 1 background -->
+  <rect x="70" y="140" width="1460" height="230" rx="12" fill="#eff6ff" stroke="#bfdbfe" opacity="0.5"/>
+  <text class="iterLabel" x="1480" y="160" fill="#2563eb">Iteration 1</text>
+
+  <!-- Step 1: Task assign -->
+  <path class="arrowBlue" d="M210 165 L690 165"/>
+  <text class="msgLabel" x="400" y="160">send: task.assign {spec, files}</text>
+
+  <!-- Step 2: Progress streaming -->
+  <path class="arrowGreen" d="M690 200 L210 200"/>
+  <text class="pubLabel" x="400" y="195">publish(progress.coding-1): "reading files..."</text>
+
+  <path class="arrowGreen" d="M690 225 L210 225"/>
+  <text class="pubLabel" x="400" y="220">publish(progress.coding-1): "writing changes..."</text>
+
+  <!-- Step 3: Task complete -->
+  <path class="arrowPurple" d="M690 255 L210 255"/>
+  <text class="msgLabel" x="400" y="250">send: task.complete {diff, summary}</text>
+
+  <!-- Step 4: Review request -->
+  <path class="arrowBlue" d="M210 290 L1190 290"/>
+  <text class="msgLabel" x="680" y="285">request: review.request {diff, criteria}</text>
+
+  <!-- Step 5: Review result (reject) -->
+  <rect x="1110" y="300" width="180" height="30" rx="8" fill="#f3e8ff" stroke="#e9d5ff"/>
+  <text class="cardText" x="1200" y="320" text-anchor="middle">analyzing diff...</text>
+
+  <path class="arrowPurple" d="M1190 345 L210 345"/>
+  <text class="msgLabel" x="680" y="340">reply: review.result {verdict: "changes_requested"}</text>
+
+  <!-- Iteration 2 background -->
+  <rect x="70" y="372" width="1460" height="180" rx="12" fill="#fff7ed" stroke="#fdba74" opacity="0.4"/>
+  <text class="iterLabel" x="1480" y="392" fill="#ea580c">Iteration 2</text>
+
+  <!-- Step 6: Fix request -->
+  <path class="arrowBlue" d="M210 400 L690 400"/>
+  <text class="msgLabel" x="400" y="395">send: task.assign {fixes, review_feedback}</text>
+
+  <!-- Step 7: Progress -->
+  <path class="arrowGreen" d="M690 430 L210 430"/>
+  <text class="pubLabel" x="400" y="425">publish(progress.coding-1): "applying fixes..."</text>
+
+  <!-- Step 8: Fix complete -->
+  <path class="arrowPurple" d="M690 460 L210 460"/>
+  <text class="msgLabel" x="400" y="455">send: task.complete {diff_v2}</text>
+
+  <!-- Step 9: Re-review -->
+  <path class="arrowBlue" d="M210 490 L1190 490"/>
+  <text class="msgLabel" x="680" y="485">request: review.request {diff_v2, prev_feedback}</text>
+
+  <!-- Step 10: Approve -->
+  <rect x="1110" y="500" width="180" height="30" rx="8" fill="#f3e8ff" stroke="#e9d5ff"/>
+  <text class="cardText" x="1200" y="520" text-anchor="middle">re-reviewing...</text>
+
+  <path class="arrowGreen" d="M1190 545 L210 545"/>
+  <text class="pubLabel" x="680" y="540">reply: review.result {verdict: "approved"}</text>
+
+  <!-- Completion -->
+  <rect x="110" y="570" width="180" height="50" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="200" y="594" text-anchor="middle">Merge / Deploy</text>
+  <text class="cardText" x="200" y="612" text-anchor="middle">changes approved</text>
+
+  <!-- Audit annotation -->
+  <rect x="1320" y="160" width="180" height="140" rx="14" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="cardTitle" x="1410" y="188" text-anchor="middle">Audit Trail</text>
+  <text class="cardText" x="1330" y="210">Every message</text>
+  <text class="cardText" x="1330" y="230">recorded with:</text>
+  <text class="cardText" x="1330" y="254">&#8226; from/to sandbox</text>
+  <text class="cardText" x="1330" y="274">&#8226; op, type, status</text>
+  <text class="cardText" x="1330" y="294">&#8226; timestamp, payload</text>
+
+  <!-- Timing -->
+  <rect x="80" y="640" width="1440" height="60" rx="18" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="664" text-anchor="middle">Total messaging overhead for 2-iteration loop: ~200ms (vs ~24-36s file-based). Inference time dominates &#8212; coordination is effectively free.</text>
+  <text class="noteText" x="800" y="686" text-anchor="middle">All three communication patterns used: point-to-point send (task dispatch), request-reply (review), pub/sub (progress streaming)</text>
+</svg>

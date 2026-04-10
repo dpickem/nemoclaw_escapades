@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for the NMB audit database.
+"""SQLAlchemy ORM models for the unified audit database.
 
 These classes mirror the tables created by the Alembic migrations in
 ``alembic/versions/``.  The application never issues DDL directly —
@@ -84,3 +84,57 @@ class ConnectionRow(Base):
     connected_at: Mapped[float] = mapped_column(Float, nullable=False)
     disconnected_at: Mapped[float | None] = mapped_column(Float)
     disconnect_reason: Mapped[str | None] = mapped_column(String)
+
+
+class ToolCallRow(Base):
+    """A single audited nv-tools invocation.
+
+    Every ``nv_tools_execute`` call — READ or WRITE, success or failure —
+    is persisted here.
+
+    Attributes:
+        id: UUID primary key.
+        timestamp: Unix epoch seconds.
+        session_id: Conversation session / thread identifier.
+        thread_ts: Slack thread timestamp.
+        service: nv-tools service name (e.g. ``"jira"``).
+        command: Subcommand name (e.g. ``"search"``).
+        args: Full argument string.
+        operation_type: ``"READ"`` or ``"WRITE"``.
+        approval_status: ``"auto_approved"``, ``"approved"``,
+            ``"denied"``, ``"timeout"``, or ``None``.
+        approved_by: User who approved (Slack user ID).
+        approval_time_ms: Time from request to approval decision.
+        exit_code: Subprocess exit code.
+        duration_ms: Wall-clock execution time.
+        success: 1 for success, 0 for failure.
+        error_code: Error code string if failed.
+        error_message: Error message string if failed.
+        response_payload: Full JSON response (empty if payloads disabled).
+        payload_size: Original response size in bytes.
+    """
+
+    __tablename__ = "tool_calls"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String)
+    thread_ts: Mapped[str | None] = mapped_column(String)
+
+    service: Mapped[str] = mapped_column(String, nullable=False)
+    command: Mapped[str] = mapped_column(String, nullable=False)
+    args: Mapped[str] = mapped_column(String, nullable=False)
+    operation_type: Mapped[str] = mapped_column(String, nullable=False)
+
+    approval_status: Mapped[str | None] = mapped_column(String)
+    approved_by: Mapped[str | None] = mapped_column(String)
+    approval_time_ms: Mapped[float | None] = mapped_column(Float)
+
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    success: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String)
+    error_message: Mapped[str | None] = mapped_column(String)
+
+    response_payload: Mapped[str | None] = mapped_column(String)
+    payload_size: Mapped[int] = mapped_column(Integer, nullable=False)

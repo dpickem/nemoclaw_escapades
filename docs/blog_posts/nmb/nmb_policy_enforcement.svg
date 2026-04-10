@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="660" viewBox="0 0 1600 660">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .checkText { fill: #16a34a; font: 600 15px Arial, sans-serif; }
+      .denyText { fill: #dc2626; font: 600 15px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenHead); }
+      .arrowRed { stroke: #dc2626; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#redHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="redHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="660"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Policy Enforcement (Integration Testing)</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">PolicyBroker subclass inserts checks between validation and routing &#8212; strictly more restrictive than production</text>
+
+  <!-- Policy dimensions -->
+  <rect x="80" y="100" width="1440" height="220" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="300" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Five Policy Dimensions</text>
+
+  <!-- Connection -->
+  <rect x="110" y="158" width="240" height="80" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="230" y="186" text-anchor="middle">Connection</text>
+  <text class="cardText" x="230" y="208" text-anchor="middle">can_connect: bool</text>
+  <text class="cardText" x="230" y="228" text-anchor="middle">HTTP 403 if false</text>
+
+  <!-- Egress -->
+  <rect x="370" y="158" width="240" height="80" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="490" y="186" text-anchor="middle">Egress Targets</text>
+  <text class="cardText" x="490" y="208" text-anchor="middle">allowed_egress_targets</text>
+  <text class="cardText" x="490" y="228" text-anchor="middle">send/request/stream</text>
+
+  <!-- Ingress -->
+  <rect x="630" y="158" width="240" height="80" rx="14" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="cardTitle" x="750" y="186" text-anchor="middle">Ingress Sources</text>
+  <text class="cardText" x="750" y="208" text-anchor="middle">allowed_ingress_sources</text>
+  <text class="cardText" x="750" y="228" text-anchor="middle">(checked on target)</text>
+
+  <!-- Channels -->
+  <rect x="890" y="158" width="280" height="80" rx="14" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="cardTitle" x="1030" y="186" text-anchor="middle">Channel Patterns</text>
+  <text class="cardText" x="1030" y="208" text-anchor="middle">allowed_channels: exact, *, *.*</text>
+  <text class="cardText" x="1030" y="228" text-anchor="middle">subscribe/publish</text>
+
+  <!-- Ops -->
+  <rect x="1190" y="158" width="240" height="80" rx="14" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="cardTitle" x="1310" y="186" text-anchor="middle">Op Types</text>
+  <text class="cardText" x="1310" y="208" text-anchor="middle">allowed_ops: set[Op]</text>
+  <text class="cardText" x="1310" y="228" text-anchor="middle">any client op</text>
+
+  <!-- None vs set() -->
+  <text class="checkText" x="110" y="278">None = unrestricted</text>
+  <text class="denyText" x="370" y="278">set() = deny all</text>
+  <text class="cardText" x="630" y="278">Policy checked at broker-side _enforce_policy() between validate and route</text>
+
+  <!-- Enforcement flow -->
+  <rect x="80" y="340" width="1440" height="180" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="80" y="340" width="340" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="110" y="366">PolicyBroker._dispatch Flow</text>
+
+  <rect x="110" y="400" width="180" height="50" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="200" y="430" text-anchor="middle">Parse + Auth</text>
+
+  <rect x="340" y="400" width="180" height="50" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="430" y="430" text-anchor="middle">Validate</text>
+
+  <rect x="570" y="400" width="220" height="50" rx="12" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="cardTitle" x="680" y="430" text-anchor="middle">_enforce_policy</text>
+
+  <rect x="840" y="400" width="180" height="50" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="930" y="430" text-anchor="middle">Route to Handler</text>
+
+  <rect x="1070" y="400" width="180" height="50" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="1160" y="430" text-anchor="middle">ACK + Audit</text>
+
+  <path class="arrow" d="M290 425 L340 425"/>
+  <path class="arrow" d="M520 425 L570 425"/>
+  <path class="arrowGreen" d="M790 425 L840 425"/>
+  <path class="arrow" d="M1020 425 L1070 425"/>
+
+  <!-- Denied path -->
+  <path class="arrowRed" d="M680 450 L680 490"/>
+  <rect x="560" y="490" width="240" height="36" rx="10" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="denyText" x="680" y="514" text-anchor="middle">POLICY_DENIED error frame</text>
+
+  <!-- Production comparison -->
+  <rect x="80" y="548" width="1440" height="84" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="548" width="320" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="574">Production vs Test Comparison</text>
+
+  <text class="cardText" x="110" y="614">Production: OpenShell proxy gates connections + egress via network policy</text>
+  <text class="cardText" x="700" y="614">Tests: PolicyBroker adds ingress + op + channel checks &#8212; strictly more restrictive</text>
+
+  <!-- Bottom note -->
+  <rect x="80" y="638" width="1440" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="654" text-anchor="middle">rekey_policy() bridges display names ("coding-1") &#8594; unique sandbox_ids ("coding-1-a1b2c3d4") after MessageBus construction</text>
+</svg>
