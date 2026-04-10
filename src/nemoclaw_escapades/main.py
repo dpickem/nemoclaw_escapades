@@ -40,8 +40,12 @@ from nemoclaw_escapades.config import load_config
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator import Orchestrator
+from nemoclaw_escapades.tools.confluence import register_confluence_tools
+from nemoclaw_escapades.tools.gerrit import register_gerrit_tools
+from nemoclaw_escapades.tools.gitlab import register_gitlab_tools
 from nemoclaw_escapades.tools.jira import register_jira_tools
 from nemoclaw_escapades.tools.registry import ToolRegistry
+from nemoclaw_escapades.tools.slack_search import register_slack_search_tools
 
 
 async def main() -> None:
@@ -53,14 +57,25 @@ async def main() -> None:
 
     backend = InferenceHubBackend(config.inference)
 
-    tools: ToolRegistry | None = None
+    tools = ToolRegistry()
     if config.jira.enabled:
-        tools = ToolRegistry()
         register_jira_tools(tools, config.jira)
+    if config.gitlab.enabled:
+        register_gitlab_tools(tools, config.gitlab)
+    if config.gerrit.enabled:
+        register_gerrit_tools(tools, config.gerrit)
+    if config.confluence.enabled:
+        register_confluence_tools(tools, config.confluence)
+    if config.slack_search.enabled:
+        register_slack_search_tools(tools, config.slack_search)
+
+    if tools.names:
         logger.info(
-            "Jira tools enabled",
-            extra={"tools": tools.names},
+            "Tools registered",
+            extra={"count": len(tools), "toolsets": sorted(tools.toolsets)},
         )
+    else:
+        tools = None
 
     orchestrator = Orchestrator(backend, config.orchestrator, tools=tools)
     connector = SlackConnector(
