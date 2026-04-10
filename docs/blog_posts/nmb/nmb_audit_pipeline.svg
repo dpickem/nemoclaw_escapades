@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="500" viewBox="0 0 1600 500">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowOrange { stroke: #ea580c; stroke-width: 2.5; fill: none; marker-end: url(#orangeHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="orangeHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="500"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Audit Pipeline</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">Non-blocking batched writes &#8212; routing never waits on disk I/O</text>
+
+  <!-- Hot path -->
+  <rect x="80" y="100" width="580" height="260" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="260" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Hot Path (Broker Handlers)</text>
+
+  <rect x="110" y="160" width="240" height="70" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="230" y="190" text-anchor="middle">_handle_send</text>
+  <text class="cardText" x="230" y="212" text-anchor="middle">enqueue_message()</text>
+
+  <rect x="370" y="160" width="260" height="70" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="500" y="190" text-anchor="middle">_handle_request</text>
+  <text class="cardText" x="500" y="212" text-anchor="middle">enqueue_message()</text>
+
+  <rect x="110" y="250" width="240" height="70" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="230" y="280" text-anchor="middle">_timeout_request</text>
+  <text class="cardText" x="230" y="302" text-anchor="middle">enqueue_status_update()</text>
+
+  <rect x="370" y="250" width="260" height="70" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="500" y="280" text-anchor="middle">_handle_reply</text>
+  <text class="cardText" x="500" y="302" text-anchor="middle">enqueue_message()</text>
+
+  <!-- Async queue -->
+  <rect x="720" y="100" width="240" height="260" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <rect x="720" y="100" width="240" height="40" rx="12" fill="#ea580c"/>
+  <text class="stageTitle" x="840" y="126" text-anchor="middle">Async Queue</text>
+
+  <rect x="750" y="160" width="180" height="46" rx="10" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardText" x="840" y="188" text-anchor="middle">message insert</text>
+
+  <rect x="750" y="218" width="180" height="46" rx="10" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardText" x="840" y="246" text-anchor="middle">message insert</text>
+
+  <rect x="750" y="276" width="180" height="46" rx="10" fill="#ffedd5" stroke="#fdba74"/>
+  <text class="cardText" x="840" y="304" text-anchor="middle">status update</text>
+
+  <text class="cardText" x="750" y="348">Capacity: 10,000</text>
+  <text class="cardText" x="750" y="368">Full: drop + warn</text>
+
+  <!-- Background writer -->
+  <rect x="1020" y="100" width="240" height="260" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="1020" y="100" width="240" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="1140" y="126" text-anchor="middle">Background Writer</text>
+
+  <rect x="1050" y="160" width="180" height="70" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="1140" y="190" text-anchor="middle">_flush_loop</text>
+  <text class="cardText" x="1140" y="212" text-anchor="middle">drain up to 100 items</text>
+
+  <rect x="1050" y="248" width="180" height="70" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="1140" y="278" text-anchor="middle">_write_batch</text>
+  <text class="cardText" x="1140" y="300" text-anchor="middle">inserts + updates in txn</text>
+
+  <!-- SQLite DB -->
+  <rect x="1320" y="100" width="200" height="260" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="1320" y="100" width="200" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="1420" y="126" text-anchor="middle">SQLite (WAL)</text>
+
+  <rect x="1340" y="160" width="160" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="1420" y="190" text-anchor="middle">messages</text>
+
+  <rect x="1340" y="224" width="160" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="1420" y="254" text-anchor="middle">connections</text>
+
+  <text class="cardText" x="1340" y="304">Alembic-migrated</text>
+  <text class="cardText" x="1340" y="324">query() + export_jsonl()</text>
+
+  <!-- Arrows -->
+  <path class="arrowBlue" d="M660 230 L720 230"/>
+  <path class="arrowOrange" d="M960 230 L1020 230"/>
+  <path class="arrowGreen" d="M1260 230 L1320 230"/>
+
+  <!-- Bottom notes -->
+  <rect x="80" y="388" width="1440" height="84" rx="18" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="412" text-anchor="middle">The audit DB records every routed message, delivery status, connection, and disconnection &#8212; enabling post-hoc analysis and training data extraction.</text>
+  <text class="noteText" x="800" y="436" text-anchor="middle">Payload storage is optional (--no-audit-payloads) for privacy-sensitive deployments. Schema versioned via Alembic with fast-path head detection.</text>
+  <text class="noteText" x="800" y="460" text-anchor="middle">query() enforces SELECT-only &#8212; the DB is append-only from the broker's perspective. export_jsonl() streams full history for offline analysis.</text>
+</svg>

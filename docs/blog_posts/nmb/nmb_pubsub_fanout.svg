@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="540" viewBox="0 0 1600 540">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .chanLabel { fill: #1e40af; font: 700 16px monospace; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenHead); }
+      .arrowPurple { stroke: #7c3aed; stroke-width: 2.5; fill: none; marker-end: url(#purpleHead); }
+      .arrowRedDash { stroke: #dc2626; stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+    <marker id="purpleHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="540"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">Pub/Sub Channel Architecture</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">One-to-many delivery with publisher self-exclusion and per-sandbox channel limits</text>
+
+  <!-- Publisher -->
+  <rect x="80" y="120" width="300" height="140" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="120" width="200" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="146">coding-1</text>
+
+  <rect x="110" y="180" width="240" height="60" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="cardTitle" x="230" y="206" text-anchor="middle">publish()</text>
+  <text class="cardText" x="230" y="226" text-anchor="middle">progress.coding-1</text>
+
+  <!-- Broker channel manager -->
+  <rect x="480" y="100" width="400" height="320" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="480" y="100" width="320" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="510" y="126">Broker Channel Manager</text>
+
+  <!-- Channel map -->
+  <rect x="510" y="160" width="340" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="chanLabel" x="680" y="186" text-anchor="middle">progress.coding-1</text>
+  <text class="cardText" x="680" y="206" text-anchor="middle">subscribers: [orchestrator, review-1]</text>
+
+  <rect x="510" y="236" width="340" height="60" rx="12" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="chanLabel" x="680" y="262" text-anchor="middle">system</text>
+  <text class="cardText" x="680" y="282" text-anchor="middle">subscribers: [orchestrator]</text>
+
+  <!-- Fanout description -->
+  <rect x="510" y="312" width="340" height="80" rx="12" fill="#ffffff" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="680" y="340" text-anchor="middle">Fanout Logic</text>
+  <text class="cardText" x="520" y="362">1. Build deliver JSON once</text>
+  <text class="cardText" x="520" y="382">2. asyncio.gather() to all subs</text>
+
+  <!-- Subscribers -->
+  <rect x="980" y="100" width="280" height="130" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="980" y="100" width="200" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="1010" y="126">orchestrator</text>
+  <rect x="1010" y="158" width="220" height="50" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="cardTitle" x="1120" y="182" text-anchor="middle">subscribe()</text>
+  <text class="cardText" x="1120" y="200" text-anchor="middle">progress.*</text>
+
+  <rect x="980" y="260" width="280" height="130" rx="18" fill="#fdf4ff" stroke="#e9d5ff"/>
+  <rect x="980" y="260" width="200" height="40" rx="12" fill="#9333ea"/>
+  <text class="stageTitle" x="1010" y="286">review-1</text>
+  <rect x="1010" y="318" width="220" height="50" rx="12" fill="#f3e8ff" stroke="#e9d5ff"/>
+  <text class="cardTitle" x="1120" y="342" text-anchor="middle">subscribe()</text>
+  <text class="cardText" x="1120" y="360" text-anchor="middle">progress.coding-1</text>
+
+  <!-- Arrows -->
+  <path class="arrowPurple" d="M380 210 L480 190"/>
+  <text class="cardText" x="410" y="190" fill="#7c3aed">publish</text>
+
+  <path class="arrowGreen" d="M850 190 L980 180"/>
+  <text class="cardText" x="890" y="178" fill="#16a34a">deliver</text>
+
+  <path class="arrowGreen" d="M850 280 L980 320"/>
+  <text class="cardText" x="890" y="310" fill="#16a34a">deliver</text>
+
+  <!-- Self-exclusion annotation -->
+  <line class="arrowRedDash" x1="480" y1="210" x2="380" y2="210"/>
+  <rect x="130" y="278" width="200" height="40" rx="10" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardText" x="230" y="302" text-anchor="middle" fill="#dc2626">&#x2717; publisher excluded</text>
+  <path class="arrowRedDash" d="M230 260 L230 278"/>
+
+  <!-- Limits -->
+  <rect x="80" y="450" width="1440" height="60" rx="18" fill="#fff7ed" stroke="#fdba74"/>
+  <text class="cardTitle" x="110" y="478">Limits</text>
+  <text class="cardText" x="200" y="478">50 channels per sandbox (configurable)</text>
+  <text class="cardText" x="620" y="478">1,000 message buffer per subscriber (drop-oldest on overflow)</text>
+  <text class="cardText" x="1180" y="478">5s send timeout per delivery</text>
+
+  <!-- Bottom note -->
+  <rect x="80" y="516" width="1440" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="532" text-anchor="middle">The "system" channel is special &#8212; broker broadcasts sandbox.shutdown events to all system subscribers on disconnect</text>
+</svg>

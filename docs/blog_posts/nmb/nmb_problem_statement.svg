@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="560" viewBox="0 0 1600 560">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .metricBad { fill: #dc2626; font: 700 28px Arial, sans-serif; }
+      .metricGood { fill: #16a34a; font: 700 28px Arial, sans-serif; }
+      .metricLabel { fill: #475569; font: 500 14px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowSlow { stroke: #dc2626; stroke-width: 2.5; fill: none; stroke-dasharray: 8 6; marker-end: url(#redHead); }
+      .arrowFast { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="redHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="560"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Why NMB? File-Based vs Message-Based Coordination</text>
+  <text class="subtitle" x="800" y="80" text-anchor="middle">A 3-iteration coding + review loop shows the coordination overhead clearly</text>
+
+  <!-- Left: File-based (slow) -->
+  <rect x="80" y="110" width="700" height="340" rx="18" fill="#fef2f2" stroke="#fecaca"/>
+  <rect x="80" y="110" width="300" height="40" rx="12" fill="#dc2626"/>
+  <text class="stageTitle" x="110" y="136">File-Based (Before NMB)</text>
+
+  <rect x="120" y="170" width="260" height="80" rx="14" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="250" y="202" text-anchor="middle">Orchestrator</text>
+  <text class="cardText" x="250" y="226" text-anchor="middle">write task.json</text>
+
+  <rect x="480" y="170" width="260" height="80" rx="14" fill="#fee2e2" stroke="#fecaca"/>
+  <text class="cardTitle" x="610" y="202" text-anchor="middle">Coding Sandbox</text>
+  <text class="cardText" x="610" y="226" text-anchor="middle">poll + read task.json</text>
+
+  <path class="arrowSlow" d="M380 198 L480 198"/>
+  <text class="cardText" x="405" y="190" fill="#dc2626">upload</text>
+
+  <path class="arrowSlow" d="M480 230 L380 230"/>
+  <text class="cardText" x="400" y="260" fill="#dc2626">download</text>
+
+  <!-- Latency metrics -->
+  <rect x="120" y="280" width="620" height="60" rx="12" fill="#ffffff" stroke="#fecaca"/>
+  <text class="metricBad" x="140" y="318">~1-3s</text>
+  <text class="metricLabel" x="265" y="318">per file round-trip</text>
+  <text class="metricBad" x="440" y="318">~24-36s</text>
+  <text class="metricLabel" x="580" y="318">3-iteration loop overhead</text>
+
+  <!-- Limitations list -->
+  <text class="cardText" x="120" y="380">&#x2717; No streaming</text>
+  <text class="cardText" x="120" y="404">&#x2717; No interruption / cancellation</text>
+  <text class="cardText" x="410" y="380">&#x2717; No heartbeats</text>
+  <text class="cardText" x="410" y="404">&#x2717; No peer-to-peer messaging</text>
+
+  <!-- Right: Message-based (fast) -->
+  <rect x="820" y="110" width="700" height="340" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="820" y="110" width="300" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="850" y="136">Message-Based (NMB)</text>
+
+  <rect x="860" y="170" width="260" height="80" rx="14" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="990" y="202" text-anchor="middle">Orchestrator</text>
+  <text class="cardText" x="990" y="226" text-anchor="middle">send(task.assign)</text>
+
+  <rect x="1220" y="170" width="260" height="80" rx="14" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="cardTitle" x="1350" y="202" text-anchor="middle">Coding Sandbox</text>
+  <text class="cardText" x="1350" y="226" text-anchor="middle">listen() delivers</text>
+
+  <path class="arrowFast" d="M1120 198 L1220 198"/>
+  <text class="cardText" x="1145" y="190" fill="#16a34a">WebSocket</text>
+
+  <path class="arrowFast" d="M1220 230 L1120 230"/>
+  <text class="cardText" x="1132" y="260" fill="#16a34a">WebSocket</text>
+
+  <!-- Latency metrics -->
+  <rect x="860" y="280" width="620" height="60" rx="12" fill="#ffffff" stroke="#bbf7d0"/>
+  <text class="metricGood" x="880" y="318">~1-5ms</text>
+  <text class="metricLabel" x="1000" y="318">per message</text>
+  <text class="metricGood" x="1180" y="318">~200ms</text>
+  <text class="metricLabel" x="1310" y="318">3-iteration loop overhead</text>
+
+  <!-- Capabilities list -->
+  <text class="cardText" x="860" y="380">&#x2713; Ordered streaming</text>
+  <text class="cardText" x="860" y="404">&#x2713; Request-reply with timeouts</text>
+  <text class="cardText" x="1150" y="380">&#x2713; Pub/sub channels</text>
+  <text class="cardText" x="1150" y="404">&#x2713; Full audit trail</text>
+
+  <!-- Bottom comparison -->
+  <rect x="80" y="478" width="1440" height="60" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text class="cardTitle" x="800" y="504" text-anchor="middle">Coordination overhead reduction: 24-36 seconds &#8594; ~200 milliseconds (100-180x faster)</text>
+  <text class="cardText" x="800" y="526" text-anchor="middle">Same sandbox isolation guarantees &#8212; the OpenShell proxy still mediates every connection</text>
+</svg>

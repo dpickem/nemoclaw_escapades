@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 16px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .noteText { fill: #334155; font: 500 15px Arial, sans-serif; }
+      .opText { fill: #1e40af; font: 700 15px monospace; }
+      .arrow { stroke: #64748b; stroke-width: 2; fill: none; marker-end: url(#arrowHead); }
+      .arrowBlue { stroke: #2563eb; stroke-width: 2; fill: none; marker-end: url(#blueHead); }
+      .arrowGreen { stroke: #16a34a; stroke-width: 2; fill: none; marker-end: url(#greenHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="greenHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="620"/>
+
+  <text class="title" x="800" y="46" text-anchor="middle">NMB Wire Protocol</text>
+  <text class="subtitle" x="800" y="74" text-anchor="middle">JSON text frames over WebSocket &#8212; one unified NMBMessage schema for all operations</text>
+
+  <!-- Client-to-Broker ops -->
+  <rect x="80" y="100" width="700" height="280" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="100" width="340" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="126">Client &#8594; Broker Operations</text>
+
+  <rect x="110" y="158" width="150" height="50" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="opText" x="185" y="188" text-anchor="middle">send</text>
+
+  <rect x="280" y="158" width="150" height="50" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="opText" x="355" y="188" text-anchor="middle">request</text>
+
+  <rect x="450" y="158" width="150" height="50" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="opText" x="525" y="188" text-anchor="middle">reply</text>
+
+  <rect x="620" y="158" width="130" height="50" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="opText" x="685" y="188" text-anchor="middle">stream</text>
+
+  <rect x="110" y="228" width="150" height="50" rx="10" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="opText" x="185" y="258" text-anchor="middle">subscribe</text>
+
+  <rect x="280" y="228" width="170" height="50" rx="10" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="opText" x="365" y="258" text-anchor="middle">unsubscribe</text>
+
+  <rect x="470" y="228" width="150" height="50" rx="10" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text class="opText" x="545" y="258" text-anchor="middle">publish</text>
+
+  <text class="cardText" x="110" y="310">Point-to-point: send, request, reply, stream</text>
+  <text class="cardText" x="110" y="332">Pub/sub: subscribe, unsubscribe, publish</text>
+  <text class="cardText" x="110" y="354">All ops carry: id, op, type, from_sandbox, payload</text>
+  <text class="cardText" x="110" y="376">P2P ops add: to_sandbox | Pub/sub adds: channel</text>
+
+  <!-- Broker-to-Client ops -->
+  <rect x="820" y="100" width="700" height="280" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="820" y="100" width="340" height="40" rx="12" fill="#16a34a"/>
+  <text class="stageTitle" x="850" y="126">Broker &#8594; Client Responses</text>
+
+  <rect x="850" y="158" width="150" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="opText" x="925" y="188" text-anchor="middle">deliver</text>
+
+  <rect x="1020" y="158" width="130" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="opText" x="1085" y="188" text-anchor="middle">ack</text>
+
+  <rect x="1170" y="158" width="150" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="opText" x="1245" y="188" text-anchor="middle">error</text>
+
+  <rect x="1340" y="158" width="150" height="50" rx="10" fill="#dcfce7" stroke="#bbf7d0"/>
+  <text class="opText" x="1415" y="188" text-anchor="middle">timeout</text>
+
+  <text class="cardText" x="850" y="240">deliver: routed message reaching its destination</text>
+  <text class="cardText" x="850" y="262">ack: successful acceptance of send/subscribe/publish</text>
+  <text class="cardText" x="850" y="284">error: POLICY_DENIED, TARGET_OFFLINE, RATE_LIMITED,</text>
+  <text class="cardText" x="890" y="306">PAYLOAD_TOO_LARGE, CHANNEL_FULL, INVALID_FRAME</text>
+  <text class="cardText" x="850" y="332">timeout: broker-side request timeout notification</text>
+  <text class="cardText" x="850" y="354">All carry: id (correlation to original message)</text>
+
+  <!-- Message schema -->
+  <rect x="80" y="410" width="1440" height="180" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="410" width="260" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="436">NMBMessage Schema</text>
+
+  <rect x="110" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="210" y="496" text-anchor="middle">id</text>
+
+  <rect x="330" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="430" y="496" text-anchor="middle">op</text>
+
+  <rect x="550" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="650" y="496" text-anchor="middle">type</text>
+
+  <rect x="770" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="870" y="496" text-anchor="middle">from_sandbox</text>
+
+  <rect x="990" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="1090" y="496" text-anchor="middle">to_sandbox</text>
+
+  <rect x="1210" y="468" width="200" height="46" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="opText" x="1310" y="496" text-anchor="middle">payload</text>
+
+  <text class="cardText" x="110" y="544">Optional fields: channel, reply_to, stream_id, seq, done, error_code, timestamp</text>
+  <text class="cardText" x="110" y="566">Pydantic model with extra="ignore" for forward compatibility &#8212; broker validates per-op required fields</text>
+
+  <!-- Bottom note -->
+  <rect x="80" y="596" width="1440" height="22" rx="10" fill="#e2e8f0"/>
+  <text class="noteText" x="800" y="612" text-anchor="middle">JSON text frames chosen for proxy compatibility (OpenShell L7 proxy can inspect them) and debuggability</text>
+</svg>
