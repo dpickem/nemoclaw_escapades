@@ -1,36 +1,56 @@
-"""Tests for the approval gate interface."""
+"""Tests for the approval gate."""
 
 from __future__ import annotations
 
-from nemoclaw_escapades.models.types import ApprovalResult
-from nemoclaw_escapades.orchestrator.approval import ApprovalGate, AutoApproval
+from nemoclaw_escapades.orchestrator.approval import AutoApproval, WriteApproval
 
 
 class TestAutoApproval:
-    """AutoApproval should approve everything in M1."""
-
-    async def test_auto_approves_respond(self) -> None:
+    async def test_approves_everything(self) -> None:
         gate = AutoApproval()
-        result = await gate.check("respond", {"content": "Hello"})
+        result = await gate.check("respond", {"content": "hello"})
         assert result.approved is True
         assert result.reason == "auto_approved"
 
-    async def test_auto_approves_any_action(self) -> None:
-        gate = AutoApproval()
-        for action in ("respond", "tool_call", "file_write", "arbitrary"):
-            result = await gate.check(action, {})
-            assert result.approved is True
 
+class TestWriteApproval:
+    async def test_respond_action_auto_approved(self) -> None:
+        gate = WriteApproval()
+        result = await gate.check("respond", {"content": "hello"})
+        assert result.approved is True
 
-class TestApprovalGateInterface:
-    """Verify the ABC contract is correct."""
+    async def test_read_tool_call_auto_approved(self) -> None:
+        gate = WriteApproval()
+        result = await gate.check(
+            "tool_call",
+            {"tool_name": "jira_search", "is_read_only": True},
+        )
+        assert result.approved is True
+        assert "read_auto_approved" in (result.reason or "")
 
-    async def test_custom_gate_can_deny(self) -> None:
-        class DenyAll(ApprovalGate):
-            async def check(self, action: str, context: dict[str, object]) -> ApprovalResult:
-                return ApprovalResult(approved=False, reason="denied_by_policy")
-
-        gate = DenyAll()
-        result = await gate.check("tool_call", {"tool": "rm_rf"})
+    async def test_write_tool_call_denied(self) -> None:
+        gate = WriteApproval()
+        result = await gate.check(
+            "tool_call",
+            {"tool_name": "jira_create_issue", "is_read_only": False},
+        )
         assert result.approved is False
-        assert result.reason == "denied_by_policy"
+        assert "write_requires_approval" in (result.reason or "")
+
+    async def test_high_risk_tool_classified(self) -> None:
+        gate = WriteApproval()
+        result = await gate.check(
+            "tool_call",
+            {"tool_name": "jira_transition_issue", "is_read_only": False},
+        )
+        assert result.approved is False
+        assert "HIGH" in (result.reason or "")
+
+    async def test_low_risk_tool_classified(self) -> None:
+        gate = WriteApproval()
+        result = await gate.check(
+            "tool_call",
+            {"tool_name": "jira_add_comment", "is_read_only": False},
+        )
+        assert result.approved is False
+        assert "LOW" in (result.reason or "")
