@@ -15,6 +15,11 @@ from typing import Any
 class JSONFormatter(logging.Formatter):
     """Formats log records as single-line JSON objects."""
 
+    # Attributes that belong to the LogRecord itself (not user-supplied extra).
+    _BUILTIN_ATTRS: frozenset[str] = frozenset(
+        logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+    )
+
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
@@ -24,31 +29,11 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        extra_keys = {
-            "latency_ms",
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "attempt",
-            "wait_s",
-            "error_category",
-            "status_code",
-            "model",
-            "thread_ts",
-            "user_id",
-            "channel_id",
-            "finish_reason",
-            "history_length",
-            "continuation_attempt",
-            "reason",
-            "channel",
-            "ts",
-            "content_length",
-            "action",
-        }
-        for key in extra_keys:
-            value = getattr(record, key, None)
-            if value is not None:
+        # Include every extra field the caller passed, without needing
+        # an explicit allowlist.  This ensures new fields (tool, toolset,
+        # duration_ms, etc.) appear automatically.
+        for key, value in record.__dict__.items():
+            if key not in self._BUILTIN_ATTRS and key not in log_entry:
                 log_entry[key] = value
 
         if record.exc_info and record.exc_info[1]:

@@ -1,7 +1,32 @@
-"""Entry point for the NemoClaw M1 agent loop.
+"""Entry point for the NemoClaw agent loop.
 
-Wires together config → backend → orchestrator → connector and runs
-until interrupted.
+Assembles the full runtime stack and keeps it alive until a shutdown
+signal arrives.  The wiring order is:
+
+1. **Config** — ``load_config()`` reads env vars / files into typed
+   dataclasses (``AppConfig``).  Inside an OpenShell sandbox, real
+   credentials are never present in the environment; they are injected
+   by the L7 proxy at request time via ``openshell:resolve:env:…``
+   placeholders.  The config layer only sees the placeholder strings —
+   the proxy transparently resolves them before forwarding each HTTP
+   request to the upstream service.
+2. **Inference backend** — ``InferenceHubBackend`` wraps the
+   OpenAI-compatible chat-completions endpoint (Inference Hub or
+   ``inference.local`` inside an OpenShell sandbox).
+3. **Tool registry** — optional; when enabled, tool modules (e.g.
+   ``register_jira_tools``) populate the registry with ``ToolSpec``
+   entries that the orchestrator can invoke during the agent loop.
+4. **Orchestrator** — the agent loop itself: prompt building,
+   multi-turn tool use, transcript repair, and approval gating.
+5. **Connector** — ``SlackConnector`` opens a socket-mode WebSocket
+   to Slack and bridges platform events to ``orchestrator.handle()``.
+
+After ``connector.start()`` the process blocks on an ``asyncio.Event``
+until SIGINT or SIGTERM.  A second signal forces an immediate exit.
+Shutdown tears down the connector and backend in reverse order.
+
+``run()`` is the synchronous entry point invoked by the Makefile and
+CLI (``python -m nemoclaw_escapades``).
 """
 
 from __future__ import annotations
@@ -15,6 +40,8 @@ from nemoclaw_escapades.config import load_config
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator import Orchestrator
+from nemoclaw_escapades.tools.jira import register_jira_tools
+from nemoclaw_escapades.tools.registry import ToolRegistry
 
 
 async def main() -> None:
@@ -22,10 +49,20 @@ async def main() -> None:
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
     logger = get_logger("main")
-    logger.info("Starting NemoClaw M1 agent loop")
+    logger.info("Starting NemoClaw agent loop")
 
     backend = InferenceHubBackend(config.inference)
-    orchestrator = Orchestrator(backend, config.orchestrator)
+
+    tools: ToolRegistry | None = None
+    if config.jira.enabled:
+        tools = ToolRegistry()
+        register_jira_tools(tools, config.jira)
+        logger.info(
+            "Jira tools enabled",
+            extra={"tools": tools.names},
+        )
+
+    orchestrator = Orchestrator(backend, config.orchestrator, tools=tools)
     connector = SlackConnector(
         handler=orchestrator.handle,
         bot_token=config.slack.bot_token,
