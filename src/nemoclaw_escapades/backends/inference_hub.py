@@ -45,6 +45,7 @@ from nemoclaw_escapades.models.types import (
     InferenceRequest,
     InferenceResponse,
     TokenUsage,
+    ToolCall,
 )
 from nemoclaw_escapades.observability.logging import get_logger
 
@@ -134,12 +135,14 @@ class InferenceHubBackend(BackendBase):
                 a non-retryable error (e.g. 401 auth failure) occurs on
                 the first attempt.
         """
-        payload = {
+        payload: dict[str, object] = {
             "model": request.model,
             "messages": request.messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
+        if request.tools:
+            payload["tools"] = [t.to_dict() for t in request.tools]
 
         try:
             async for attempt in AsyncRetrying(
@@ -312,7 +315,8 @@ class InferenceHubBackend(BackendBase):
         data = response.json()
         try:
             choice = data["choices"][0]
-            content = choice["message"]["content"]
+            message = choice["message"]
+            content = message.get("content") or ""
             finish_reason = choice.get("finish_reason", "stop")
         except (KeyError, IndexError) as exc:
             raise InferenceError(
@@ -320,6 +324,18 @@ class InferenceHubBackend(BackendBase):
                 category=ErrorCategory.MODEL_ERROR,
                 raw=data,
             ) from exc
+
+        tool_calls: list[ToolCall] | None = None
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls:
+            tool_calls = [
+                ToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    arguments=tc["function"].get("arguments", "{}"),
+                )
+                for tc in raw_tool_calls
+            ]
 
         usage_data = data.get("usage", {})
         usage = TokenUsage(
@@ -337,6 +353,7 @@ class InferenceHubBackend(BackendBase):
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
                 "total_tokens": usage.total_tokens,
+                "tool_calls_count": len(tool_calls) if tool_calls else 0,
             },
         )
 
@@ -346,6 +363,7 @@ class InferenceHubBackend(BackendBase):
             usage=usage,
             latency_ms=latency_ms,
             finish_reason=finish_reason or "stop",
+            tool_calls=tool_calls,
             raw_response=data,
         )
 
