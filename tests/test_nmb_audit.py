@@ -1,4 +1,4 @@
-"""Tests for the NMB audit database — Alembic migrations, logging, and queries."""
+"""Tests for the audit database — NMB message logging, connections, and queries."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nemoclaw_escapades.nmb.audit.db import AuditDB
+from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.nmb.models import DeliveryStatus, NMBMessage, Op
 
 
@@ -29,6 +29,7 @@ class TestAuditDB:
         names = {r["name"] for r in rows}
         assert "messages" in names
         assert "connections" in names
+        assert "tool_calls" in names
 
     async def test_log_message(self, audit_db: AuditDB) -> None:
         msg = NMBMessage(
@@ -81,7 +82,7 @@ class TestAuditDB:
         assert rows[0]["disconnect_reason"] == "crashed"
         assert rows[0]["disconnected_at"] is not None
 
-    async def test_export_jsonl(self, audit_db: AuditDB, tmp_path: Path) -> None:
+    async def test_export_messages_jsonl(self, audit_db: AuditDB, tmp_path: Path) -> None:
         for i in range(3):
             msg = NMBMessage(
                 op=Op.SEND,
@@ -95,7 +96,7 @@ class TestAuditDB:
             await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
 
         out_path = str(tmp_path / "export.jsonl")
-        count = await audit_db.export_jsonl(out_path)
+        count = await audit_db.export_messages_jsonl(out_path)
         assert count == 3
 
         with open(out_path) as f:
@@ -184,7 +185,6 @@ class TestAuditDB:
                 )
                 audit_db.enqueue_message(msg, DeliveryStatus.DELIVERED)
 
-            # Give the background writer time to flush
             import asyncio
 
             await asyncio.sleep(0.3)
@@ -223,7 +223,9 @@ class TestAuditDB:
         finally:
             await audit_db.stop_background_writer()
 
-    async def test_export_jsonl_with_since(self, audit_db: AuditDB, tmp_path: Path) -> None:
+    async def test_export_messages_jsonl_with_since(
+        self, audit_db: AuditDB, tmp_path: Path
+    ) -> None:
         for i in range(5):
             msg = NMBMessage(
                 op=Op.SEND,
@@ -236,10 +238,7 @@ class TestAuditDB:
             )
             await audit_db.log_message(msg, DeliveryStatus.DELIVERED)
 
-        # timestamps: 0, 100, 200, 300, 400
-        # Verify total, then filter
         all_rows = await audit_db.query("SELECT * FROM messages ORDER BY timestamp")
         out_path = str(tmp_path / "since.jsonl")
-        # since=250 should return rows with timestamp >= 250 → 300, 400
-        count = await audit_db.export_jsonl(out_path, since=250.0)
+        count = await audit_db.export_messages_jsonl(out_path, since=250.0)
         assert count == len([r for r in all_rows if r["timestamp"] >= 250.0])
