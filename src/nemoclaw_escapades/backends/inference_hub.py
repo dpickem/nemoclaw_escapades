@@ -318,24 +318,24 @@ class InferenceHubBackend(BackendBase):
             message = choice["message"]
             content = message.get("content") or ""
             finish_reason = choice.get("finish_reason", "stop")
+
+            tool_calls: list[ToolCall] | None = None
+            raw_tool_calls = message.get("tool_calls")
+            if raw_tool_calls:
+                tool_calls = [
+                    ToolCall(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        arguments=tc["function"].get("arguments", "{}"),
+                    )
+                    for tc in raw_tool_calls
+                ]
         except (KeyError, IndexError) as exc:
             raise InferenceError(
                 "Malformed response from model",
                 category=ErrorCategory.MODEL_ERROR,
                 raw=data,
             ) from exc
-
-        tool_calls: list[ToolCall] | None = None
-        raw_tool_calls = message.get("tool_calls")
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc["id"],
-                    name=tc["function"]["name"],
-                    arguments=tc["function"].get("arguments", "{}"),
-                )
-                for tc in raw_tool_calls
-            ]
 
         usage_data = data.get("usage", {})
         usage = TokenUsage(

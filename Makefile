@@ -60,7 +60,7 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 
 .PHONY: setup
-setup: install setup-gateway setup-secrets setup-sandbox ## One-time: deps + gateway + providers + sandbox
+setup: install setup-gateway setup-secrets setup-jira-provider setup-sandbox ## One-time: deps + gateway + providers + sandbox
 
 .PHONY: install
 install: ## Install the package and dev dependencies
