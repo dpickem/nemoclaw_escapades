@@ -20,6 +20,7 @@ import asyncio
 import os
 import sys
 
+from nemoclaw_escapades.config import DEFAULT_JIRA_URL
 from nemoclaw_escapades.tools.jira import JiraClient
 
 _PASS = "\033[32m✓\033[0m"
@@ -38,7 +39,10 @@ def _print_env() -> None:
 
 async def _run_checks() -> int:
     """Execute connectivity checks and return the failure count."""
-    client = JiraClient()
+    client = JiraClient(
+        base_url=os.environ.get("JIRA_URL", DEFAULT_JIRA_URL),
+        auth_header=os.environ.get("JIRA_AUTH", ""),
+    )
     failures = 0
     me: dict = {}
 
