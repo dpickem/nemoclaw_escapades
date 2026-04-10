@@ -66,7 +66,22 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
         root.addHandler(file_handler)
 
 
-def get_logger(component: str) -> logging.LoggerAdapter[logging.Logger]:
+class _MergingAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
+    """LoggerAdapter that merges caller ``extra`` with the adapter's own.
+
+    The stdlib ``LoggerAdapter.process()`` *replaces* the caller's
+    extra with ``self.extra``, silently discarding per-call fields
+    like ``tool`` or ``toolset``.  This subclass merges both dicts.
+    """
+
+    def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
+        extra: dict[str, Any] = dict(self.extra) if self.extra else {}
+        extra.update(kwargs.get("extra") or {})
+        kwargs["extra"] = extra
+        return msg, kwargs
+
+
+def get_logger(component: str) -> _MergingAdapter:
     """Return a logger adapter pre-bound with a component name."""
     logger = logging.getLogger(f"nemoclaw.{component}")
-    return logging.LoggerAdapter(logger, {"component": component})
+    return _MergingAdapter(logger, {"component": component})

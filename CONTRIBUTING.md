@@ -17,7 +17,7 @@ pip install -e ".[dev]"
 
 The project uses:
 
-- **Python 3.11+** (see `requires-python` in `pyproject.toml`)
+- **Python 3.13+** (see `requires-python` in `pyproject.toml`)
 - **Hatch** for builds, **pip** for editable installs
 - **slack-bolt** for the Slack connector
 - **httpx** / **aiohttp** for HTTP clients
