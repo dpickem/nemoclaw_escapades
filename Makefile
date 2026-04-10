@@ -44,9 +44,10 @@ GITLAB_PROVIDER     := gitlab-credentials
 GERRIT_PROVIDER     := gerrit-credentials
 CONFLUENCE_PROVIDER := confluence-credentials
 SLACK_USER_PROVIDER := slack-user-credentials
+GITHUB_PROVIDER     := github-credentials
 
 SERVICE_PROVIDERS := $(JIRA_PROVIDER) $(GITLAB_PROVIDER) $(GERRIT_PROVIDER) \
-                     $(CONFLUENCE_PROVIDER) $(SLACK_USER_PROVIDER)
+                     $(CONFLUENCE_PROVIDER) $(SLACK_USER_PROVIDER) $(GITHUB_PROVIDER)
 ALL_PROVIDERS     := $(INFERENCE_PROVIDER) $(SLACK_PROVIDER) $(SERVICE_PROVIDERS)
 
 # Python
@@ -158,6 +159,9 @@ setup-providers: .env ## Register all credential providers with the gateway
 			&& _reg $(SLACK_USER_PROVIDER) "Slack user" \
 				--credential "SLACK_USER_TOKEN=$(SLACK_USER_TOKEN)" \
 			|| _skip SLACK_USER_TOKEN "Slack user"; \
+		[ -n "$(GITHUB_TOKEN)" ] \
+			&& _reg $(GITHUB_PROVIDER) GitHub --credential "GITHUB_TOKEN=$(GITHUB_TOKEN)" \
+			|| _skip GITHUB_TOKEN GitHub; \
 	} || echo "⚠  openshell CLI not found — skipping provider registration."
 
 # Symlink docker/Dockerfile.orchestrator → ./Dockerfile so the build
