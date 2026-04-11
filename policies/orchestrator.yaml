@@ -8,6 +8,22 @@
 # Based on the NemoClaw OpenClaw sandbox policy:
 #   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 #
+# Defines what the orchestrator sandbox is allowed to do inside OpenShell.
+# The orchestrator and Slack connector run together in a single sandbox.
+#
+# Schema reference:
+#   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+# Based on the NemoClaw OpenClaw sandbox policy:
+#   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
+#
+# Defines what the orchestrator sandbox is allowed to do inside OpenShell.
+# The orchestrator and Slack connector run together in a single sandbox.
+#
+# Schema reference:
+#   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+# Based on the NemoClaw OpenClaw sandbox policy:
+#   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
+#
 # Quick guide:
 #   - "Static" fields (filesystem_policy, landlock, process) require sandbox
 #     recreation.
@@ -15,10 +31,25 @@
 #     openshell policy set orchestrator --policy policies/orchestrator.yaml
 #   - protocol: rest  — proxy intercepts HTTP, resolves credential
 #     placeholders, and enforces method/path rules.
-#   - access: full    — CONNECT tunnel (no interception).  Blocked for
-#     internal IPs — only use for external hosts like *.slack.com.
-#   - tls: terminate is DEPRECATED and should NOT be used (the proxy now
-#     handles TLS automatically for protocol: rest endpoints).
+#   - access: full    — permits CONNECT tunnels.  For internal hosts
+#     (RFC 1918), pair with allowed_ips to bypass SSRF protection.
+#   - allowed_ips     — CIDR list to exempt from the proxy's internal-IP
+#     block (SSRF protection).  Required for hosts on 10.x.x.x.
+#
+# Reference: https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+# SSRF docs: https://docs.nvidia.com/openshell/latest/security/best-practices#ssrf-protection
+
+# ---------------------------------------------------------------------------
+# YAML anchors — reusable definitions referenced with *alias below
+# ---------------------------------------------------------------------------
+
+# NVIDIA internal subnets that host GitLab, Gerrit, and related services.
+# Required because the OpenShell proxy blocks CONNECT to RFC 1918 IPs by
+# default (SSRF protection).  Scope these as narrowly as possible.
+_nvidia_internal_ips: &nvidia_internal_ips
+  - 10.120.176.0/24     # git-av (Gerrit)
+  - 10.120.180.0/24     # gitlab-master (primary)
+  - 10.120.189.0/24     # gitlab-master (secondary)
 
 version: 1
 
@@ -154,6 +185,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+        allowed_ips: *nvidia_internal_ips
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
@@ -166,6 +198,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+        allowed_ips: *nvidia_internal_ips
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
