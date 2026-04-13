@@ -144,29 +144,29 @@ setup-providers: .env ## Register all credential providers with the gateway
 			--credential "SLACK_BOT_TOKEN=$(SLACK_BOT_TOKEN)" \
 			--credential "SLACK_APP_TOKEN=$(SLACK_APP_TOKEN)"; \
 		\
-		[ -n "$(JIRA_AUTH)" ] \
-			&& _reg $(JIRA_PROVIDER) Jira --credential "JIRA_AUTH=$(JIRA_AUTH)" \
-			|| _skip JIRA_AUTH Jira; \
-		[ -n "$(GITLAB_TOKEN)" ] \
-			&& _reg $(GITLAB_PROVIDER) GitLab --credential "GITLAB_TOKEN=$(GITLAB_TOKEN)" \
-			|| _skip GITLAB_TOKEN GitLab; \
-		[ -n "$(GERRIT_USERNAME)" ] && [ -n "$(GERRIT_HTTP_PASSWORD)" ] \
-			&& _reg $(GERRIT_PROVIDER) Gerrit \
+		if [ -n "$(JIRA_AUTH)" ]; then \
+			_reg $(JIRA_PROVIDER) Jira --credential "JIRA_AUTH=$(JIRA_AUTH)"; \
+		else _skip JIRA_AUTH Jira; fi; \
+		if [ -n "$(GITLAB_TOKEN)" ]; then \
+			_reg $(GITLAB_PROVIDER) GitLab --credential "GITLAB_TOKEN=$(GITLAB_TOKEN)"; \
+		else _skip GITLAB_TOKEN GitLab; fi; \
+		if [ -n "$(GERRIT_USERNAME)" ] && [ -n "$(GERRIT_HTTP_PASSWORD)" ]; then \
+			_reg $(GERRIT_PROVIDER) Gerrit \
 				--credential "GERRIT_USERNAME=$(GERRIT_USERNAME)" \
-				--credential "GERRIT_HTTP_PASSWORD=$(GERRIT_HTTP_PASSWORD)" \
-			|| _skip "GERRIT_USERNAME/PASSWORD" Gerrit; \
-		[ -n "$(CONFLUENCE_USERNAME)" ] && [ -n "$(CONFLUENCE_API_TOKEN)" ] \
-			&& _reg $(CONFLUENCE_PROVIDER) Confluence \
+				--credential "GERRIT_HTTP_PASSWORD=$(GERRIT_HTTP_PASSWORD)"; \
+		else _skip "GERRIT_USERNAME/PASSWORD" Gerrit; fi; \
+		if [ -n "$(CONFLUENCE_USERNAME)" ] && [ -n "$(CONFLUENCE_API_TOKEN)" ]; then \
+			_reg $(CONFLUENCE_PROVIDER) Confluence \
 				--credential "CONFLUENCE_USERNAME=$(CONFLUENCE_USERNAME)" \
-				--credential "CONFLUENCE_API_TOKEN=$(CONFLUENCE_API_TOKEN)" \
-			|| _skip "CONFLUENCE credentials" Confluence; \
-		[ -n "$(SLACK_USER_TOKEN)" ] \
-			&& _reg $(SLACK_USER_PROVIDER) "Slack user" \
-				--credential "SLACK_USER_TOKEN=$(SLACK_USER_TOKEN)" \
-			|| _skip SLACK_USER_TOKEN "Slack user"; \
-		[ -n "$(GITHUB_TOKEN)" ] \
-			&& _reg $(GITHUB_PROVIDER) GitHub --credential "GITHUB_TOKEN=$(GITHUB_TOKEN)" \
-			|| _skip GITHUB_TOKEN GitHub; \
+				--credential "CONFLUENCE_API_TOKEN=$(CONFLUENCE_API_TOKEN)"; \
+		else _skip "CONFLUENCE credentials" Confluence; fi; \
+		if [ -n "$(SLACK_USER_TOKEN)" ]; then \
+			_reg $(SLACK_USER_PROVIDER) "Slack user" \
+				--credential "SLACK_USER_TOKEN=$(SLACK_USER_TOKEN)"; \
+		else _skip SLACK_USER_TOKEN "Slack user"; fi; \
+		if [ -n "$(GITHUB_TOKEN)" ]; then \
+			_reg $(GITHUB_PROVIDER) GitHub --credential "GITHUB_TOKEN=$(GITHUB_TOKEN)"; \
+		else _skip GITHUB_TOKEN GitHub; fi; \
 	} || echo "⚠  openshell CLI not found — skipping provider registration."
 
 .PHONY: gen-policy
