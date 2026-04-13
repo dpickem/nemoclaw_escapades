@@ -7,7 +7,10 @@
 > **Related:**
 > [Hermes Deep Dive §13](deep_dives/hermes_deep_dive.md#13--sub-agent-delegation) |
 > [OpenShell Deep Dive §5](deep_dives/openshell_deep_dive.md#5--request-flow) |
-> [Design Doc §3.1](../design.md#31--key-components)
+> [Design Doc §3.1](../design.md#31--key-components) |
+> [Audit DB Design](audit_db_design.md) |
+> [Agent Trace Design](agent_trace_design.md) |
+> [Inference Call Auditing](inference_call_auditing_design.md)
 
 ---
 
@@ -25,10 +28,13 @@
 10. [Communication Patterns](#10--communication-patterns)
 11. [Revised Coding + Review Loop](#11--revised-coding--review-loop)
 12. [Failure Modes & Recovery](#12--failure-modes--recovery)
-13. [Deployment](#13--deployment)
-14. [Coordinator Integration & Extended Message Types](#14--coordinator-integration--extended-message-types)
-15. [Comparison: File-Based vs NMB vs Hermes](#15--comparison-file-based-vs-nmb-vs-hermes)
-16. [Future: Upstream Contribution to OpenShell](#16--future-upstream-contribution-to-openshell)
+13. [Audit Bandwidth and Capacity Estimates](#13--audit-bandwidth-and-capacity-estimates)
+14. [Deployment](#14--deployment)
+15. [Coordinator Integration & Extended Message Types](#15--coordinator-integration--extended-message-types)
+16. [Comparison: File-Based vs NMB vs Hermes](#16--comparison-file-based-vs-nmb-vs-hermes)
+17. [Future: Upstream Contribution to OpenShell](#17--future-upstream-contribution-to-openshell)
+18. [Off-the-Shelf Library Evaluation](#18--off-the-shelf-library-evaluation)
+19. [Implementation Plan](#19--implementation-plan)
 
 ---
 
@@ -369,7 +375,7 @@ production hardness is straightforward — the client library API stays the same
 │  ┌──────────────────────────────────────────────────────────────────┐ │
 │  │  CREATE TABLE messages (                                         │ │
 │  │    id            TEXT PRIMARY KEY,   -- message UUID             │ │
-│  │    timestamp     REAL NOT NULL,      -- Unix epoch (ms)          │ │
+│  │    timestamp     REAL NOT NULL,      -- Unix epoch (seconds)     │ │
 │  │    op            TEXT NOT NULL,      -- send/request/reply/...   │ │
 │  │    from_sandbox  TEXT NOT NULL,      -- proxy-enforced identity  │ │
 │  │    to_sandbox    TEXT,               -- target (null for pub)    │ │
@@ -427,10 +433,10 @@ The broker runs as a systemd user service alongside the OpenShell gateway:
 ```bash
 # Start (managed by systemd or run manually)
 # Full payloads persisted to SQLite by default (feeds training flywheel)
-nmb-broker --port 9876 --audit-db ~/.nemoclaw/nmb/audit.db
+nmb-broker --port 9876 --audit-db ~/.nemoclaw/audit.db
 
 # Disable payload persistence if storage is a concern
-nmb-broker --port 9876 --audit-db ~/.nemoclaw/nmb/audit.db --no-audit-payloads
+nmb-broker --port 9876 --audit-db ~/.nemoclaw/audit.db --no-audit-payloads
 
 # Health check
 nmb-broker --health   # returns connected sandboxes, message stats, DB size
@@ -439,7 +445,7 @@ nmb-broker --health   # returns connected sandboxes, message stats, DB size
 nmb-broker --query "SELECT * FROM messages WHERE type='review.feedback' ORDER BY timestamp DESC LIMIT 10"
 
 # Export to JSONL (for external tooling or backup)
-nmb-broker --export-jsonl ~/.nemoclaw/nmb/audit_export.jsonl --since 2026-04-01
+nmb-broker --export-jsonl ~/.nemoclaw/audit_export.jsonl --since 2026-04-01
 ```
 
 ---
@@ -589,6 +595,28 @@ routes based on `op` and `to`; it does not inspect `type` or `payload`.
 | `review.feedback` | Structured review comments | `{ comments[], verdict: "approve"\|"request_changes" }` |
 | `review.lgtm` | Approval | `{ summary }` |
 
+### Audit (Sub-Agent → Orchestrator)
+
+| Type | Purpose | Payload |
+|------|---------|---------|
+| `audit.flush` | Batch of tool-call and inference-call records from a sub-agent | `{ tool_calls[], inference_calls[] }` |
+
+Sub-agents buffer audit records in memory and flush them to the orchestrator
+at round boundaries or on task completion.  The orchestrator writes them to
+the central audit DB.  See
+[Audit DB Design §7](audit_db_design.md#7--sub-agent-tool-call-auditing) and
+[Inference Call Auditing §4.2](inference_call_auditing_design.md#42--sub-agent-calls-nmb-batched-flush).
+
+### Policy (Orchestrator ↔ Sub-Agent)
+
+| Type | Purpose | Payload |
+|------|---------|---------|
+| `policy.request` | Orchestrator requests a policy change for a sandbox | `{ sandbox_id, endpoints[] }` |
+| `policy.updated` | Policy change applied | `{ sandbox_id, new_policy }` |
+| `policy.denied` | Policy change rejected | `{ sandbox_id, reason }` |
+
+See [Design M2 §6.3](design_m2.md#63--comms-nmb-channels-and-protocol-extensions).
+
 ### System
 
 | Type | Purpose | Payload |
@@ -596,6 +624,10 @@ routes based on `op` and `to`; it does not inspect `type` or `payload`.
 | `heartbeat` | Alive check (broker → sandbox) | `{ timestamp }` |
 | `sandbox.ready` | Sandbox initialization complete | `{ sandbox_id, capabilities[] }` |
 | `sandbox.shutdown` | Sandbox shutting down | `{ sandbox_id, reason }` |
+| `sandbox.spawn.request` | Orchestrator requests sandbox creation | `{ name, policy, role }` |
+| `sandbox.spawn.started` | Sandbox creation succeeded | `{ sandbox_id }` |
+| `sandbox.spawn.failed` | Sandbox creation failed | `{ name, error }` |
+| `sandbox.spawn.terminated` | Sandbox terminated | `{ sandbox_id, reason }` |
 
 ---
 
@@ -991,9 +1023,174 @@ async def send_to_sandbox(sandbox_name, message):
 
 ---
 
-## 13  Deployment
+## 13  Audit Bandwidth and Capacity Estimates
 
-### 13.1  Single-Host Deployment
+All three audit event types (NMB messages, tool calls, inference calls) flow
+through the same SQLite database and, for sub-agents, through the same NMB
+transport.  This section estimates per-component throughput to identify where
+saturation occurs first as the number of concurrent agents grows.
+
+### 13.1  Assumptions
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Average prompt payload | ~200 KB | 50k tokens × ~4 bytes/token ([Inference Call Auditing §6.3](inference_call_auditing_design.md#63--storage-estimates)) |
+| Average completion payload | ~2 KB | ~500 tokens |
+| Average tool-call response payload | ~4 KB | Typical Jira/GitLab JSON |
+| NMB message envelope overhead | ~0.5 KB | Wire-protocol metadata (id, op, from, to, type, timestamp) |
+| Inference rounds per session | **15** (range: 3–30) | Simple lookup: ~3. Orchestrator Q&A: ~5–8. Sub-agent coding task (read → edit → test → fix loop): ~15–30. 15 is a weighted average. |
+| Tool calls per inference round | 2 | Typical agent behaviour |
+| Sessions per day (single user) | 50 | Moderate interactive use |
+| NMB messages per session | 5 | task.assign + progress updates + task.complete |
+| Agent loop round time | ~3–5 s | Dominated by inference latency |
+| `audit.flush` frequency | Once per round | Recommended for payload-heavy mode |
+| Audit batch size | 100 rows | `DEFAULT_AUDIT_BATCH_SIZE` |
+| Audit queue depth | 10,000 items | `DEFAULT_AUDIT_QUEUE_SIZE` |
+| SQLite journal mode | WAL (Write-Ahead Logging) | Concurrent readers; single writer; `fsync` on commit |
+
+### 13.2  Per-Session Audit Volume
+
+| Event type | Count/session | Avg row size (with payloads) | Total/session |
+|-----------|---------------|------------------------------|---------------|
+| `inference_calls` | 15 | ~202 KB (200 KB request + 2 KB response + metadata) | ~3,030 KB |
+| `tool_calls` | 30 | ~5 KB (4 KB response + metadata) | ~150 KB |
+| `messages` (NMB) | 5 | ~1 KB (envelope + small payload) | ~5 KB |
+| **Total** | **50 rows** | | **~3,185 KB (~3.1 MB)** |
+
+Inference call payloads dominate storage at ~95% of total volume.  Without
+payloads (`AUDIT_PERSIST_PAYLOADS=false`), the per-session total drops to
+~12 KB (metadata only).
+
+### 13.3  Daily and Monthly Storage (Single User)
+
+| Scenario | Daily (50 sessions) | Monthly | Yearly |
+|----------|--------------------:|--------:|-------:|
+| **Payloads enabled** (default) | ~155 MB | ~4.7 GB | ~56 GB |
+| **Payloads disabled** | ~600 KB | ~18 MB | ~215 MB |
+
+At ~56 GB/year with payloads, the training flywheel pipeline must export and
+purge old data periodically (quarterly or monthly).  The PVC-backed
+`/sandbox/audit.db` in OpenShell typically provides 10–50 GB, so without
+purging the DB fills up in 2–10 months.  SQLite with WAL mode handles
+multi-GB databases without issue — the constraint is disk capacity, not
+database performance.
+
+### 13.4  NMB Transport Bandwidth (Sub-Agent `audit.flush`)
+
+When sub-agents flush audit records over NMB, the `audit.flush` message
+carries both tool-call and inference-call records for that round.
+
+| Metric | Per round | Per session (15 rounds) |
+|--------|----------:|------------------------:|
+| Inference payload (1 row × 202 KB) | ~202 KB | ~3,030 KB |
+| Tool-call records (2 rows × 5 KB) | ~10 KB | ~150 KB |
+| NMB envelope overhead | ~0.5 KB | ~7.5 KB |
+| **Total `audit.flush` size** | **~213 KB** | **~3,188 KB (~3.1 MB)** |
+
+With gzip compression (typical 5–10× ratio on JSON text), per-round flush
+drops to ~25–40 KB, well within the 10 MB NMB message limit.
+
+**Bandwidth for N concurrent sub-agents:**
+
+Each sub-agent in an active round sends one `audit.flush` per round (~213 KB
+uncompressed, ~35 KB compressed).  Rounds take ~3–5 s (dominated by inference
+latency), so each agent produces audit traffic at ~7–12 KB/s compressed.
+
+| Concurrent agents | Uncompressed | Compressed (~6×) | Notes |
+|------------------:|-----------:|-----------:|-------|
+| 1 | ~50 KB/s | ~8 KB/s | Single coding agent |
+| 5 | ~250 KB/s | ~42 KB/s | Orchestrator + 4 sub-agents |
+| 10 | ~500 KB/s | ~83 KB/s | Parallel coding + review |
+| 50 | ~2.5 MB/s | ~420 KB/s | Stress scenario |
+| 100 | ~5 MB/s | ~830 KB/s | Extreme; approaching broker limits |
+
+**Conclusion:** Audit NMB bandwidth is negligible for typical deployments
+(1–10 agents).  Even at 50 agents, compressed audit traffic is under 1 MB/s
+— well within localhost WebSocket capacity.
+
+### 13.5  SQLite Write Throughput
+
+The audit DB uses a background batch writer: items are enqueued without
+blocking the message-routing or agent-loop hot paths, then committed in
+batches of up to 100 rows per transaction.
+
+**Throughput characteristics (WAL mode, single writer):**
+
+| Row type | Avg row size | Estimated inserts/s | Bottleneck |
+|----------|-------------|--------------------:|------------|
+| `messages` (metadata only) | ~1 KB | 5,000–10,000 | CPU (JSON serialization) |
+| `tool_calls` (with payload) | ~5 KB | 3,000–8,000 | CPU + minor I/O |
+| `inference_calls` (with payload) | ~202 KB | 200–500 | **Disk I/O** (sequential writes) |
+
+Large inference payloads are the constraint.  At 200 KB per row, a 100-row
+batch is ~20 MB — a single `fsync` of WAL frames.  On a typical SSD this
+takes 10–50 ms, limiting sustained throughput to ~500 large-payload inserts/s.
+
+**Mapping to agent capacity:**
+
+| Concurrent agents | Inference rows/s | Tool-call rows/s | Total rows/s | Within SQLite budget? |
+|------------------:|------------------:|-----------------:|-------------:|:---------------------:|
+| 1 | ~1 | ~2 | ~3 | Yes (trivially) |
+| 5 | ~5 | ~10 | ~15 | Yes |
+| 10 | ~10 | ~20 | ~30 | Yes |
+| 50 | ~50 | ~100 | ~150 | Yes |
+| 100 | ~100 | ~200 | ~300 | Yes, but approaching I/O budget |
+| 200+ | ~200+ | ~400+ | ~600+ | **Risk of queue backup** |
+
+At 100 concurrent agents each producing ~1 inference call every 3–5 s, the
+DB sees ~100 large-payload inserts/s — ~50% of the I/O budget.  The 10,000-
+deep write queue provides ~30 s of buffering at this rate if a transient
+I/O stall occurs.
+
+### 13.6  Broker CPU and Memory
+
+| Component | Memory per agent | Notes |
+|-----------|----------------:|-------|
+| WebSocket connection | ~50 KB | `websockets` library overhead |
+| Listen queue (1,000 items) | ~1 MB | Per-connection delivery buffer |
+| Channel subscriptions | negligible | Set of references |
+| Pending requests (100 max) | ~100 KB | Per-sandbox cap |
+| **Per-agent total** | **~1.2 MB** | |
+
+| Concurrent agents | Broker memory (connections) | Audit queue memory | Total |
+|------------------:|---------------------------:|-------------------:|------:|
+| 10 | ~12 MB | ~20 MB | ~32 MB |
+| 50 | ~60 MB | ~50 MB | ~110 MB |
+| 100 | ~120 MB | ~100 MB | ~220 MB |
+
+CPU is dominated by JSON serialization of audit payloads.  At 100 agents the
+broker serializes ~100 inference payloads/s (~20 MB/s of JSON).  Python's
+`json.dumps` handles ~100 MB/s on a single core, so this is ~20% of one core.
+
+### 13.7  Saturation Summary
+
+| Resource | Saturates at | Limiting factor | Mitigation |
+|----------|-------------|-----------------|------------|
+| **NMB WebSocket throughput** | ~200+ agents | Message routing CPU (asyncio event loop) | NATS migration (§17) |
+| **SQLite write I/O** | ~200+ agents | Large-payload `fsync` throughput | Payload offload to JSONL sidecar; async I/O |
+| **Audit queue depth** | Transient: 10,000 items (~30 s buffer at 300 rows/s) | Sustained write rate > SQLite throughput | Increase queue; drop oldest audit records (routing unaffected) |
+| **Broker memory** | ~500+ agents | Per-connection WebSocket buffers | Unlikely to be reached before other limits |
+| **Disk storage** | ~2–10 months at 50 sessions/day (10–50 GB PVC) | Inference payloads (~56 GB/year) | Training flywheel export + quarterly purge |
+
+**Bottom line:** The architecture comfortably supports **50–100 concurrent
+agents** on a single host with payload persistence enabled.  The first
+bottleneck is SQLite write I/O for large inference payloads.  For deployments
+beyond 100 agents, the recommended mitigations are:
+
+1. **Payload offload** — write inference payloads to a JSONL sidecar file
+   instead of SQLite; keep only metadata in the DB.
+2. **NATS migration** — replace the asyncio WebSocket broker with NATS for
+   higher message throughput and built-in clustering.
+3. **Sharded audit** — partition the audit DB by time range or session prefix.
+
+None of these are needed for the expected M2 deployment (1 orchestrator +
+1–5 sub-agents).
+
+---
+
+## 14  Deployment
+
+### 14.1  Single-Host Deployment
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -1021,18 +1218,21 @@ async def send_to_sandbox(sandbox_name, message):
 │                                                                       │
 │  Files:                                                               │
 │  ~/.nemoclaw/                                                         │
+│  ├── audit.db                 # shared audit DB (SQLite, WAL mode,    │
+│  │                            #   full payloads, retained indefinitely │
+│  │                            #   for training flywheel). Written by   │
+│  │                            #   both the broker (messages/connections)│
+│  │                            #   and the orchestrator (tool_calls,    │
+│  │                            #   inference_calls). See Audit DB Design│
 │  ├── nmb/                                                             │
 │  │   ├── broker.yaml          # broker config (port, limits, etc.)    │
-│  │   ├── audit.db             # audit log (SQLite, full payloads,     │
-│  │   │                        #   WAL mode, FTS5 indexed, retained    │
-│  │   │                        #   indefinitely for training flywheel) │
 │  │   └── broker.pid           # PID file for systemd                  │
 │  └── policies/                                                        │
 │      └── nmb-enabled.yaml     # reusable policy for NMB access        │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### 13.2  Multi-Host Deployment
+### 14.2  Multi-Host Deployment
 
 When sandboxes run on different machines (e.g., orchestrator on Brev, coding
 agent on DGX Spark, review agent on a VPS), the broker must be reachable from
@@ -1096,7 +1296,7 @@ orchestrator is always-on and talks to every sandbox).
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### 13.3  Multi-Host Authentication
+### 14.3  Multi-Host Authentication
 
 When the broker is network-reachable, sandbox identity can no longer rely
 solely on the OpenShell proxy's `X-Sandbox-ID` header (a remote attacker could
@@ -1112,7 +1312,7 @@ In all modes, `X-Sandbox-ID` is still the application-level identity (the
 broker uses it for routing). The auth mode just establishes whether the
 connection is trustworthy enough to accept that header.
 
-### 13.4  Broker Discovery on Remote Hosts
+### 14.4  Broker Discovery on Remote Hosts
 
 Remote sandboxes need to know the broker's address. Two approaches:
 
@@ -1142,7 +1342,7 @@ OpenShell gateway peering (not yet available in alpha).
 
 ---
 
-## 14  Coordinator Integration & Extended Message Types
+## 15  Coordinator Integration & Extended Message Types
 
 This section was added after analyzing Claude Code's multi-agent orchestration
 (see [Claude Code Deep Dive §19](deep_dives/claude_code_deep_dive.md#19--sub-agents-skills--coordinator-mode)).
@@ -1151,7 +1351,7 @@ solve the same coordination problem as NMB but without cross-sandbox isolation.
 NMB provides the transport; these extensions add the orchestration logic that
 rides on top.
 
-### 14.1  New Message Types
+### 15.1  New Message Types
 
 #### Session fork (adopted from Claude Code's `FORK_SUBAGENT`)
 
@@ -1188,7 +1388,7 @@ These messages are routed to the orchestrator, which owns the task store
 Sub-agents can query and update their own tasks without direct database
 access.
 
-### 14.2  Coordinator-Aware Tool Surface
+### 15.2  Coordinator-Aware Tool Surface
 
 When the orchestrator operates in coordinator mode, it selectively restricts
 which tools each sub-agent sandbox receives. The tool surface is declared in
@@ -1210,7 +1410,7 @@ the `task.assign` or `task.fork` payload:
 The sub-agent's sandbox policy enforces this at the OpenShell level — even if
 the agent tries to use a tool not in its `tool_surface`, the sandbox blocks it.
 
-### 14.3  Permission Scope Enforcement
+### 15.3  Permission Scope Enforcement
 
 Claude Code has a known security gap: sub-agents can widen permissions beyond
 their parent's scope. NMB + OpenShell solves this by construction:
@@ -1237,7 +1437,7 @@ network_policies:
           - deny:  { path: "/send/task.fork" }      # can't fork sessions
 ```
 
-### 14.4  Updated Comparison: NMB vs Claude Code Multi-Agent
+### 15.4  Updated Comparison: NMB vs Claude Code Multi-Agent
 
 | Dimension | Claude Code | NMB |
 |-----------|-------------|-----|
@@ -1254,7 +1454,7 @@ network_policies:
 
 ---
 
-## 15  Comparison: File-Based vs NMB vs Hermes
+## 16  Comparison: File-Based vs NMB vs Hermes
 
 | Dimension | File-Based (current) | NMB (proposed) | Hermes `sessions_send` |
 |-----------|---------------------|----------------|------------------------|
@@ -1273,7 +1473,7 @@ network_policies:
 
 ---
 
-## 16  Future: Upstream Contribution to OpenShell
+## 17  Future: Upstream Contribution to OpenShell
 
 If NMB proves valuable, the natural evolution is to propose the
 `messages.local` pattern as a first-class OpenShell feature — similar to how
@@ -1295,7 +1495,7 @@ inter-sandbox messaging a standard OpenShell capability.
 
 ---
 
-## 17  Off-the-Shelf Library Evaluation
+## 18  Off-the-Shelf Library Evaluation
 
 Before building a custom broker we evaluated several existing libraries for
 async cross-host agent communication. The NMB design has specific requirements
@@ -1308,7 +1508,7 @@ that constrain library choice:
 - **Custom broker logic**: routing, pending-request tracking, per-sandbox limits
 - **Tiny footprint**: runs alongside the OpenShell gateway on a single host
 
-### 17.1  Library Comparison
+### 18.1  Library Comparison
 
 | Library | Transport | Messaging Model | Verdict |
 |---------|-----------|-----------------|---------|
@@ -1319,7 +1519,7 @@ that constrain library choice:
 | **FastMCP** | HTTP | OpenAPI-to-MCP bridge. Not relevant to inter-agent messaging. | **Not applicable.** |
 | **async-openai** | HTTP | OpenAI API client. Not relevant. | **Not applicable.** |
 
-### 17.2  Per-Library Analysis
+### 18.2  Per-Library Analysis
 
 #### Why each feature is required
 
@@ -1399,7 +1599,7 @@ messaging problem.
 respectively.  Neither addresses inter-agent messaging, message routing, or
 sandbox coordination.
 
-### 17.3  Decision
+### 18.3  Decision
 
 Build the custom asyncio WebSocket broker as specified. The implementation is
 intentionally minimal (~500 lines for the broker, ~300 for the client). The
@@ -1412,9 +1612,9 @@ protocol. This is a thin adapter on top of NMB, not a replacement.
 
 ---
 
-## 18  Implementation Plan
+## 19  Implementation Plan
 
-### 18.1  Architecture Overview
+### 19.1  Architecture Overview
 
 ```mermaid
 flowchart TB
@@ -1448,7 +1648,7 @@ flowchart TB
   MsgRouter --> AuditDB
 ```
 
-### 18.2  Package Layout
+### 19.2  Package Layout
 
 ```
 src/nemoclaw_escapades/nmb/
@@ -1473,7 +1673,7 @@ Supporting files: `policies/nmb-enabled.yaml` (OpenShell policy template),
 `pyproject.toml` (dependencies + `nmb-client` entry point),
 `Makefile` (`run-broker` and `typecheck` targets).
 
-### 18.3  Dependencies
+### 19.3  Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
@@ -1481,7 +1681,7 @@ Supporting files: `policies/nmb-enabled.yaml` (OpenShell policy template),
 | `aiosqlite` | `>=0.20.0` | Async SQLite for audit DB |
 | `alembic` | `>=1.13.0` | DB migrations for audit schema |
 
-### 18.4  Build Phases
+### 19.4  Build Phases
 
 **Phase 1 — Wire protocol types** (`nmb/models.py`):
 
@@ -1515,8 +1715,8 @@ Supporting files: `policies/nmb-enabled.yaml` (OpenShell policy template),
   management; publish → fan-out; stream → forward
 - Identity enforcement: overwrite `from_sandbox` on every inbound frame
 - Disconnect: unregister, publish `sandbox.shutdown`, expire pending
-- `__main__` entry point: `--port`, `--audit-db`, `--health`, `--query`,
-  `--export-jsonl`
+- `__main__` entry point: `--port`, `--audit-db` (default `~/.nemoclaw/audit.db`),
+  `--health`, `--query`, `--export-jsonl`
 
 **Phase 4 — Async client** (`nmb/client.py`):
 
@@ -1571,10 +1771,10 @@ Supporting files: `policies/nmb-enabled.yaml` (OpenShell policy template),
 - `policies/nmb-enabled.yaml` — OpenShell policy template
 - `Makefile`: `run-broker` and `typecheck` targets
 
-### 18.5  Deferred (not in v1)
+### 19.5  Deferred (not in v1)
 
 - Multi-host TLS/auth (sections 3.2–3.4, 13.2–13.4)
-- Coordinator extensions (section 14: `task.fork`, `peers.list`, task CRUD)
+- Coordinator extensions (section 15: `task.fork`, `peers.list`, task CRUD)
 - Systemd service files
 - Integration with orchestrator `main.py` (separate PR)
 

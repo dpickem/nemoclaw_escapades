@@ -45,7 +45,7 @@ make -k test-services-sandbox  # test all tools inside the sandbox
 - [NMB Integration Tests](docs/nmb_integration_tests_design.md) — multi-sandbox
   test harness: PolicyBroker with per-sandbox egress/ingress/channel/op
   enforcement, IntegrationHarness lifecycle manager, 41 tests across 7 files
-- [nv-tools Integration](docs/nv_tools_integration_design.md) — Jira,
+- [nv-tools Integration (abandoned)](docs/abandoned/nv_tools_integration_design.md) — Jira,
   Confluence, Slack, GitLab, Gerrit access from inside OpenShell sandboxes;
   stub for offline testing, write-approval gate, host-side token server for
   OAuth credential isolation

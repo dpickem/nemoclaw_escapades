@@ -13,6 +13,10 @@
 > schema level instead of parsing CLI output. The design below is kept
 > for historical context only.
 >
+> **Archive merge note:** The duplicate copy at
+> `docs/nv_tools_integration_design.md` was merged into this canonical
+> archived location and removed.
+>
 > **Related:**
 > [Orchestrator Design §5](orchestrator_design.md#5--tool-system) |
 > [Orchestrator Design §7](orchestrator_design.md#7--permission--approval-system) |
