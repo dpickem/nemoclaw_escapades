@@ -34,7 +34,9 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 
+from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
 from nemoclaw_escapades.config import load_config
 from nemoclaw_escapades.connectors.slack import SlackConnector
@@ -77,7 +79,16 @@ async def main() -> None:
     else:
         tools = None
 
-    orchestrator = Orchestrator(backend, config.orchestrator, tools=tools)
+    # ── Audit DB ──────────────────────────────────────────────────
+    audit: AuditDB | None = None
+    if config.audit.enabled:
+        audit_path = str(Path(config.audit.db_path).expanduser())
+        audit = AuditDB(audit_path, persist_payloads=config.audit.persist_payloads)
+        await audit.open()
+        await audit.start_background_writer()
+        logger.info("Audit DB opened", extra={"path": audit_path})
+
+    orchestrator = Orchestrator(backend, config.orchestrator, tools=tools, audit=audit)
     connector = SlackConnector(
         handler=orchestrator.handle,
         bot_token=config.slack.bot_token,
@@ -110,6 +121,10 @@ async def main() -> None:
     finally:
         logger.info("Shutting down...")
         await connector.stop()
+        if audit:
+            await audit.stop_background_writer()
+            await audit.close()
+            logger.info("Audit DB closed")
         await backend.close()
         logger.info("Shutdown complete")
 

@@ -278,6 +278,30 @@ class SlackSearchConfig:
 
 
 @dataclass
+class AuditConfig:
+    """Configuration for the SQLite audit database.
+
+    The audit DB records every tool invocation (service, args, result,
+    latency, approval status) for operational debugging and training-data
+    extraction.
+
+    In the sandbox the DB lives on the ``/sandbox`` PVC (persistent across
+    gateway restarts with OpenShell >= 0.0.22).  Locally it defaults to
+    ``~/.nemoclaw/audit.db``.
+
+    Attributes:
+        enabled: Whether audit logging is active.
+        db_path: Filesystem path to the SQLite database file.
+        persist_payloads: Store full JSON request/response payloads.
+            Set to ``False`` to save disk while keeping metadata.
+    """
+
+    enabled: bool = True
+    db_path: str = DEFAULT_AUDIT_DB_PATH
+    persist_payloads: bool = True
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration aggregating all sub-configs.
 
@@ -286,6 +310,7 @@ class AppConfig:
         inference: Inference Hub connection parameters.
         orchestrator: Agent loop parameters.
         log: Logging settings.
+        audit: Audit database settings.
         jira: Jira REST integration settings.
         gitlab: GitLab REST integration settings.
         gerrit: Gerrit REST integration settings.
@@ -297,6 +322,7 @@ class AppConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
     jira: JiraConfig = field(default_factory=JiraConfig)
     gitlab: GitLabConfig = field(default_factory=GitLabConfig)
     gerrit: GerritConfig = field(default_factory=GerritConfig)
@@ -374,6 +400,15 @@ def load_config() -> AppConfig:
         log=LogConfig(
             level=os.environ.get("LOG_LEVEL", DEFAULT_LOG_LEVEL),
             log_file=os.environ.get("LOG_FILE"),
+        ),
+        audit=AuditConfig(
+            enabled=os.environ.get("AUDIT_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            db_path=os.environ.get(
+                "AUDIT_DB_PATH",
+                "/sandbox/audit.db" if in_sandbox else DEFAULT_AUDIT_DB_PATH,
+            ),
+            persist_payloads=os.environ.get("AUDIT_PERSIST_PAYLOADS", "true").lower()
+            in _TRUTHY_VALUES,
         ),
         jira=JiraConfig(
             enabled=os.environ.get("JIRA_ENABLED", "true").lower() in _TRUTHY_VALUES,
