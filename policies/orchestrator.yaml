@@ -3,53 +3,30 @@
 # Defines what the orchestrator sandbox is allowed to do inside OpenShell.
 # The orchestrator and Slack connector run together in a single sandbox.
 #
-# Schema reference:
-#   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
-# Based on the NemoClaw OpenClaw sandbox policy:
-#   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
-#
-# Defines what the orchestrator sandbox is allowed to do inside OpenShell.
-# The orchestrator and Slack connector run together in a single sandbox.
+# This is the BASE policy committed to the repo.  It does NOT contain
+# allowed_ips for internal services (those are secrets).
 #
 # Schema reference:
 #   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
 # Based on the NemoClaw OpenClaw sandbox policy:
 #   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 #
-# Defines what the orchestrator sandbox is allowed to do inside OpenShell.
-# The orchestrator and Slack connector run together in a single sandbox.
-#
-# Schema reference:
-#   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
-# Based on the NemoClaw OpenClaw sandbox policy:
-#   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
+# To generate the resolved policy with allowed_ips from .env:
+#   make gen-policy        # writes policies/orchestrator.resolved.yaml
+#   make setup-sandbox     # runs gen-policy automatically
 #
 # Quick guide:
 #   - "Static" fields (filesystem_policy, landlock, process) require sandbox
 #     recreation.
 #   - "Dynamic" fields (network_policies) can be hot-reloaded:
-#     openshell policy set orchestrator --policy policies/orchestrator.yaml
+#     openshell policy set orchestrator --policy policies/orchestrator.resolved.yaml
 #   - protocol: rest  — proxy intercepts HTTP, resolves credential
 #     placeholders, and enforces method/path rules.
 #   - access: full    — permits CONNECT tunnels.  For internal hosts
 #     (RFC 1918), pair with allowed_ips to bypass SSRF protection.
-#   - allowed_ips     — CIDR list to exempt from the proxy's internal-IP
-#     block (SSRF protection).  Required for hosts on 10.x.x.x.
 #
 # Reference: https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
 # SSRF docs: https://docs.nvidia.com/openshell/latest/security/best-practices#ssrf-protection
-
-# ---------------------------------------------------------------------------
-# YAML anchors — reusable definitions referenced with *alias below
-# ---------------------------------------------------------------------------
-
-# NVIDIA internal subnets that host GitLab, Gerrit, and related services.
-# Required because the OpenShell proxy blocks CONNECT to RFC 1918 IPs by
-# default (SSRF protection).  Scope these as narrowly as possible.
-_nvidia_internal_ips: &nvidia_internal_ips
-  - 10.120.176.0/24     # git-av (Gerrit)
-  - 10.120.180.0/24     # gitlab-master (primary)
-  - 10.120.189.0/24     # gitlab-master (secondary)
 
 version: 1
 
@@ -70,6 +47,7 @@ filesystem_policy:
     - /tmp
     - /dev/null
     - /app/.config
+    - /sandbox          # PVC-backed persistent storage (OpenShell >= 0.0.22)
 
 # ---------------------------------------------------------------------------
 # Landlock (Static)
@@ -140,11 +118,9 @@ network_policies:
   # -----------------------------------------------------------------------
   # Service API endpoints
   #
-  # Known limitation: OpenShell blocks CONNECT tunnels to RFC 1918
-  # addresses (10.x.x.x).  Services behind Akamai/CDN (Jira, Confluence)
-  # resolve to public IPs and work.  Purely internal services (GitLab at
-  # 10.120.x.x, Gerrit at 10.120.x.x) are blocked in the sandbox.
-  # They work fine via `make run-local-dev` (no proxy).
+  # Internal hosts (GitLab, Gerrit) resolve to RFC 1918 IPs.  The proxy
+  # blocks these by default (SSRF protection).  The gen_policy.py script
+  # adds allowed_ips from .env to the resolved policy file.
   # -----------------------------------------------------------------------
 
   jira:
@@ -185,7 +161,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
-        allowed_ips: *nvidia_internal_ips
+        # allowed_ips: injected by gen_policy.py from ALLOWED_IPS in .env
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
@@ -198,7 +174,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
-        allowed_ips: *nvidia_internal_ips
+        # allowed_ips: injected by gen_policy.py from ALLOWED_IPS in .env
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
