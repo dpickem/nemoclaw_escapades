@@ -30,7 +30,8 @@ DOCKERFILE := docker/Dockerfile.orchestrator
 GATEWAY_NAME      := openshell
 GATEWAY_CONTAINER := openshell-cluster-$(GATEWAY_NAME)
 SANDBOX_NAME      := orchestrator
-POLICY            := policies/orchestrator.yaml
+POLICY_BASE       := policies/orchestrator.yaml
+POLICY            := policies/orchestrator.resolved.yaml
 
 # Core providers (always attached to the sandbox)
 INFERENCE_PROVIDER := inference-hub
@@ -53,7 +54,11 @@ ALL_PROVIDERS     := $(INFERENCE_PROVIDER) $(SLACK_PROVIDER) $(SERVICE_PROVIDERS
 # Python
 MAIN_MODULE   := nemoclaw_escapades.main
 BROKER_MODULE := nemoclaw_escapades.nmb.broker
-AUDIT_DB      := .audit.db
+
+# Audit DB paths — sandbox uses PVC-backed /sandbox (OpenShell >= 0.0.22)
+AUDIT_DB_LOCAL    := $(HOME)/.nemoclaw/audit.db
+AUDIT_DB_SANDBOX  := /sandbox/audit.db
+AUDIT_SYNC_INTERVAL := 60
 
 # SSH into the running sandbox
 SSH_CMD := ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -164,12 +169,24 @@ setup-providers: .env ## Register all credential providers with the gateway
 			|| _skip GITHUB_TOKEN GitHub; \
 	} || echo "⚠  openshell CLI not found — skipping provider registration."
 
+.PHONY: gen-policy
+gen-policy: .env ## Generate resolved policy with allowed_ips from .env
+	@PYTHONPATH=src python scripts/gen_policy.py
+
 # Symlink docker/Dockerfile.orchestrator → ./Dockerfile so the build
 # context is the project root.  Cleaned up immediately after.
+# Before destroying the old sandbox, save the audit DB if it exists.
 .PHONY: setup-sandbox
-setup-sandbox: ## Build image, create sandbox, and start the app inside it
+setup-sandbox: gen-policy ## Build image, create sandbox, and start the app inside it
 	@echo "Creating orchestrator sandbox..."
 	@command -v openshell >/dev/null 2>&1 && { \
+		if openshell sandbox get $(SANDBOX_NAME) >/dev/null 2>&1; then \
+			echo "  Saving audit DB before sandbox recreation..."; \
+			mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"; \
+			openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) 2>/dev/null \
+				&& echo "  ✓ Audit DB saved to $(AUDIT_DB_LOCAL)" \
+				|| echo "  (no audit DB to save)"; \
+		fi; \
 		openshell sandbox delete $(SANDBOX_NAME) 2>/dev/null || true; \
 		ln -sf $(DOCKERFILE) Dockerfile; \
 		SVC_FLAGS=""; \
@@ -203,7 +220,7 @@ run-local-sandbox: setup-gateway setup-providers setup-sandbox ## (Re)create and
 
 .PHONY: run-broker
 run-broker: ## Run the NMB broker locally
-	PYTHONPATH=src python -m $(BROKER_MODULE) --audit-db $(AUDIT_DB)
+	PYTHONPATH=src python -m $(BROKER_MODULE) --audit-db $(AUDIT_DB_LOCAL)
 
 # ---------------------------------------------------------------------------
 # Build
@@ -292,6 +309,52 @@ status: ## Print sandbox and provider status
 	} || echo "openshell not installed"
 
 # ---------------------------------------------------------------------------
+# Audit DB
+# ---------------------------------------------------------------------------
+
+.PHONY: audit-download
+audit-download: ## Download the audit DB from the sandbox to the host
+	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
+	@openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) \
+		&& echo "✓ Downloaded to $(AUDIT_DB_LOCAL)"
+
+.PHONY: audit-stats
+audit-stats: ## Print audit DB summary (row counts, last entries)
+	@[ -f "$(AUDIT_DB_LOCAL)" ] || { echo "No audit DB at $(AUDIT_DB_LOCAL). Run: make audit-download"; exit 1; }
+	@echo "=== Tool calls ===" && \
+		sqlite3 "$(AUDIT_DB_LOCAL)" "SELECT COUNT(*) AS total, SUM(success) AS ok, COUNT(*)-SUM(success) AS err FROM tool_calls" && \
+		echo "" && echo "=== Last 5 tool calls ===" && \
+		sqlite3 -header -column "$(AUDIT_DB_LOCAL)" \
+			"SELECT datetime(timestamp,'unixepoch','localtime') AS time, service, command, duration_ms, CASE success WHEN 1 THEN 'ok' ELSE 'ERR' END AS status FROM tool_calls ORDER BY timestamp DESC LIMIT 5"
+
+.PHONY: audit-query
+audit-query: ## Run a SQL query against the local audit DB (SQL="SELECT ...")
+	@[ -f "$(AUDIT_DB_LOCAL)" ] || { echo "No audit DB at $(AUDIT_DB_LOCAL). Run: make audit-download"; exit 1; }
+	@sqlite3 -header -column "$(AUDIT_DB_LOCAL)" "$(SQL)"
+
+.PHONY: audit-export
+audit-export: ## Export tool calls to JSONL (writes to audit_tool_calls.jsonl)
+	@[ -f "$(AUDIT_DB_LOCAL)" ] || { echo "No audit DB at $(AUDIT_DB_LOCAL). Run: make audit-download"; exit 1; }
+	@PYTHONPATH=src python -c "\
+	import asyncio; from nemoclaw_escapades.audit.db import AuditDB; \
+	async def _e(): \
+	    db = AuditDB('$(AUDIT_DB_LOCAL)'); await db.open(); \
+	    n = await db.export_tool_calls_jsonl('audit_tool_calls.jsonl'); await db.close(); \
+	    print(f'Exported {n} rows to audit_tool_calls.jsonl'); \
+	asyncio.run(_e())"
+
+.PHONY: audit-sync
+audit-sync: ## Background loop: download audit DB every $(AUDIT_SYNC_INTERVAL)s
+	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
+	@echo "Syncing audit DB every $(AUDIT_SYNC_INTERVAL)s  (Ctrl+C to stop)"
+	@while true; do \
+		openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) 2>/dev/null \
+			&& echo "$$(date '+%H:%M:%S') ✓ synced" \
+			|| echo "$$(date '+%H:%M:%S') · sandbox not ready"; \
+		sleep $(AUDIT_SYNC_INTERVAL); \
+	done
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 
@@ -306,8 +369,15 @@ stop-all: ## Delete ALL sandboxes in the gateway
 	} || echo "⚠  openshell CLI not found."
 
 .PHONY: clean
-clean: ## Delete sandbox, providers, and local image
+clean: ## Delete sandbox, providers, and local image (saves audit DB first)
 	@command -v openshell >/dev/null 2>&1 && { \
+		if openshell sandbox get $(SANDBOX_NAME) >/dev/null 2>&1; then \
+			echo "Saving audit DB before cleanup..."; \
+			mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"; \
+			openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) 2>/dev/null \
+				&& echo "✓ Audit DB saved to $(AUDIT_DB_LOCAL)" \
+				|| echo "(no audit DB to save)"; \
+		fi; \
 		openshell sandbox delete $(SANDBOX_NAME) 2>/dev/null || true; \
 		for p in $(ALL_PROVIDERS); do \
 			openshell provider delete "$$p" >/dev/null 2>&1 || true; \
