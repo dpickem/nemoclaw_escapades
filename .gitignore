@@ -191,6 +191,9 @@ cython_debug/
 # Temporary root Dockerfile symlink created by `make setup-sandbox`
 /Dockerfile
 
+# Generated policy with secrets (allowed_ips from .env)
+policies/orchestrator.resolved.yaml
+
 # Ruff stuff:
 .ruff_cache/
 

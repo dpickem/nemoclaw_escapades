@@ -71,6 +71,21 @@ DEFAULT_AUDIT_BATCH_SIZE: int = 100
 DEFAULT_JIRA_URL: str = "https://jirasw.nvidia.com"
 DEFAULT_JIRA_AUTH_ENV_VAR: str = "JIRA_AUTH"
 
+# ── GitLab tool defaults ─────────────────────────────────────────────
+
+DEFAULT_GITLAB_URL: str = "https://gitlab-master.nvidia.com"
+
+# ── Gerrit tool defaults ─────────────────────────────────────────────
+
+DEFAULT_GERRIT_URL: str = "https://git-av.nvidia.com/r/a"
+
+# ── Confluence tool defaults ─────────────────────────────────────────
+
+DEFAULT_CONFLUENCE_URL: str = "https://nvidia.atlassian.net/wiki"
+
+# ── Slack search tool defaults ───────────────────────────────────────
+# (user-token based search/history — separate from the bot connector)
+
 # ── Misc ─────────────────────────────────────────────────────────────
 
 _TRUTHY_VALUES: frozenset[str] = frozenset({"true", "1", "yes"})
@@ -191,6 +206,102 @@ class JiraConfig:
 
 
 @dataclass
+class GitLabConfig:
+    """Configuration for the GitLab REST API integration.
+
+    Uses ``Authorization: Bearer <PAT>`` — the token placeholder is
+    placed directly in the header so the OpenShell proxy can resolve it
+    (same pattern as Slack user-token auth).
+
+    Attributes:
+        enabled: Whether GitLab tools are registered with the orchestrator.
+        url: GitLab instance base URL.
+        token: Personal Access Token (``glpat-...``).
+    """
+
+    enabled: bool = True
+    url: str = DEFAULT_GITLAB_URL
+    token: str = ""
+
+
+@dataclass
+class GerritConfig:
+    """Configuration for the Gerrit REST API integration.
+
+    Uses HTTP Basic auth with separate username/password credentials
+    to match the OpenShell proxy's credential resolution model.
+
+    Attributes:
+        enabled: Whether Gerrit tools are registered with the orchestrator.
+        url: Gerrit instance base URL (including ``/a`` if needed).
+        username: HTTP Basic auth username.
+        http_password: HTTP Basic auth password.
+    """
+
+    enabled: bool = True
+    url: str = DEFAULT_GERRIT_URL
+    username: str = ""
+    http_password: str = ""
+
+
+@dataclass
+class ConfluenceConfig:
+    """Configuration for the Confluence REST API integration.
+
+    Attributes:
+        enabled: Whether Confluence tools are registered.
+        url: Confluence instance base URL.
+        username: Atlassian account email / username.
+        api_token: Atlassian API token (used as password in Basic auth).
+    """
+
+    enabled: bool = True
+    url: str = DEFAULT_CONFLUENCE_URL
+    username: str = ""
+    api_token: str = ""
+
+
+@dataclass
+class SlackSearchConfig:
+    """Configuration for the Slack user-token search/history tools.
+
+    These use a *user* OAuth token (``xoxp-...``) — separate from the
+    *bot* token used by the Slack connector for messaging.
+
+    Attributes:
+        enabled: Whether Slack search tools are registered.
+        user_token: Slack user OAuth token (``xoxp-...``).
+    """
+
+    enabled: bool = True
+    user_token: str = ""
+
+
+@dataclass
+class AuditConfig:
+    """Configuration for the SQLite audit database.
+
+    The audit DB records every tool invocation (service, args, result,
+    latency, approval status) for operational debugging and training-data
+    extraction.
+
+    In the sandbox the DB lives on the ``/sandbox`` PVC (persistent across
+    gateway restarts with OpenShell >= 0.0.22).  Locally it defaults to
+    ``~/.nemoclaw/audit.db``.
+
+    Attributes:
+        enabled: Whether audit logging is active.
+        db_path: Filesystem path to the SQLite database file.
+        persist_payloads: Store full JSON request/response payloads.
+            Set to ``False`` to save disk while keeping metadata.
+    """
+
+    enabled: bool = True
+    db_path: str = DEFAULT_AUDIT_DB_PATH
+    persist_payloads: bool = True
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration aggregating all sub-configs.
 
@@ -199,14 +310,24 @@ class AppConfig:
         inference: Inference Hub connection parameters.
         orchestrator: Agent loop parameters.
         log: Logging settings.
+        audit: Audit database settings.
         jira: Jira REST integration settings.
+        gitlab: GitLab REST integration settings.
+        gerrit: Gerrit REST integration settings.
+        confluence: Confluence REST integration settings.
+        slack_search: Slack user-token search/history settings.
     """
 
     slack: SlackConfig = field(default_factory=SlackConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
     jira: JiraConfig = field(default_factory=JiraConfig)
+    gitlab: GitLabConfig = field(default_factory=GitLabConfig)
+    gerrit: GerritConfig = field(default_factory=GerritConfig)
+    confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
+    slack_search: SlackSearchConfig = field(default_factory=SlackSearchConfig)
 
 
 def load_config() -> AppConfig:
@@ -280,12 +401,42 @@ def load_config() -> AppConfig:
             level=os.environ.get("LOG_LEVEL", DEFAULT_LOG_LEVEL),
             log_file=os.environ.get("LOG_FILE"),
         ),
+        audit=AuditConfig(
+            enabled=os.environ.get("AUDIT_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            db_path=os.environ.get(
+                "AUDIT_DB_PATH",
+                "/sandbox/audit.db" if in_sandbox else DEFAULT_AUDIT_DB_PATH,
+            ),
+            persist_payloads=os.environ.get("AUDIT_PERSIST_PAYLOADS", "true").lower()
+            in _TRUTHY_VALUES,
+        ),
         jira=JiraConfig(
             enabled=os.environ.get("JIRA_ENABLED", "true").lower() in _TRUTHY_VALUES,
             url=os.environ.get("JIRA_URL", DEFAULT_JIRA_URL),
             auth_header=os.environ.get(
                 os.environ.get("JIRA_AUTH_ENV_VAR", DEFAULT_JIRA_AUTH_ENV_VAR), ""
             ),
+        ),
+        gitlab=GitLabConfig(
+            enabled=os.environ.get("GITLAB_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            url=os.environ.get("GITLAB_URL", DEFAULT_GITLAB_URL),
+            token=os.environ.get("GITLAB_TOKEN", ""),
+        ),
+        gerrit=GerritConfig(
+            enabled=os.environ.get("GERRIT_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            url=os.environ.get("GERRIT_URL", DEFAULT_GERRIT_URL),
+            username=os.environ.get("GERRIT_USERNAME", ""),
+            http_password=os.environ.get("GERRIT_HTTP_PASSWORD", ""),
+        ),
+        confluence=ConfluenceConfig(
+            enabled=os.environ.get("CONFLUENCE_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            url=os.environ.get("CONFLUENCE_URL", DEFAULT_CONFLUENCE_URL),
+            username=os.environ.get("CONFLUENCE_USERNAME", ""),
+            api_token=os.environ.get("CONFLUENCE_API_TOKEN", ""),
+        ),
+        slack_search=SlackSearchConfig(
+            enabled=os.environ.get("SLACK_SEARCH_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            user_token=os.environ.get("SLACK_USER_TOKEN", ""),
         ),
     )
 

@@ -38,10 +38,13 @@ execution.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import OrchestratorConfig, load_system_prompt
+
+if TYPE_CHECKING:
+    from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.connectors.base import StatusCallback
 from nemoclaw_escapades.models.types import (
     ActionBlock,
@@ -125,6 +128,7 @@ class Orchestrator:
         config: OrchestratorConfig,
         approval: ApprovalGate | None = None,
         tools: ToolRegistry | None = None,
+        audit: AuditDB | None = None,
     ) -> None:
         """Initialise the orchestrator.
 
@@ -137,11 +141,14 @@ class Orchestrator:
             tools: Optional tool registry.  When provided, the agent
                 loop sends tool definitions to the model and can
                 execute tool calls.
+            audit: Optional audit database.  When provided, every tool
+                invocation is logged (service, args, latency, success).
         """
         self._backend = backend
         self._config = config
         self._approval = approval or AutoApproval()
         self._tools = tools
+        self._audit = audit
         self._prompt = PromptBuilder(
             system_prompt=load_system_prompt(config.system_prompt_path),
             max_thread_history=config.max_thread_history,
@@ -221,7 +228,9 @@ class Orchestrator:
             # With tools: multi-turn agent loop (model ↔ tools).
             # Without tools: single inference call + transcript repair.
             if self._tools and len(self._tools) > 0:
-                content = await self._run_agent_loop(messages, request.request_id, on_status)
+                content = await self._run_agent_loop(
+                    messages, request.request_id, on_status, thread_ts=thread_key
+                )
             else:
                 content = await self._inference_with_repair(messages, request.request_id)
 
@@ -315,6 +324,7 @@ class Orchestrator:
         messages: list[Message],
         request_id: str,
         on_status: StatusCallback | None = None,
+        thread_ts: str | None = None,
     ) -> str:
         """Run the multi-turn tool-use loop.
 
@@ -328,6 +338,7 @@ class Orchestrator:
             messages: Initial message list (system + history + user).
             request_id: Correlation ID for structured logging.
             on_status: Optional callback for thinking-indicator updates.
+            thread_ts: Slack thread timestamp for audit correlation.
 
         Returns:
             The model's final text content.
@@ -405,7 +416,9 @@ class Orchestrator:
             assistant_msg = self._build_assistant_tool_message(result)
             working_messages.append(assistant_msg)
 
-            tool_results = await self._execute_tool_calls(result.tool_calls, request_id, on_status)
+            tool_results = await self._execute_tool_calls(
+                result.tool_calls, request_id, on_status, thread_ts=thread_ts
+            )
             working_messages.extend(tool_results)
 
         # ── E. Safety limit reached ──────────────────────────────
@@ -426,6 +439,7 @@ class Orchestrator:
         tool_calls: list[ToolCall],
         request_id: str,
         on_status: StatusCallback | None = None,
+        thread_ts: str | None = None,
     ) -> list[Message]:
         """Execute a batch of tool calls and return tool-result messages.
 
@@ -439,6 +453,7 @@ class Orchestrator:
             tool_calls: Tool invocations from the model's response.
             request_id: Correlation ID for structured logging.
             on_status: Optional callback for thinking-indicator updates.
+            thread_ts: Slack thread timestamp for audit correlation.
 
         Returns:
             A list of ``tool`` role message dicts, one per tool call.
@@ -455,7 +470,10 @@ class Orchestrator:
                 except Exception:
                     logger.debug("Status callback failed", exc_info=True)
 
+            spec = self._tools.get(tc.name)
             tool_timer = Timer()
+            success = True
+            error_msg: str | None = None
             try:
                 output = await self._tools.execute(tc.name, tc.arguments)
                 logger.info(
@@ -468,9 +486,11 @@ class Orchestrator:
                     },
                 )
             except Exception as exc:
+                success = False
+                error_msg = str(exc)
                 output = json.dumps(
                     {
-                        "error": str(exc),
+                        "error": error_msg,
                         "tool": tc.name,
                     }
                 )
@@ -484,6 +504,23 @@ class Orchestrator:
                     },
                     exc_info=True,
                 )
+
+            if self._audit:
+                try:
+                    await self._audit.log_tool_call(
+                        session_id=request_id,
+                        thread_ts=thread_ts,
+                        service=spec.toolset if spec else "",
+                        command=tc.name,
+                        args=tc.arguments,
+                        operation_type="READ" if (spec and spec.is_read_only) else "WRITE",
+                        duration_ms=round(tool_timer.ms, 1),
+                        success=success,
+                        error_message=error_msg,
+                        response_payload=output,
+                    )
+                except Exception:
+                    logger.debug("Audit log_tool_call failed", exc_info=True)
 
             results.append(
                 {
@@ -763,7 +800,7 @@ class Orchestrator:
         # 3. Execute the tools that were blocked.  These run without a
         #    second approval check — the user already said "yes".
         tool_results = await self._execute_tool_calls(
-            pending.tool_calls, pending.request_id, on_status
+            pending.tool_calls, pending.request_id, on_status, thread_ts=thread_key
         )
         pending.working_messages.extend(tool_results)
 
@@ -773,7 +810,10 @@ class Orchestrator:
         #    we replace the pending state with the new one.
         try:
             content = await self._run_agent_loop(
-                pending.working_messages, pending.request_id, on_status
+                pending.working_messages,
+                pending.request_id,
+                on_status,
+                thread_ts=thread_key,
             )
         except WriteApprovalError as exc:
             exc.pending.original_user_text = pending.original_user_text

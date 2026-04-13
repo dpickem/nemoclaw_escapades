@@ -37,7 +37,7 @@
 - **[NemoClaw Message Bus (NMB) Design](nmb_design.md)** — real-time
   inter-sandbox messaging protocol, broker, client library, security model,
   multi-host deployment, coordinator integration, session forking, peer discovery.
-- **[nv-tools Integration Design](nv_tools_integration_design.md)** — integrating
+- **[nv-tools Integration Design (abandoned)](abandoned/nv_tools_integration_design.md)** — integrating
   the nv-tools CLI (Jira, Confluence, Slack, GitLab, Gerrit) into the
   orchestrator for multi-step tool calling; stubbing strategy for open-source
   distribution, progressive discovery, write approval via Slack, sandbox policy.
@@ -793,7 +793,7 @@ considered as the system matures.
   for multi-agent orchestration, permission system with tiered auto-approval,
   three-tier session compaction, model behavioral contract with transcript
   repair, task store, and proactive agent tick.
-- **[nv-tools Integration Design](nv_tools_integration_design.md)** —
+- **[nv-tools Integration Design (abandoned)](abandoned/nv_tools_integration_design.md)** —
   integrating the nv-tools unified CLI into the orchestrator for multi-step
   tool calling (Jira, Confluence, Slack, GitLab, Gerrit); stub package for
   open-source, Docker build paths, progressive tool discovery, write approval

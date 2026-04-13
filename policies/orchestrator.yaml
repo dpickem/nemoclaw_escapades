@@ -3,21 +3,30 @@
 # Defines what the orchestrator sandbox is allowed to do inside OpenShell.
 # The orchestrator and Slack connector run together in a single sandbox.
 #
+# This is the BASE policy committed to the repo.  It does NOT contain
+# allowed_ips for internal services (those are secrets).
+#
 # Schema reference:
 #   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
 # Based on the NemoClaw OpenClaw sandbox policy:
 #   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 #
+# To generate the resolved policy with allowed_ips from .env:
+#   make gen-policy        # writes policies/orchestrator.resolved.yaml
+#   make setup-sandbox     # runs gen-policy automatically
+#
 # Quick guide:
-#   - "Static" fields (filesystem_policy, landlock, process) are locked at
-#     sandbox creation — changing them requires destroy + recreate.
-#   - "Dynamic" fields (network_policies) can be hot-reloaded on a running
-#     sandbox with `openshell policy set orchestrator --policy policies/orchestrator.yaml`.
-#   - Paths not listed in filesystem_policy are inaccessible.
-#   - Only binaries listed in a network policy entry may reach its endpoints.
-#   - REST endpoints need protocol: rest + tls: terminate for the proxy to
-#     intercept, resolve credential placeholders, and enforce HTTP rules.
-#   - WebSocket/tunnel endpoints use access: full for opaque passthrough.
+#   - "Static" fields (filesystem_policy, landlock, process) require sandbox
+#     recreation.
+#   - "Dynamic" fields (network_policies) can be hot-reloaded:
+#     openshell policy set orchestrator --policy policies/orchestrator.resolved.yaml
+#   - protocol: rest  — proxy intercepts HTTP, resolves credential
+#     placeholders, and enforces method/path rules.
+#   - access: full    — permits CONNECT tunnels.  For internal hosts
+#     (RFC 1918), pair with allowed_ips to bypass SSRF protection.
+#
+# Reference: https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+# SSRF docs: https://docs.nvidia.com/openshell/latest/security/best-practices#ssrf-protection
 
 version: 1
 
@@ -37,7 +46,8 @@ filesystem_policy:
     - /app/prompts
     - /tmp
     - /dev/null
-    - /app/.config              # tool config + credential cache
+    - /app/.config
+    - /sandbox          # PVC-backed persistent storage (OpenShell >= 0.0.22)
 
 # ---------------------------------------------------------------------------
 # Landlock (Static)
@@ -66,12 +76,12 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
-        tls: terminate
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   # Slack WebSocket — Socket Mode uses a long-lived WebSocket after the
   # initial apps.connections.open handshake. access: full uses a CONNECT
@@ -98,23 +108,19 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
-        tls: terminate
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   # -----------------------------------------------------------------------
-  # Service API endpoints (native async tools in src/nemoclaw_escapades/tools/)
+  # Service API endpoints
   #
-  # Each external service the orchestrator's tools call needs its own
-  # network policy entry.
-  #
-  # Defense-in-depth: GET is allowed for all services.  POST/PUT are
-  # commented out by default — uncomment per-service as needed.  Even
-  # if the LLM bypasses the approval gate, the network policy blocks
-  # the mutating API call.
+  # Internal hosts (GitLab, Gerrit) resolve to RFC 1918 IPs.  The proxy
+  # blocks these by default (SSRF protection).  The gen_policy.py script
+  # adds allowed_ips from .env to the resolved policy file.
   # -----------------------------------------------------------------------
 
   jira:
@@ -123,7 +129,6 @@ network_policies:
       - host: jirasw.nvidia.com
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
         rules:
           - allow: { method: GET, path: "/**" }
@@ -131,21 +136,22 @@ network_policies:
           - allow: { method: PUT, path: "/**" }
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   confluence:
     name: confluence
     endpoints:
-      - host: nvidia.atlassian.net       # Atlassian Cloud (CONFLUENCE_URL path: /wiki)
+      - host: nvidia.atlassian.net
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
         rules:
           - allow: { method: GET, path: "/**" }
-          # - allow: { method: POST, path: "/**" }
-          # - allow: { method: PUT, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   gitlab:
     name: gitlab
@@ -153,29 +159,42 @@ network_policies:
       - host: gitlab-master.nvidia.com
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
-        rules:
-          - allow: { method: GET, path: "/**" }
-          # - allow: { method: POST, path: "/**" }
-          # - allow: { method: PUT, path: "/**" }
+        access: full
+        # allowed_ips: injected by gen_policy.py from ALLOWED_IPS in .env
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   gerrit:
     name: gerrit
     endpoints:
-      - host: git-av.nvidia.com          # Gerrit at /r/a
+      - host: git-av.nvidia.com
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
-        rules:
-          - allow: { method: GET, path: "/**" }
-          # - allow: { method: POST, path: "/**" }
-          # - allow: { method: PUT, path: "/**" }
+        access: full
+        # allowed_ips: injected by gen_policy.py from ALLOWED_IPS in .env
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
+
+  github:
+    name: github
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }
 
   # Slack user API — uses the user OAuth token (SLACK_USER_TOKEN / xoxp-...),
   # distinct from the bot token used by the connector.  Shares the same
@@ -187,12 +206,10 @@ network_policies:
       - host: slack.com
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
         rules:
           - allow: { method: GET, path: "/**" }
-          - allow: { method: POST, path: "/**" }   # search + history need POST
-          # Note: Slack send/remind are gated by the write approval gate,
-          # not by network policy, since they share the same POST method as reads.
+          - allow: { method: POST, path: "/**" }
     binaries:
       - { path: /usr/local/bin/python* }
+      - { path: /usr/bin/curl }

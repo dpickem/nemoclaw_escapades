@@ -21,6 +21,8 @@ make test-integration       # multi-sandbox NMB integration tests
 make test-all               # everything
 make typecheck              # mypy strict
 make lint                   # ruff check + format
+make test-auth              # verify all .env credentials (no sandbox needed)
+make -k test-services-sandbox  # test all tools inside the sandbox
 ```
 
 ## Documentation
@@ -43,7 +45,7 @@ make lint                   # ruff check + format
 - [NMB Integration Tests](docs/nmb_integration_tests_design.md) — multi-sandbox
   test harness: PolicyBroker with per-sandbox egress/ingress/channel/op
   enforcement, IntegrationHarness lifecycle manager, 41 tests across 7 files
-- [nv-tools Integration](docs/nv_tools_integration_design.md) — Jira,
+- [nv-tools Integration (abandoned)](docs/abandoned/nv_tools_integration_design.md) — Jira,
   Confluence, Slack, GitLab, Gerrit access from inside OpenShell sandboxes;
   stub for offline testing, write-approval gate, host-side token server for
   OAuth credential isolation
@@ -90,13 +92,46 @@ make lint                   # ruff check + format
 | 5 | **Self-Improvement Loop** | Planned | Persistent memory + autonomous skill refinement |
 | 6 | **Review Agent** | Planned | Local collaboration before push |
 
+## Service Tools
+
+The orchestrator exposes external services as tools the LLM can invoke
+during conversations. Each tool is an async httpx client registered via
+`ToolRegistry`. Write operations require user approval via the Slack
+interactive approval gate.
+
+| Service | Tools | Auth | Sandbox | Host |
+|---------|-------|------|---------|------|
+| Jira | 8 (search, get/create/update issues, transitions, comments) | `JIRA_AUTH` (pre-computed Basic header) | Pass | Pass |
+| GitLab | 10 (projects, MRs, pipelines, jobs, files) | `GITLAB_TOKEN` (Bearer PAT) | Pass | Pass |
+| Gerrit | 10 (changes, comments, files, diffs, review, submit) | `GERRIT_USERNAME` + `GERRIT_HTTP_PASSWORD` (Basic) | Pass | Pass |
+| Confluence | 9 (search, pages, children, comments, labels) | `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` (Basic) | Pass | Pass |
+| Slack search | 6 (search messages, channels, history, threads) | `SLACK_USER_TOKEN` (Bearer xoxp) | Pass | Pass |
+
+### Credential setup
+
+1. Copy `.env.example` to `.env` and fill in credentials
+2. `make setup-providers` registers them with the OpenShell gateway
+3. `make setup-sandbox` builds the container and attaches providers
+4. `make test-auth` verifies credentials from the host (no sandbox needed)
+5. `make -k test-services-sandbox` verifies end-to-end inside the sandbox
+
+### Sandbox networking
+
+The sandbox runs behind an OpenShell L7 proxy. Services behind CDN
+(Jira via Akamai, Confluence via AWS CloudFront) resolve to public IPs
+and work out of the box. Internal NVIDIA services (GitLab at `10.120.x.x`,
+Gerrit at `10.120.x.x`) require `allowed_ips` in the network policy to
+bypass SSRF protection -- see `policies/orchestrator.yaml` for the
+configuration. All services work without restrictions via
+`make run-local-dev` (no proxy).
+
 ## Package Layout
 
 ```
 src/nemoclaw_escapades/
 ├── main.py                      # Orchestrator entry point
 ├── config.py                    # Environment-based configuration
-├── orchestrator.py              # Multi-turn agent loop
+├── orchestrator/                # Multi-turn agent loop, approval gates
 ├── nmb/                         # NemoClaw Message Bus
 │   ├── broker.py                # Asyncio WebSocket message router
 │   ├── client.py                # Async MessageBus client
@@ -104,10 +139,15 @@ src/nemoclaw_escapades/
 │   ├── sync.py                  # Synchronous wrapper
 │   ├── audit/                   # SQLite audit DB (Alembic-managed)
 │   └── testing/                 # Integration test infrastructure
-│       ├── policy.py            # PolicyBroker, SandboxPolicy
-│       └── harness.py           # IntegrationHarness, SandboxHandle
-├── connectors/                  # Slack connector
-└── backends/                    # Inference hub backend
+├── connectors/                  # Slack connector (Bot + App Home)
+├── backends/                    # Inference hub backend
+└── tools/                       # Service integrations
+    ├── registry.py              # ToolSpec, ToolRegistry
+    ├── jira.py                  # Jira REST API client + tools
+    ├── gitlab.py                # GitLab REST API v4 client + tools
+    ├── gerrit.py                # Gerrit REST API client + tools
+    ├── confluence.py            # Confluence REST API client + tools
+    └── slack_search.py          # Slack Web API (user token) + tools
 ```
 
 ## Related Projects

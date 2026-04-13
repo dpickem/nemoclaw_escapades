@@ -88,12 +88,14 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        self._skipped_toolsets: set[str] = set()
 
     def register(self, spec: ToolSpec) -> None:
         """Register a tool specification.
 
         If the spec has a ``check_fn`` and it returns ``False``, the
-        tool is **not** registered and a warning is logged instead.
+        tool is **not** registered.  A warning is logged once per
+        toolset (not per tool) to keep startup logs concise.
 
         Args:
             spec: The tool to register.
@@ -105,10 +107,17 @@ class ToolRegistry:
             raise ValueError(f"Tool {spec.name!r} already registered")
 
         if spec.check_fn is not None and not spec.check_fn():
-            logger.warning(
-                "Tool not available, skipping registration",
-                extra={"tool": spec.name, "toolset": spec.toolset},
-            )
+            if spec.toolset and spec.toolset not in self._skipped_toolsets:
+                self._skipped_toolsets.add(spec.toolset)
+                logger.warning(
+                    "Toolset not available, skipping",
+                    extra={"toolset": spec.toolset},
+                )
+            elif not spec.toolset:
+                logger.warning(
+                    "Tool not available, skipping",
+                    extra={"tool": spec.name},
+                )
             return
 
         self._tools[spec.name] = spec
