@@ -620,27 +620,30 @@ the backend and tools. The `Agent` base class adds NMB as a cross-cutting
 concern. Role-specific agents configure *how* NMB is used (coordinator vs
 client, which events to handle) without changing the loop itself.
 
-### 4.9 `AuditBuffer` — NMB-Batched Tool-Call Auditing
+### 4.9 `AuditBuffer` — NMB-Batched Audit Flush
 
 Sub-agents do not write to a local SQLite audit DB. Instead, they use
-`AuditBuffer` — a lightweight in-memory buffer that flushes tool-call records
-to the orchestrator via NMB at round boundaries. This follows the design in
-[Audit DB Design §7.4](audit_db_design.md#74--mvp-implementation-sketch-option-c).
+`AuditBuffer` — a lightweight in-memory buffer that flushes both tool-call
+and inference-call records to the orchestrator via NMB at round boundaries.
+This follows the design in
+[Audit DB Design §7.4](audit_db_design.md#74--mvp-implementation-sketch-option-c)
+and [Inference Call Auditing §4.2](inference_call_auditing_design.md#42--sub-agent-calls-nmb-batched-flush).
 
-The `AuditBuffer` implements the same `log_tool_call()` interface as `AuditDB`,
-so the `AgentLoop` doesn't know which one it's using.
+The `AuditBuffer` implements the same `log_tool_call()` and
+`log_inference_call()` interfaces as `AuditDB`, so the `AgentLoop` doesn't
+know which one it's using.
 
 ```python
 class AuditBuffer:
     """Lightweight audit buffer for sub-agents.
 
-    Accumulates tool-call records in memory and flushes them to the
-    orchestrator via NMB at round boundaries (called by AgentLoop after
-    each tool-execution round). Falls back to local JSONL if NMB is
-    unavailable.
+    Accumulates tool-call and inference-call records in memory and
+    flushes them to the orchestrator via NMB at round boundaries
+    (called by AgentLoop after each tool-execution round).  Falls back
+    to local JSONL if NMB is unavailable.
 
-    Implements the same log_tool_call() interface as AuditDB so the
-    AgentLoop is audit-backend-agnostic.
+    Implements the same log_tool_call() / log_inference_call() interface
+    as AuditDB so the AgentLoop is audit-backend-agnostic.
     """
 
     def __init__(
@@ -652,11 +655,22 @@ class AuditBuffer:
         self._bus = bus
         self._orchestrator_id = orchestrator_id
         self._fallback_path = fallback_path
-        self._buffer: list[dict] = []
+        self._tool_buffer: list[dict] = []
+        self._inference_buffer: list[dict] = []
 
     async def log_tool_call(self, **kwargs):
         """Buffer a single tool-call record (called by AgentLoop per tool)."""
-        self._buffer.append({
+        self._tool_buffer.append({
+            "record_type": "tool_call",
+            "id": uuid4().hex[:16],
+            "timestamp": time.time(),
+            **kwargs,
+        })
+
+    async def log_inference_call(self, **kwargs):
+        """Buffer a single inference-call record (called by AgentLoop per round)."""
+        self._inference_buffer.append({
+            "record_type": "inference_call",
             "id": uuid4().hex[:16],
             "timestamp": time.time(),
             **kwargs,
@@ -667,16 +681,21 @@ class AuditBuffer:
 
         Called by AgentLoop at the end of each tool-execution round.
         For AuditDB this method is a no-op (writes are already persisted).
+        The payload carries both tool_calls and inference_calls arrays.
         """
-        if not self._buffer:
+        if not self._tool_buffer and not self._inference_buffer:
             return
         try:
             await self._bus.send(
                 to=self._orchestrator_id,
                 type="audit.flush",
-                payload={"tool_calls": self._buffer},
+                payload={
+                    "tool_calls": self._tool_buffer,
+                    "inference_calls": self._inference_buffer,
+                },
             )
-            self._buffer.clear()
+            self._tool_buffer.clear()
+            self._inference_buffer.clear()
         except Exception:
             self._write_fallback()
 
@@ -686,11 +705,16 @@ class AuditBuffer:
         await self.flush_round()
 
     def _write_fallback(self):
-        """Append buffered records to local JSONL as a fallback."""
+        """Append buffered records to local JSONL as a fallback.
+
+        Each line carries a "record_type" discriminator so the
+        orchestrator can route to the correct ingest method.
+        """
         with open(self._fallback_path, "a") as f:
-            for record in self._buffer:
+            for record in self._tool_buffer + self._inference_buffer:
                 f.write(json.dumps(record) + "\n")
-        self._buffer.clear()
+        self._tool_buffer.clear()
+        self._inference_buffer.clear()
 ```
 
 #### How It Fits into the Three Layers
@@ -700,23 +724,29 @@ AgentLoop (Layer 1)              Agent (Layer 2)              NMB Broker
      │                                │                           │
      │  tool call #1                  │                           │
      │  audit.log_tool_call(...)      │                           │
-     │  → AuditBuffer appends to      │                           │
-     │    in-memory list              │                           │
+     │  → appends to tool_buffer     │                           │
      │                                │                           │
      │  tool call #2                  │                           │
      │  audit.log_tool_call(...)      │                           │
      │  → appends                    │                           │
      │                                │                           │
+     │  inference round completes     │                           │
+     │  audit.log_inference_call(...) │                           │
+     │  → appends to inference_buffer │                           │
+     │                                │                           │
      │  ...round ends...             │                           │
      │  audit.flush_round()          │                           │
      │  → AuditBuffer sends          │                           │
-     │    audit.flush via bus ───────────────────────────────────▶│
+     │    audit.flush via bus         │                           │
+     │    {tool_calls, inference_     │                           │
+     │     calls} ──────────────────────────────────────────────▶│
      │                                │                    route to│
      │                                │                  orchestrator
      │                                │                           │
      │                          Orchestrator                      │
      │                          receives audit.flush              │
-     │                          calls log_tool_call()             │
+     │                          calls log_tool_call() +           │
+     │                          log_inference_call()              │
      │                          for each record into              │
      │                          central AuditDB                   │
 ```
@@ -727,8 +757,9 @@ Both `AuditDB` and `AuditBuffer` implement:
 
 | Method | `AuditDB` (orchestrator) | `AuditBuffer` (sub-agent) |
 |--------|-------------------------|--------------------------|
-| `log_tool_call(**kwargs)` | Writes directly to SQLite | Appends to in-memory list |
-| `flush_round()` | No-op (already persisted) | Sends `audit.flush` NMB message to orchestrator; falls back to JSONL |
+| `log_tool_call(**kwargs)` | Writes directly to SQLite | Appends to in-memory `tool_buffer` |
+| `log_inference_call(**kwargs)` | Writes directly to SQLite | Appends to in-memory `inference_buffer` |
+| `flush_round()` | No-op (already persisted) | Sends `audit.flush` NMB message (both `tool_calls` and `inference_calls`); falls back to JSONL |
 | `flush_remaining()` | No-op | Same as `flush_round()` with aggressive error logging |
 | `close()` | Dispose SQLite engine | Flush remaining + close (no engine to dispose) |
 
@@ -804,7 +835,6 @@ set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/sandbox/workspace}"
 SCRATCHPAD_PATH="${SCRATCHPAD_PATH:-/sandbox/scratchpad.md}"
-AUDIT_DB_PATH="${AUDIT_DB_PATH:-/sandbox/audit.db}"
 
 # ── 1. Workspace directory structure ──────────────────────
 mkdir -p "$WORKSPACE_ROOT"
@@ -843,11 +873,12 @@ mkdir -p /sandbox/memory
 # Future: orchestrator seeds relevant memory entries here
 
 # ── 6. Start the agent process ─────────────────────────────
+# Note: no --audit-db flag.  Sub-agents use AuditBuffer (in-memory +
+# NMB-batched flush to the orchestrator), not local SQLite.  See §4.9.
 exec python -m nemoclaw_escapades.agent \
     --role "${AGENT_ROLE:-coding}" \
     --workspace "$WORKSPACE_ROOT" \
-    --scratchpad "$SCRATCHPAD_PATH" \
-    --audit-db "$AUDIT_DB_PATH"
+    --scratchpad "$SCRATCHPAD_PATH"
 ```
 
 ### 5.3 Workspace Content Seeding
@@ -1082,7 +1113,7 @@ class AgentSetupBundle:
     # Workspace
     workspace_root: str = "/sandbox/workspace"
     scratchpad_path: str = "/sandbox/scratchpad.md"
-    audit_db_path: str = "/sandbox/audit.db"
+    audit_fallback_path: str = "/sandbox/audit_fallback.jsonl"
 
     # Placeholders for future milestones
     skills_dir: str = "/sandbox/skills"       # M5: skill files
@@ -2249,11 +2280,19 @@ work and are included in `AgentLoopResult`.
 | Create coding agent system prompt | `prompts/coding_agent.md` |
 | Create coding agent OpenShell policy | `policies/coding-agent.yaml` |
 | Create workspace setup script | `docker/setup-workspace.sh` |
+| Emit `sandbox.spawn.*` NMB events (`sandbox.spawn.request`, `sandbox.spawn.started`, `sandbox.spawn.failed`, `sandbox.spawn.terminated`) | `src/nemoclaw_escapades/orchestrator/delegation.py` |
+| Include spawn metadata in `task.assign` envelope (`workflow_id`, `root_sandbox_id`, `parent_sandbox_id`, `role`, `ttl_s`) per [Sandbox Spawn Design §4](sandbox_spawn_design.md) | `src/nemoclaw_escapades/orchestrator/delegation.py` |
 | End-to-end test: agent process starts, connects NMB, handles task.assign, returns task.complete | `tests/integration/test_coding_agent.py` |
+
+> **Note:** Dockerfile changes required for sub-agent support (installing
+> OpenShell CLI, CA certs, `XDG_CONFIG_HOME`) are deferred to **Phase 5**
+> (`docker/Dockerfile.orchestrator`).  See
+> [Sandbox Spawn Design §5](sandbox_spawn_design.md) for the full list.
 
 **Exit criteria:** The coding agent process can start, connect to NMB, receive a
 `task.assign`, run the agent loop with file tools, and send `task.complete`
-with diff, scratchpad, and summary.
+with diff, scratchpad, and summary.  Spawn lifecycle emits `sandbox.spawn.*`
+NMB events.
 
 ### Phase 4 — Orchestrator delegation, NMB event loop, and finalization tools
 
@@ -2267,15 +2306,21 @@ with diff, scratchpad, and summary.
 | Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `src/nemoclaw_escapades/orchestrator/orchestrator.py` |
 | Implement `PolicyOverlay` + hot-reload via `openshell policy set` | `src/nemoclaw_escapades/orchestrator/policy_overlay.py` |
 | Handle `policy.request` NMB messages (auto-approve / escalate / deny) | `src/nemoclaw_escapades/orchestrator/delegation.py` |
-| Implement `AuditBuffer` (child-side NMB flush + JSONL fallback) | `src/nemoclaw_escapades/agent/audit_buffer.py` |
-| Implement orchestrator-side `audit.flush` handler + fallback JSONL ingest | `src/nemoclaw_escapades/audit/db.py` |
+| Implement `AuditBuffer` with both `log_tool_call` and `log_inference_call` (child-side NMB flush + JSONL fallback, see §4.9) | `src/nemoclaw_escapades/agent/audit_buffer.py` |
+| Implement orchestrator-side `audit.flush` handler (ingest both `tool_calls` and `inference_calls` arrays) + fallback JSONL ingest | `src/nemoclaw_escapades/audit/db.py` |
+| Add `AuditDB.log_inference_call()` API per [Inference Call Auditing §5](inference_call_auditing_design.md#5--auditdb-api-extensions) | `src/nemoclaw_escapades/audit/db.py` |
+| Add `inference_calls` table migration per [Inference Call Auditing §8](inference_call_auditing_design.md#8--alembic-migration) | `src/nemoclaw_escapades/audit/migrations/005_inference_calls.py` |
+| Add `delegations` table for parent/child trace correlation per [Agent Trace Design §4.3](agent_trace_design.md#43--delegation-events) | `src/nemoclaw_escapades/audit/db.py` |
+| Add approval gate event columns (`requested_at`, `decided_at`, `decision`, `decided_by`, `wait_ms`) per [Agent Trace Design §4.1](agent_trace_design.md#41--approval-gate-events) | `src/nemoclaw_escapades/audit/db.py` |
 | Integration test: orchestrator → coding sandbox → result → model-driven finalize | `tests/integration/test_delegation.py` |
 
 **Exit criteria:** The orchestrator can delegate a coding task to a sandboxed
 sub-agent, receive the result via NMB without blocking the Slack loop, run
 model-driven finalization (the LLM calls `present_work_to_user` or other
 finalization tools), and handle user action buttons for push/iterate/discard.
-Multiple finalization flows run concurrently.
+Multiple finalization flows run concurrently.  Audit flush carries both
+tool-call and inference-call records; delegation traces are queryable via
+the `delegations` table.
 
 ### Phase 5 — Polish and hardening
 
