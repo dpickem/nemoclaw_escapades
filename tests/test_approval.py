@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nemoclaw_escapades.orchestrator.approval import AutoApproval, WriteApproval
+from nemoclaw_escapades.agent.approval import AutoApproval, WriteApproval
 
 
 class TestAutoApproval:
