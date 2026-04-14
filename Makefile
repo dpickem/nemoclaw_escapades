@@ -295,10 +295,16 @@ fmt: ## Auto-format code
 # ---------------------------------------------------------------------------
 
 .PHONY: logs
-logs: ## Tail orchestrator logs
+logs: ## Tail app logs from a second terminal (primary logs stream in setup-sandbox)
 	@command -v openshell >/dev/null 2>&1 && \
-		openshell logs $(SANDBOX_NAME) --follow 2>/dev/null || \
-		tail -f logs/*.log 2>/dev/null || echo "No log files found"
+		openshell sandbox exec -n $(SANDBOX_NAME) --no-tty -- tail -f /app/logs/nemoclaw.log \
+		|| echo "Could not tail sandbox logs. Is the sandbox running? Try: make status"
+
+.PHONY: logs-proxy
+logs-proxy: ## Show OpenShell proxy-level logs (network routing, L7 decisions)
+	@command -v openshell >/dev/null 2>&1 && \
+		openshell logs $(SANDBOX_NAME) || \
+		echo "openshell not installed or sandbox not running"
 
 .PHONY: status
 status: ## Print sandbox and provider status
@@ -312,8 +318,14 @@ status: ## Print sandbox and provider status
 # Audit DB
 # ---------------------------------------------------------------------------
 
+.PHONY: audit-checkpoint
+audit-checkpoint: ## Force a WAL checkpoint inside the sandbox (folds WAL into main DB)
+	@$(SSH_CMD) "python3 -c \"import sqlite3; c=sqlite3.connect('$(AUDIT_DB_SANDBOX)'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()\"" \
+		&& echo "✓ WAL checkpoint completed" \
+		|| echo "⚠  Checkpoint failed (sandbox not running?)"
+
 .PHONY: audit-download
-audit-download: ## Download the audit DB from the sandbox to the host
+audit-download: audit-checkpoint ## Checkpoint WAL then download the audit DB from the sandbox
 	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
 	@openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) \
 		&& echo "✓ Downloaded to $(AUDIT_DB_LOCAL)"
@@ -344,10 +356,11 @@ audit-export: ## Export tool calls to JSONL (writes to audit_tool_calls.jsonl)
 	asyncio.run(_e())"
 
 .PHONY: audit-sync
-audit-sync: ## Background loop: download audit DB every $(AUDIT_SYNC_INTERVAL)s
+audit-sync: ## Background loop: checkpoint + download audit DB every $(AUDIT_SYNC_INTERVAL)s
 	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
 	@echo "Syncing audit DB every $(AUDIT_SYNC_INTERVAL)s  (Ctrl+C to stop)"
 	@while true; do \
+		$(SSH_CMD) "python3 -c \"import sqlite3; c=sqlite3.connect('$(AUDIT_DB_SANDBOX)'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()\"" 2>/dev/null; \
 		openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) 2>/dev/null \
 			&& echo "$$(date '+%H:%M:%S') ✓ synced" \
 			|| echo "$$(date '+%H:%M:%S') · sandbox not ready"; \
