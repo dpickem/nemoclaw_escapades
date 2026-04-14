@@ -194,6 +194,10 @@ cython_debug/
 # Generated policy with secrets (allowed_ips from .env)
 policies/orchestrator.resolved.yaml
 
+# Live integration tests (contain confidential resource references)
+tests/test_integration_live_local.py
+tests/test_integration_live_sandbox.py
+
 # Ruff stuff:
 .ruff_cache/
 

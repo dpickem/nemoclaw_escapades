@@ -47,6 +47,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: multi-sandbox NMB integration tests (PolicyBroker + harness)",
+    "live: integration tests against real service endpoints (require credentials)",
 ]
 
 [tool.ruff]
