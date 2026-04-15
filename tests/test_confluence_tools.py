@@ -109,13 +109,8 @@ class TestConfluenceClient:
 
 
 class TestConfluenceHandlers:
-    async def test_handlers_return_json_string(self) -> None:
-        import nemoclaw_escapades.tools.confluence as mod
-
-        mod._confluence_config = ConfluenceConfig(
-            url="https://confluence.example.com", username="", api_token=""
-        )
-        result = await mod.confluence_search("test")
-        data = json.loads(result)
-        assert isinstance(data, dict)
-        assert "error" in data
+    async def test_unconfigured_handler_returns_error_json(self) -> None:
+        """Handler with empty credentials returns error JSON without network calls."""
+        client = ConfluenceClient(base_url="https://confluence.example.com")
+        result = await client.search("test")
+        assert "error" in result

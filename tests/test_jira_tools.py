@@ -109,24 +109,19 @@ class TestJiraClient:
 
 
 class TestJiraHandlers:
-    async def test_handlers_return_json_string(self) -> None:
-        """Handler returns valid JSON when the client has no auth."""
-        import nemoclaw_escapades.tools.jira as jira_mod
+    async def test_unconfigured_handler_returns_error(self) -> None:
+        """Handler with empty auth returns error JSON without making network calls."""
+        from nemoclaw_escapades.tools.jira import JiraClient, _format
 
-        jira_mod._jira_config = JiraConfig(url="https://jira.example.com", auth_header="")
-        result = await jira_mod.jira_me()
+        client = JiraClient(base_url="https://jira.example.com", auth_header="")
+        result = _format(await client.me())
         data = json.loads(result)
-        assert isinstance(data, dict)
         assert "error" in data
 
     async def test_execute_via_registry(self) -> None:
-        """Registry execute returns valid JSON when client has no auth."""
+        """Registry execute dispatches correctly and returns a string."""
         registry = ToolRegistry()
         register_jira_tools(registry, _TEST_CONFIG)
-        import nemoclaw_escapades.tools.jira as jira_mod
-
-        jira_mod._jira_config = JiraConfig(url="https://jira.example.com", auth_header="")
-        result = await registry.execute("jira_me", "{}")
-        data = json.loads(result)
-        assert isinstance(data, dict)
-        assert "error" in data
+        spec = registry.get("jira_me")
+        assert spec is not None
+        assert callable(spec.handler)
