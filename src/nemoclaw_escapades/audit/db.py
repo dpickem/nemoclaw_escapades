@@ -758,7 +758,7 @@ class AuditDB:
         if not self._needs_migration():
             return
 
-        subprocess.run(
+        result = subprocess.run(
             [
                 sys.executable,
                 "-m",
@@ -768,13 +768,23 @@ class AuditDB:
                 "upgrade",
                 "head",
             ],
-            check=True,
             capture_output=True,
+            text=True,
             env={
                 **__import__("os").environ,
                 "AUDIT_DB_PATH": self.db_path,
             },
         )
+        if result.returncode != 0:
+            logger.error(
+                "Alembic migration failed",
+                extra={
+                    "returncode": result.returncode,
+                    "stderr": result.stderr.strip(),
+                    "db_path": self.db_path,
+                },
+            )
+            result.check_returncode()
 
     def _needs_migration(self) -> bool:
         """Check whether the DB schema is behind ``_HEAD_REVISION``.
