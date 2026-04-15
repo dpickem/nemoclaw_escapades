@@ -154,8 +154,16 @@ def _format_search_results(data: dict[str, Any]) -> str:
 # ── Tool specs ────────────────────────────────────────────────────────
 
 
-def _make_web_search(client: BraveSearchClient) -> ToolSpec:
-    """Create the ``web_search`` tool spec."""
+def _make_web_search(
+    client: BraveSearchClient,
+    default_limit: int = _DEFAULT_SEARCH_LIMIT,
+) -> ToolSpec:
+    """Create the ``web_search`` tool spec.
+
+    Args:
+        client: Brave Search API client.
+        default_limit: Default number of results when the model omits ``count``.
+    """
 
     @tool(
         "web_search",
@@ -167,7 +175,7 @@ def _make_web_search(client: BraveSearchClient) -> ToolSpec:
                 "count": {
                     "type": "integer",
                     "description": "Number of results to return.",
-                    "default": _DEFAULT_SEARCH_LIMIT,
+                    "default": default_limit,
                 },
             },
             "required": ["query"],
@@ -175,7 +183,7 @@ def _make_web_search(client: BraveSearchClient) -> ToolSpec:
         display_name="Searching the web",
         toolset=_TOOLSET,
     )
-    async def web_search(query: str, count: int = _DEFAULT_SEARCH_LIMIT) -> str:
+    async def web_search(query: str, count: int = default_limit) -> str:
         """Search the web via Brave Search and return formatted results.
 
         Args:
@@ -334,7 +342,7 @@ def register_web_search_tools(registry: ToolRegistry, config: WebSearchConfig) -
     def _check() -> bool:
         return client.configured
 
-    search_spec = _make_web_search(client)
+    search_spec = _make_web_search(client, default_limit=config.default_limit)
     search_spec.check_fn = _check
     registry.register(search_spec)
 

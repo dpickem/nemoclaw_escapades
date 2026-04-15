@@ -87,8 +87,12 @@ class Scratchpad:
             Confirmation message, with a warning if truncated.
         """
         truncated = False
-        if len(content.encode()) > self.max_size:
-            content = content[: self.max_size]
+        encoded = content.encode()
+        if len(encoded) > self.max_size:
+            # Slice bytes, not characters — multi-byte UTF-8 (emoji, CJK)
+            # would overshoot max_size if we sliced the str by char count.
+            # errors="ignore" drops any partial multi-byte char at the cut.
+            content = encoded[: self.max_size].decode(errors="ignore")
             truncated = True
 
         try:
