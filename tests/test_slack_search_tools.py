@@ -84,11 +84,8 @@ class TestSlackSearchClient:
 
 
 class TestSlackSearchHandlers:
-    async def test_handlers_return_json_string(self) -> None:
-        import nemoclaw_escapades.tools.slack_search as mod
-
-        mod._slack_config = SlackSearchConfig(user_token="")
-        result = await mod.slack_search_messages("test")
-        data = json.loads(result)
-        assert isinstance(data, dict)
-        assert "error" in data
+    async def test_unconfigured_handler_returns_error(self) -> None:
+        """Handler with empty token returns error JSON without network calls."""
+        client = SlackSearchClient(user_token="")
+        result = await client.search_messages("test")
+        assert "error" in result

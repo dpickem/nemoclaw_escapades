@@ -16,6 +16,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval
+from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import (
     AgentLoopConfig,
     AgentLoopResult,
@@ -89,6 +90,7 @@ class AgentLoop:
         config: AgentLoopConfig,
         audit: AuditDB | None = None,
         approval: ApprovalGate | None = None,
+        scratchpad: Scratchpad | None = None,
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,
     ) -> None:
@@ -105,6 +107,10 @@ class AgentLoop:
             approval: Gate consulted before executing write tools.
                 Defaults to ``AutoApproval`` (allow everything).
                 Inject ``WriteApproval`` for interactive approval.
+            scratchpad: Optional working-memory scratchpad.  When
+                provided, its contents are injected into the system
+                prompt on every inference round and included in the
+                ``AgentLoopResult``.
             on_tool_start: Instance-level default callback invoked
                 before each tool execution.  Per-request callbacks
                 passed to ``run()`` take precedence.
@@ -116,6 +122,7 @@ class AgentLoop:
         self._config = config
         self._audit = audit
         self._approval = approval or AutoApproval()
+        self._scratchpad = scratchpad
         self._on_tool_start = on_tool_start
         self._on_tool_end = on_tool_end
 
@@ -165,8 +172,14 @@ class AgentLoop:
         # emitting tool calls (e.g. cyclic tool dependencies or hallucinated
         # tool names that always error).
         for round_num in range(self._config.max_tool_rounds):
+            # Inject the scratchpad into the system message so the model
+            # always sees its latest notes.  We modify a copy of the
+            # first message (not the original) to avoid accumulating
+            # stale scratchpad snapshots across rounds.
+            call_messages = self._inject_scratchpad(working_messages)
+
             inference_request = InferenceRequest(
-                messages=working_messages,
+                messages=call_messages,
                 model=self._config.model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
@@ -207,6 +220,7 @@ class AgentLoop:
                     tool_calls_made=total_tool_calls,
                     rounds=round_num + 1,
                     hit_safety_limit=False,
+                    scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
                     working_messages=working_messages,
                 )
 
@@ -267,6 +281,7 @@ class AgentLoop:
             tool_calls_made=total_tool_calls,
             rounds=self._config.max_tool_rounds,
             hit_safety_limit=True,
+            scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
             working_messages=working_messages,
         )
 
@@ -388,6 +403,35 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _inject_scratchpad(self, messages: list[Message]) -> list[Message]:
+        """Return a copy of *messages* with scratchpad injected into the system prompt.
+
+        If no scratchpad is configured or it's empty, returns the
+        original list unchanged (no copy).  Otherwise, the system
+        message's content is extended with a ``<scratchpad>`` block.
+
+        Args:
+            messages: The working message list (not modified in-place).
+
+        Returns:
+            A message list suitable for the inference request.
+        """
+        if not self._scratchpad:
+            return messages
+
+        block = self._scratchpad.context_block()
+        if not block:
+            return messages
+
+        # Copy only the system message; the rest are shared references.
+        result: list[Message] = list(messages)
+        if result and result[0].get("role") == "system":
+            system = dict(result[0])
+            system["content"] = str(system.get("content", "")) + "\n\n" + block
+            result[0] = system
+
+        return result
 
     @staticmethod
     def _build_assistant_tool_message(result: InferenceResponse) -> Message:

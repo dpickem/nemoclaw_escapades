@@ -30,6 +30,18 @@
 
 ### Companion Design Documents
 
+- **[M2a Design — Reusable Agent Loop](design_m2a.md)** — `AgentLoop`
+  extraction, coding file tools, scratchpad, two-tier context compaction
+  (promoted from M3), basic `SKILL.md` loading (promoted from M6), layered
+  prompt builder with cache boundary.
+- **[M2b Design — Multi-Agent Orchestration](design_m2b.md)** — sub-agent
+  delegation via NMB, sandbox lifecycle, work collection and finalization,
+  per-agent concurrency caps, at-least-once delivery, in-process dispatch,
+  `ToolSearch`, basic operational cron (promoted from M6).
+- **[M2 Design (original)](design_m2.md)** — the original unified M2 design
+  before the M2a/M2b split. Full content preserved — detailed specs, comparison
+  tables, implementation phases, and multi-sandbox flows remain valuable as the
+  M3 design foundation.
 - **[Orchestrator Agent Design](orchestrator_design.md)** — agent loop
   architecture, streaming tool execution, system prompt construction, multi-agent
   coordinator mode, permission system, session compaction, model behavioral
@@ -44,6 +56,10 @@
 - **[Training Flywheel Design](training_flywheel_deep_dive.md)** — turning
   daily agent interactions into SFT/RL training data; two-layer trace capture,
   quality filtering, DPO pairs from review loops, Nemotron fine-tuning.
+- **[Build Your Own OpenClaw Deep Dive](deep_dives/build_your_own_openclaw_deep_dive.md)** —
+  analysis of the 18-step tutorial; patterns for event bus, context compaction,
+  routing, sub-agent dispatch, concurrency, prompt layering, config hot-reload,
+  and lessons applied to NemoClaw's architecture.
 
 ---
 
@@ -69,6 +85,7 @@ lessons learned.
 | **[NemoClaw](https://github.com/NVIDIA/NemoClaw)** | Setup harness that automates deploying OpenClaw into an OpenShell sandbox (Apache 2.0, alpha). Contains a blueprint (default policies + setup script) and a plugin (inference provider registration). **Not an agent** — no agent loop, no skills, no memory, no tools. Since this project builds a custom orchestrator rather than vanilla OpenClaw, NemoClaw provides no runtime value. Studied for policy patterns but not used in the stack. |
 | **[SecondBrain](https://github.com/dpickem/project_second_brain)** | Personal knowledge management & learning system (own project). Features: multi-source ingestion (PDF, web, books, code), LLM-powered summarization, Neo4j knowledge graph, spaced repetition learning (FSRS), Obsidian-based vault, and a React/FastAPI web UI. Serves as the "academic memory" layer for this project. |
 | **[Claude Code](https://github.com/zackautocracy/claude-code)** | Anthropic's terminal-native AI coding assistant (proprietary, source leaked March 2026). 1,884 TypeScript files, 40+ tools, 80+ slash commands, 90 feature flags. Key patterns adopted for this project: streaming-first async generator agent loop, three-tier context compaction (micro/full/session memory), two-stage auto-permission classifier, prompt cache boundary (`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`), model behavioral contract with transcript repair, coordinator mode for multi-agent orchestration, `skillify` for automatic workflow capture, `extractMemories` for passive memory extraction. See [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) and [Orchestrator Design](orchestrator_design.md). |
+| **[Build Your Own OpenClaw](https://github.com/czl9707/build-your-own-openclaw)** | 18-step progressive tutorial (1.1k stars, MIT) for building a lightweight OpenClaw from scratch. Companion to [pickle-bot](https://github.com/czl9707/pickle-bot) (the reference implementation). Key patterns studied: `EventBus` with at-least-once outbound delivery and crash recovery, `ContextGuard` with session-rolling compaction, tiered regex routing table, in-process sub-agent dispatch via `Future`-based rendezvous, per-agent `asyncio.Semaphore` concurrency control, layered `PromptBuilder` (identity → soul → bootstrap → runtime → channel hint), `SKILL.md` + `CRON.md` definition loading with YAML frontmatter, two-file config hot-reload (`config.user.yaml` + `config.runtime.yaml` deep merge), and `Channel` ABC for multi-platform transport. See [Build Your Own OpenClaw Deep Dive](deep_dives/build_your_own_openclaw_deep_dive.md). |
 | **nv-tools** | Unified CLI for NVIDIA services (Jira, Gerrit, GitLab, Slack, etc.). Provides read/write access to the professional ecosystem. |
 
 
@@ -242,21 +259,54 @@ by an inference hub endpoint.
   known-safe operations + async Slack escalation for dangerous ones.
   *(Inspired by Claude Code's YOLO classifier.)*
 
-### Milestone 2 — Coding Agent via OpenShell
+### Milestone 2a — Reusable Agent Loop, Coding Tools & Context Management
 
-Add a sub-agent that can write code inside a sandboxed OpenShell container.
+Extract the orchestrator's agent loop into a reusable component, equip it with
+coding tools, and add context management. This is a **single-agent milestone**
+— no delegation or multi-agent orchestration.
 
 **Deliverables:**
-- OpenShell container provisioning and lifecycle management (auto-GC).
-- Claude Code running inside the container as the initial coding agent
-  (fastest path to a working system; replaced by custom agent in M6+).
-- Policy definition for the coding agent (permissions, tools, constraints).
-- Sub-agent delegation from orchestrator → coding agent.
-- Bookkeeping of spawned sub-agents and result processing.
-- Git worktree support for parallel coding tasks.
+- Reusable `AgentLoop` class extracted from the orchestrator. Infrastructure-
+  agnostic; runs identically in the orchestrator, sub-agents, and local dev.
+- Concurrent tool execution by default via `asyncio.gather` with
+  `is_concurrency_safe` flag for write tools.
+- File tool suite: `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
+  `list_directory`, `bash`, `git_diff`, `git_commit`, `git_log`.
+- Agent scratchpad with context injection and snapshot return.
+- Two-tier context compaction: micro-compaction (tool result truncation, no
+  API call) and full compaction (LLM summary + session roll). *(Promoted from
+  M3 — the BYOO tutorial builds compaction at step 04, before even the event
+  system.)*
+- Basic `SKILL.md` loading via a `skill` tool. Read-only; auto-creation
+  deferred to M6. *(Promoted from M6 — the BYOO tutorial builds skills at
+  step 02, immediately after tools.)*
+- Layered prompt builder with cache boundary for provider prompt caching.
+
+See [M2a Design Document](design_m2a.md) for the full specification.
+
+### Milestone 2b — Multi-Agent Orchestration: Delegation, NMB & Concurrency
+
+Add multi-agent capability: the orchestrator delegates tasks to a coding
+sub-agent via NMB and collects completed work.
+
+**Deliverables:**
+- Sub-agent coding process reusing M2a's `AgentLoop` with coding tools.
+- Sandbox process spawning, workspace setup, and lifecycle management.
+- Sub-agent delegation from orchestrator → coding agent via NMB.
+- Work collection and model-driven finalization: present results to user,
+  commit/push/create PR on approval.
+- Per-agent concurrency caps (`asyncio.Semaphore`) and spawn depth limits.
+- At-least-once NMB delivery for critical messages (`task.complete`,
+  `audit.flush`).
+- `ToolSearch` meta-tool for progressive tool loading.
+- Basic operational cron: sandbox TTL watchdog, stale-session cleanup, health
+  checks. *(Promoted from M6 — the BYOO tutorial builds cron at step 12,
+  right after routing. Only operational cron; self-learning cron remains M6.)*
 - Input/output contract: seed workspace → task via NMB → results via NMB →
   cleanup. Contract is agent-agnostic so the underlying coding agent can be
   swapped without changing the orchestrator.
+
+See [M2b Design Document](design_m2b.md) for the full specification.
 
 ### Milestone 3 — Review Agent
 
@@ -438,6 +488,18 @@ Captured from the original brainstorm (2026-02-24):
    to `{}`, orphaned tool calls get synthetic placeholders, empty messages are
    filtered, and recovery prompts guide the model back on track. See
    [Orchestrator Design §9](orchestrator_design.md#9--model-behavioral-contract--defensive-llm-programming).
+10. **At-least-once outbound delivery** *(validated by Build Your Own
+    OpenClaw)* — Outbound events (agent responses, notifications) are persisted
+    to disk before delivery and deleted only after acknowledgement. On crash
+    recovery, pending events are replayed. This prevents silent message loss in
+    an always-on agent. See
+    [Build Your Own OpenClaw Deep Dive §4](deep_dives/build_your_own_openclaw_deep_dive.md#4--event-driven-architecture).
+11. **Progressive architecture** *(validated by Build Your Own OpenClaw)* —
+    The system is designed for incremental capability. Each milestone adds a
+    capability layer without rewriting prior work: CLI → event-driven → channels
+    → WebSocket → multi-agent → cron → memory. This mirrors the tutorial's
+    18-step progression and validates that the NemoClaw milestone structure (M1
+    → M6) is the right granularity.
 
 ## 9  Web UI — Mission Control Dashboard
 
@@ -751,6 +813,7 @@ considered as the system matures.
 | **OpenClaw Studio** | [grp06/openclaw-studio](https://github.com/grp06/openclaw-studio) | Open-source web dashboard for OpenClaw (1.8k stars). Key UI patterns adopted in §9: WebSocket-powered live agent monitoring, approval gates, cron management UI, direct browser chat, multi-device access via Tailscale. Next.js + Gateway architecture. |
 | **VibeClaw** | [jasonkneen/vibeclaw](https://github.com/jasonkneen/vibeclaw) | Browser-based OpenClaw interface with sandbox mode (run agents in-browser) and live gateway mode. Useful reference for zero-install onboarding experience. |
 | **Claude Code** | [zackautocracy/claude-code](https://github.com/zackautocracy/claude-code) (source), [instructkr/claw-code](https://github.com/instructkr/claw-code) (rewrite), [thtskaran/claude-code-analysis](https://github.com/thtskaran/claude-code-analysis) (analysis) | Anthropic's terminal-native coding assistant. Source leaked March 2026 via `.map` file. 1,884 TS files, 40+ tools, 90 feature flags. Studied for agent loop, compaction, permission, and multi-agent patterns. **Proprietary — not used directly but patterns adopted.** |
+| **Build Your Own OpenClaw** | [czl9707/build-your-own-openclaw](https://github.com/czl9707/build-your-own-openclaw) | 18-step progressive tutorial (1.1k stars, MIT) for building a lightweight OpenClaw. Companion reference implementation: [pickle-bot](https://github.com/czl9707/pickle-bot). Covers: chat loop → tools → skills → persistence → compaction → event-driven → channels → WebSocket → multi-agent routing → cron → prompt layering → sub-agent dispatch → concurrency control → memory. Valuable as a **minimal working implementation** of patterns NemoClaw designs in the abstract — validates (and simplifies) the event bus, routing, compaction, and dispatch patterns. |
 
 ### Deep Dives
 
@@ -776,6 +839,14 @@ considered as the system matures.
   security architecture (4,437-line bash parser, NO_TOOLS sandwich), daemon mode,
   proactive agent, bundled skills, model behavioral contract, 90 feature flags,
   and hidden features behind build-time dead code elimination.
+- **[Build Your Own OpenClaw Deep Dive](deep_dives/build_your_own_openclaw_deep_dive.md)** —
+  18-step tutorial analysis: `EventBus` with at-least-once delivery and crash
+  recovery, `ContextGuard` session-rolling compaction, tiered regex routing,
+  in-process sub-agent dispatch via `Future`-based rendezvous, per-agent
+  semaphore concurrency, 5-layer prompt builder, `SKILL.md`/`CRON.md` definition
+  loading, two-file config hot-reload, `Channel` ABC for multi-platform
+  transport, and a minimal working implementation of patterns NemoClaw designs
+  in the abstract.
 
 ### System Designs
 

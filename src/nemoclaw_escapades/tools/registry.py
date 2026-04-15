@@ -10,6 +10,11 @@ for parameters, and an async handler function.  The registry:
    approval gate and startup diagnostics.
 4. Enforces a per-tool output size cap (``max_result_chars``) so
    individual tools don't need their own truncation logic.
+
+The ``@tool`` decorator wraps an async function into a ``ToolSpec`` with
+an explicit name, description, and JSON Schema — no docstring parsing,
+no type introspection.  Inspired by the Build Your Own OpenClaw tutorial's
+decorator pattern.
 """
 
 from __future__ import annotations
@@ -70,6 +75,63 @@ class ToolSpec:
                 parameters=self.input_schema,
             )
         )
+
+
+# ── @tool decorator ──────────────────────────────────────────────────
+
+
+def tool(
+    name: str,
+    description: str,
+    parameters: dict[str, Any],
+    *,
+    display_name: str = "",
+    toolset: str = "",
+    is_read_only: bool = True,
+    check_fn: Callable[[], bool] | None = None,
+    max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
+) -> Callable[[Callable[..., Awaitable[str]]], ToolSpec]:
+    """Decorator that wraps an async function into a ``ToolSpec``.
+
+    The caller supplies the tool name, description, and JSON Schema
+    explicitly — no docstring parsing or type introspection.
+
+    Usage::
+
+        @tool(
+            "read_file",
+            "Read a text file from the workspace.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path."},
+                },
+                "required": ["path"],
+            },
+            display_name="Reading file",
+            toolset="files",
+        )
+        async def read_file(path: str) -> str:
+            ...
+
+        # read_file is now a ToolSpec, not a function.
+        registry.register(read_file)
+    """
+
+    def decorator(fn: Callable[..., Awaitable[str]]) -> ToolSpec:
+        return ToolSpec(
+            name=name,
+            description=description,
+            input_schema=parameters,
+            handler=fn,
+            is_read_only=is_read_only,
+            display_name=display_name,
+            toolset=toolset,
+            check_fn=check_fn,
+            max_result_chars=max_result_chars,
+        )
+
+    return decorator
 
 
 def _truncate(text: str, limit: int) -> str:

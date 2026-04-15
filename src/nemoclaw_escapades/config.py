@@ -97,6 +97,11 @@ DEFAULT_CONFLUENCE_URL: str = "https://nvidia.atlassian.net/wiki"
 # ── Slack search tool defaults ───────────────────────────────────────
 # (user-token based search/history — separate from the bot connector)
 
+# ── Web search tool defaults ────────────────────────────────────────
+
+DEFAULT_WEB_SEARCH_API: str = "brave"
+DEFAULT_WEB_SEARCH_LIMIT: int = 5
+
 # ── Misc ─────────────────────────────────────────────────────────────
 
 _TRUTHY_VALUES: frozenset[str] = frozenset({"true", "1", "yes"})
@@ -289,6 +294,34 @@ class SlackSearchConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """Web search and URL fetch settings for the orchestrator.
+
+    Uses the Brave Search API for ``web_search`` and the Jina Reader
+    API for ``web_fetch``.  Set ``BRAVE_SEARCH_API_KEY`` to enable
+    search.
+
+    ``web_fetch`` uses Jina Reader's **free tier** by default — no API
+    key required, rate-limited to 20 RPM.  This is sufficient for
+    typical agent workloads.  To raise the limit to 500 RPM, obtain a
+    free Jina API key (comes with 10M tokens) at https://jina.ai/reader/
+    and set ``JINA_API_KEY``.
+
+    Attributes:
+        enabled: Whether web search tools are registered.
+        api_key: Brave Search API key.
+        jina_api_key: Jina Reader API key.  Optional — the free tier
+            works without one.  Set for higher rate limits.
+        default_limit: Default number of search results to return.
+    """
+
+    enabled: bool = True
+    api_key: str = ""
+    jina_api_key: str = ""
+    default_limit: int = DEFAULT_WEB_SEARCH_LIMIT
+
+
+@dataclass
 class AuditConfig:
     """Configuration for the SQLite audit database.
 
@@ -327,6 +360,7 @@ class AppConfig:
         gerrit: Gerrit REST integration settings.
         confluence: Confluence REST integration settings.
         slack_search: Slack user-token search/history settings.
+        web_search: Web search and URL fetch settings.
     """
 
     slack: SlackConfig = field(default_factory=SlackConfig)
@@ -339,6 +373,7 @@ class AppConfig:
     gerrit: GerritConfig = field(default_factory=GerritConfig)
     confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
     slack_search: SlackSearchConfig = field(default_factory=SlackSearchConfig)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
 
 
 def load_config() -> AppConfig:
@@ -448,6 +483,14 @@ def load_config() -> AppConfig:
         slack_search=SlackSearchConfig(
             enabled=os.environ.get("SLACK_SEARCH_ENABLED", "true").lower() in _TRUTHY_VALUES,
             user_token=os.environ.get("SLACK_USER_TOKEN", ""),
+        ),
+        web_search=WebSearchConfig(
+            enabled=os.environ.get("WEB_SEARCH_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            api_key=os.environ.get("BRAVE_SEARCH_API_KEY", ""),
+            jina_api_key=os.environ.get("JINA_API_KEY", ""),
+            default_limit=int(
+                os.environ.get("WEB_SEARCH_DEFAULT_LIMIT", str(DEFAULT_WEB_SEARCH_LIMIT))
+            ),
         ),
     )
 

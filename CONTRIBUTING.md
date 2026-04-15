@@ -109,6 +109,14 @@ _MAX_RETRIES: int = 4
 @retry(max_retries=_MAX_RETRIES)
 ```
 
+Every module-level constant must have a type annotation **and** a
+comment on the line above explaining its purpose:
+
+```python
+# Seconds before a shell command is killed
+_DEFAULT_TIMEOUT_S: int = 120
+```
+
 If the value should be user-configurable, add it to `config.py` as a
 pydantic field with an environment variable override.
 

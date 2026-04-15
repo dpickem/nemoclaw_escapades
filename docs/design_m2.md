@@ -1,11 +1,18 @@
-# Milestone 2 — Sandboxed Coding Agents with OpenShell
+# Milestone 2 — Sandboxed Coding Agents with OpenShell (Original)
 
-> **Status:** Proposed
+> **Status:** Superseded by M2a/M2b split (April 2026). Content retained in
+> full — detailed specs, code examples, comparison tables, and implementation
+> phases are referenced by the new documents and remain valuable for later
+> milestones.
 >
-> **Last updated:** 2026-04-11
+> **Last updated:** 2026-04-14
+>
+> **Implementation documents:**
+> - [M2a — Reusable Agent Loop, Coding Tools & Context Management](design_m2a.md)
+> - [M2b — Multi-Agent Orchestration: Delegation, NMB & Concurrency](design_m2b.md)
 >
 > **Related:**
-> [Design Doc §4 M2](design.md#milestone-2--coding-agent-via-openshell) |
+> [Design Doc §4](design.md#4--milestones) |
 > [Orchestrator Design](orchestrator_design.md) |
 > [NMB Design](nmb_design.md) |
 > [Sandbox Spawn Design](sandbox_spawn_design.md) |
@@ -13,7 +20,31 @@
 > [Inference Call Auditing](inference_call_auditing_design.md) |
 > [Agent Trace Design](agent_trace_design.md) |
 > [Tools Integration Design](tools_integration_design.md) |
-> [Executor/Advisor NMB Design](executor_advisor_nmb_design.md)
+> [Executor/Advisor NMB Design](executor_advisor_nmb_design.md) |
+> [Build Your Own OpenClaw Deep Dive](deep_dives/build_your_own_openclaw_deep_dive.md)
+
+### What Changed in the M2a/M2b Split
+
+This document was written as a single milestone covering everything from
+`AgentLoop` extraction to multi-sandbox delegation. The April 2026 split
+separated it into two milestones and made several scope changes:
+
+| Change | This Document | M2a/M2b |
+|--------|--------------|---------|
+| **Milestone scope** | Single M2 with 7 phases | M2a (single capable agent, 3 phases) + M2b (multi-agent, 5 phases) |
+| **Context compaction** | Deferred to M3 | Promoted to M2a P3 |
+| **Basic SKILL.md loading** | Deferred to M6 | Promoted to M2a P3 |
+| **Basic operational cron** | Deferred to M6 | Promoted to M2b P4 |
+| **In-process dispatch (`LocalDispatcher`)** | Included (Phase 5) | Cut — throwaway code once NMB broker runs |
+| **Policy hot-reload** | Included (§6.3) | Deferred to M3 — no separate policy boundary in same-sandbox M2b |
+| **Git worktree support** | Included (Phase 7) | Cut — each sub-agent gets its own workspace |
+| **Multi-sandbox delegation** | In scope (§5) | Deferred to M3 — M2b uses same-sandbox subprocess |
+| **Artifact download via `openshell sandbox download`** | Throughout (§5, §10, §12) | M2b uses direct filesystem reads (same sandbox) |
+
+Sections below reflect the **original unified design**. Where M2a/M2b diverge,
+the implementation documents take precedence. Content here that describes
+multi-sandbox flows (downloads, policy hot-reload, separate sandbox policies)
+remains valuable as the M3 design foundation.
 
 ---
 
@@ -2614,7 +2645,67 @@ For full analysis, see:
 | No YOLO-style permission classifier | Claude Code | Low | M2's binary read/write + approval gate is sufficient for now. Evolve to a multi-tier classifier when the tool surface grows | M5+ |
 | No prompt cache boundary | Claude Code | Medium | Split system prompt into static prefix (cached) + dynamic suffix (per-turn). Already planned in [Orchestrator Design §4](orchestrator_design.md#4--system-prompt-construction) | M2+ |
 
-### 18.7 Recommendations
+### 18.7 Lessons from Build Your Own OpenClaw Tutorial
+
+The [Build Your Own OpenClaw tutorial](https://github.com/czl9707/build-your-own-openclaw)
+(1.1k stars, MIT) provides a minimal working implementation of many patterns
+NemoClaw designs in the abstract. Key lessons for M2:
+
+**1. Concurrent tool execution is simple and safe.**
+The tutorial runs *all* tool calls in a turn via `asyncio.gather` from step 01
+onward. This validates that NemoClaw's proposed `is_concurrency_safe` flag is
+the right granularity — the tutorial defaults to concurrent and has no reported
+issues. NemoClaw should do the same for M2 rather than deferring to M2+.
+
+**2. In-process sub-agent dispatch via `Future`-based rendezvous works well.**
+The tutorial's `subagent_dispatch` tool publishes a `DispatchEvent`, subscribes
+to `DispatchResultEvent` filtered by session ID, and `await`s an
+`asyncio.Future` — a clean 50-line pattern. NemoClaw's NMB-based dispatch is
+more powerful (cross-sandbox, cross-host) but the tutorial proves that the
+*logical flow* is correct. For local-process development (no OpenShell), NemoClaw
+should support a similar in-process dispatch path.
+
+**3. Per-agent semaphore concurrency control is the right primitive.**
+The tutorial's `AgentWorker` creates `asyncio.Semaphore(max_concurrency)` per
+agent ID and auto-cleans semaphores when no waiters remain. This is directly
+applicable to NemoClaw's orchestrator delegation module — add
+`max_concurrent_tasks` to the delegation config, enforced via semaphore before
+`openshell sandbox create`.
+
+**4. `ContextGuard` with session rolling is a proven compaction strategy.**
+The tutorial's compaction (token estimate → truncate tool blobs → LLM summary
+→ roll to new session with routing cache update) validates NemoClaw's planned
+three-tier compaction. The "session roll" pattern (create new session, copy
+summary + tail, re-point routing) is worth adopting for the full-compaction
+tier.
+
+**5. At-least-once outbound delivery with crash recovery is essential.**
+The tutorial's `EventBus` persists `OutboundEvent` to disk (atomic
+write: tmp + fsync + rename) and deletes only after `ack()`. On startup,
+`_recover()` replays pending events. NemoClaw's NMB broker should adopt
+the same pattern for `task.complete` and `audit.flush` messages.
+
+**6. Layered prompt builder separates concerns cleanly.**
+The tutorial's 5-layer `PromptBuilder` (identity → soul → bootstrap →
+runtime → channel hint) validates NemoClaw's planned system prompt
+construction. The "channel hint" layer (cron vs subagent vs platform) is
+directly applicable — sub-agents need different behavioral guidance than
+user-facing agents.
+
+**7. Config hot-reload with user/runtime file separation works.**
+The tutorial's two-file approach (`config.user.yaml` for durable settings +
+`config.runtime.yaml` for ephemeral state like session caches) with
+`watchdog` file monitoring validates the split. NemoClaw should adopt this
+for development mode even if production mode uses the orchestrator's
+config system.
+
+**8. Explicit gaps document (`GAP.md`) is good practice.**
+The tutorial maintains a `GAP.md` that lists features intentionally excluded
+from the tutorial vs the reference implementation. NemoClaw should maintain
+a similar document tracking features deferred from each milestone to prevent
+scope creep.
+
+### 18.8 Recommendations
 
 **For M2 (immediate):**
 
@@ -2622,13 +2713,20 @@ For full analysis, see:
    `asyncio.gather` in `AgentLoop`. This is a small change that closes one
    of the highest-impact gaps. Mark `read_file`, `grep`, `glob`,
    `scratchpad_read`, `git_diff`, `git_log` as concurrency-safe.
+   *(Validated by BYOO tutorial: concurrent by default from step 01.)*
 2. **Add spawn depth and concurrency caps** to the delegation module. Lift
    OpenClaw's `maxSpawnDepth` / `maxChildrenPerAgent` pattern — simple
    integer config values checked before `openshell sandbox create`.
+   *(BYOO tutorial uses per-agent `asyncio.Semaphore` — adopt the same
+   primitive.)*
 3. **Implement the prompt cache boundary** (`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`).
    The system prompt is already loaded from a file; splitting it into static
    prefix + dynamic suffix is straightforward and saves ~90% on subsequent
    turns for providers that support prompt caching.
+4. **Add at-least-once delivery for NMB `task.complete` messages.** Persist
+   completion payloads to disk before sending; delete after orchestrator
+   acknowledgement. *(Validated by BYOO tutorial's `EventBus` outbound
+   persistence pattern.)*
 
 **For M3 (review agent):**
 
@@ -2676,3 +2774,5 @@ For full analysis, see:
 - [OpenClaw Deep Dive](deep_dives/openclaw_deep_dive.md) — Pi agent, Gateway sessions, tool profiles, skills, Canvas, sandbox execution
 - [Claude Code Deep Dive](deep_dives/claude_code_deep_dive.md) — streaming `query()`, coordinator mode, three-tier compaction, YOLO classifier, prompt cache boundary
 - [Comparison Matrix](deep_dives/hermes_vs_openclaw_vs_claude_code_comparison.md) — side-by-side across all dimensions
+- [Build Your Own OpenClaw Deep Dive](deep_dives/build_your_own_openclaw_deep_dive.md) — 18-step tutorial analysis: event bus, compaction, routing, dispatch, concurrency, prompt layering, config hot-reload
+- [Build Your Own OpenClaw](https://github.com/czl9707/build-your-own-openclaw) (source, 1.1k stars, MIT) — minimal working implementation of OpenClaw patterns

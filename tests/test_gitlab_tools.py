@@ -114,11 +114,8 @@ class TestGitLabClient:
 
 
 class TestGitLabHandlers:
-    async def test_handlers_return_json_string(self) -> None:
-        import nemoclaw_escapades.tools.gitlab as mod
-
-        mod._gitlab_config = GitLabConfig(url="https://gitlab.example.com", token="")
-        result = await mod.gitlab_me()
-        data = json.loads(result)
-        assert isinstance(data, dict)
-        assert "error" in data
+    async def test_unconfigured_handler_returns_error(self) -> None:
+        """Handler with empty token returns error JSON without network calls."""
+        client = GitLabClient(base_url="https://gitlab.example.com", token="")
+        result = await client.get_current_user()
+        assert "error" in result

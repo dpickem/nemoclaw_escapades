@@ -49,6 +49,7 @@ from nemoclaw_escapades.tools.gitlab import register_gitlab_tools
 from nemoclaw_escapades.tools.jira import register_jira_tools
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.slack_search import register_slack_search_tools
+from nemoclaw_escapades.tools.web_search import register_web_search_tools
 
 
 async def main() -> None:
@@ -81,6 +82,8 @@ async def main() -> None:
         register_confluence_tools(registry, config.confluence)
     if config.slack_search.enabled:
         register_slack_search_tools(registry, config.slack_search)
+    if config.web_search.enabled:
+        register_web_search_tools(registry, config.web_search)
 
     tools: ToolRegistry | None
     if registry.names:

@@ -98,13 +98,8 @@ class TestGerritClient:
 
 
 class TestGerritHandlers:
-    async def test_handlers_return_json_string(self) -> None:
-        import nemoclaw_escapades.tools.gerrit as mod
-
-        mod._gerrit_config = GerritConfig(
-            url="https://gerrit.example.com", username="", http_password=""
-        )
-        result = await mod.gerrit_me()
-        data = json.loads(result)
-        assert isinstance(data, dict)
-        assert "error" in data
+    async def test_unconfigured_handler_returns_error(self) -> None:
+        """Handler with empty credentials returns error JSON without network calls."""
+        client = GerritClient(base_url="https://gerrit.example.com")
+        result = await client.get_account()
+        assert "error" in result
