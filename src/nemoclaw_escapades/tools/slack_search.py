@@ -92,9 +92,7 @@ class SlackSearchClient:
             "GET", "/search.messages", params={"query": query, "count": count}
         )
 
-    async def list_channels(
-        self, limit: int = _DEFAULT_SEARCH_LIMIT
-    ) -> dict[str, Any]:
+    async def list_channels(self, limit: int = _DEFAULT_SEARCH_LIMIT) -> dict[str, Any]:
         return await self._request(
             "GET",
             "/conversations.list",
@@ -122,9 +120,7 @@ class SlackSearchClient:
     async def get_user_info(self, user_id: str) -> dict[str, Any]:
         return await self._request("GET", "/users.info", params={"user": user_id})
 
-    async def send_message(
-        self, channel_id: str, text: str, thread_ts: str = ""
-    ) -> dict[str, Any]:
+    async def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> dict[str, Any]:
         payload: dict[str, Any] = {"channel": channel_id, "text": text}
         if thread_ts:
             payload["thread_ts"] = thread_ts
@@ -163,9 +159,7 @@ async def slack_list_channels(limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
     return _format(await _get_client().list_channels(limit=limit))
 
 
-async def slack_get_channel_history(
-    channel_id: str, limit: int = _DEFAULT_HISTORY_LIMIT
-) -> str:
+async def slack_get_channel_history(channel_id: str, limit: int = _DEFAULT_HISTORY_LIMIT) -> str:
     """Get recent messages from a Slack channel."""
     return _format(await _get_client().get_channel_history(channel_id, limit=limit))
 
@@ -174,9 +168,7 @@ async def slack_get_thread_replies(
     channel_id: str, thread_ts: str, limit: int = _DEFAULT_HISTORY_LIMIT
 ) -> str:
     """Get replies in a Slack thread."""
-    return _format(
-        await _get_client().get_thread_replies(channel_id, thread_ts, limit=limit)
-    )
+    return _format(await _get_client().get_thread_replies(channel_id, thread_ts, limit=limit))
 
 
 async def slack_get_user_info(user_id: str) -> str:
@@ -184,13 +176,9 @@ async def slack_get_user_info(user_id: str) -> str:
     return _format(await _get_client().get_user_info(user_id))
 
 
-async def slack_send_message(
-    channel_id: str, text: str, thread_ts: str = ""
-) -> str:
+async def slack_send_message(channel_id: str, text: str, thread_ts: str = "") -> str:
     """Send a message to a Slack channel or thread."""
-    return _format(
-        await _get_client().send_message(channel_id, text, thread_ts=thread_ts)
-    )
+    return _format(await _get_client().send_message(channel_id, text, thread_ts=thread_ts))
 
 
 # ---------------------------------------------------------------------------
@@ -210,104 +198,122 @@ def register_slack_search_tools(registry: ToolRegistry, config: SlackSearchConfi
     _ts = "slack_search"
     _ck = _slack_search_available
 
-    registry.register(ToolSpec(
-        name="slack_search_messages",
-        display_name="Searching Slack",
-        description=(
-            "Search Slack messages across all channels. "
-            'Example: slack_search_messages(query="deployment issue in:#ops")'
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query (Slack syntax)"},
-                "count": {"type": "integer", "description": "Max results", "default": 10},
+    registry.register(
+        ToolSpec(
+            name="slack_search_messages",
+            display_name="Searching Slack",
+            description=(
+                "Search Slack messages across all channels. "
+                'Example: slack_search_messages(query="deployment issue in:#ops")'
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query (Slack syntax)"},
+                    "count": {"type": "integer", "description": "Max results", "default": 10},
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-        handler=slack_search_messages,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_search_messages,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="slack_list_channels",
-        display_name="Listing Slack channels",
-        description="List Slack channels accessible to the user.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Max results", "default": 10},
+    registry.register(
+        ToolSpec(
+            name="slack_list_channels",
+            display_name="Listing Slack channels",
+            description="List Slack channels accessible to the user.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max results", "default": 10},
+                },
             },
-        },
-        handler=slack_list_channels,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_list_channels,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="slack_get_channel_history",
-        display_name="Getting channel history",
-        description="Get recent messages from a Slack channel.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "channel_id": {"type": "string", "description": "Slack channel ID"},
-                "limit": {"type": "integer", "description": "Max messages", "default": 20},
+    registry.register(
+        ToolSpec(
+            name="slack_get_channel_history",
+            display_name="Getting channel history",
+            description="Get recent messages from a Slack channel.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "Slack channel ID"},
+                    "limit": {"type": "integer", "description": "Max messages", "default": 20},
+                },
+                "required": ["channel_id"],
             },
-            "required": ["channel_id"],
-        },
-        handler=slack_get_channel_history,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_get_channel_history,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="slack_get_thread_replies",
-        display_name="Getting thread replies",
-        description="Get replies in a Slack thread.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "channel_id": {"type": "string", "description": "Slack channel ID"},
-                "thread_ts": {"type": "string", "description": "Thread timestamp"},
-                "limit": {"type": "integer", "description": "Max replies", "default": 20},
+    registry.register(
+        ToolSpec(
+            name="slack_get_thread_replies",
+            display_name="Getting thread replies",
+            description="Get replies in a Slack thread.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "Slack channel ID"},
+                    "thread_ts": {"type": "string", "description": "Thread timestamp"},
+                    "limit": {"type": "integer", "description": "Max replies", "default": 20},
+                },
+                "required": ["channel_id", "thread_ts"],
             },
-            "required": ["channel_id", "thread_ts"],
-        },
-        handler=slack_get_thread_replies,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_get_thread_replies,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="slack_get_user_info",
-        display_name="Getting Slack user info",
-        description="Get profile information about a Slack user by user ID.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "user_id": {"type": "string", "description": "Slack user ID (e.g. U12345)"},
+    registry.register(
+        ToolSpec(
+            name="slack_get_user_info",
+            display_name="Getting Slack user info",
+            description="Get profile information about a Slack user by user ID.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "Slack user ID (e.g. U12345)"},
+                },
+                "required": ["user_id"],
             },
-            "required": ["user_id"],
-        },
-        handler=slack_get_user_info,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_get_user_info,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="slack_send_message",
-        display_name="Sending Slack message",
-        description=(
-            "Send a message to a Slack channel or thread using the user token. "
-            "Requires approval."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "channel_id": {"type": "string", "description": "Slack channel ID"},
-                "text": {"type": "string", "description": "Message text"},
-                "thread_ts": {"type": "string", "description": "Thread timestamp (optional)"},
+    registry.register(
+        ToolSpec(
+            name="slack_send_message",
+            display_name="Sending Slack message",
+            description=(
+                "Send a message to a Slack channel or thread using the user token. "
+                "Requires approval."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "Slack channel ID"},
+                    "text": {"type": "string", "description": "Message text"},
+                    "thread_ts": {"type": "string", "description": "Thread timestamp (optional)"},
+                },
+                "required": ["channel_id", "text"],
             },
-            "required": ["channel_id", "text"],
-        },
-        handler=slack_send_message,
-        is_read_only=False,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=slack_send_message,
+            is_read_only=False,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )

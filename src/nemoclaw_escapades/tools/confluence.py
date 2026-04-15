@@ -90,9 +90,7 @@ class ConfluenceClient:
 
     # -- READ operations ---------------------------------------------------
 
-    async def search(
-        self, cql: str, limit: int = _DEFAULT_SEARCH_LIMIT
-    ) -> dict[str, Any]:
+    async def search(self, cql: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> dict[str, Any]:
         """Search Confluence using CQL."""
         return await self._request(
             "GET",
@@ -216,16 +214,12 @@ async def confluence_get_page(page_id: str) -> str:
     return _format(await _get_client().get_page(page_id))
 
 
-async def confluence_get_page_children(
-    page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT
-) -> str:
+async def confluence_get_page_children(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
     """List child pages of a Confluence page."""
     return _format(await _get_client().get_page_children(page_id, limit=limit))
 
 
-async def confluence_get_comments(
-    page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT
-) -> str:
+async def confluence_get_comments(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
     """Get comments on a Confluence page."""
     return _format(await _get_client().get_comments(page_id, limit=limit))
 
@@ -243,15 +237,11 @@ async def confluence_create_page(
 ) -> str:
     """Create a new Confluence page."""
     return _format(
-        await _get_client().create_page(
-            space_key, title, body, parent_id=parent_id or None
-        )
+        await _get_client().create_page(space_key, title, body, parent_id=parent_id or None)
     )
 
 
-async def confluence_update_page(
-    page_id: str, title: str, body: str, version_number: int
-) -> str:
+async def confluence_update_page(page_id: str, title: str, body: str, version_number: int) -> str:
     """Update an existing Confluence page."""
     return _format(await _get_client().update_page(page_id, title, body, version_number))
 
@@ -283,158 +273,188 @@ def register_confluence_tools(registry: ToolRegistry, config: ConfluenceConfig) 
     _ts = "confluence"
     _ck = _confluence_available
 
-    registry.register(ToolSpec(
-        name="confluence_search",
-        display_name="Searching Confluence",
-        description=(
-            "Search Confluence pages using CQL. Example: "
-            '"confluence_search(cql=\'type=page AND space=MYSPACE AND text~\\"deployment\\"\')"'
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "cql": {"type": "string", "description": "CQL query string"},
-                "limit": {"type": "integer", "description": "Max results", "default": 10},
-            },
-            "required": ["cql"],
-        },
-        handler=confluence_search,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_get_page",
-        display_name="Getting Confluence page",
-        description="Get a Confluence page by ID, including its body content.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Confluence page ID"},
-            },
-            "required": ["page_id"],
-        },
-        handler=confluence_get_page,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_get_page_children",
-        display_name="Listing child pages",
-        description="List child pages of a Confluence page.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Parent page ID"},
-                "limit": {"type": "integer", "description": "Max results", "default": 10},
-            },
-            "required": ["page_id"],
-        },
-        handler=confluence_get_page_children,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_get_comments",
-        display_name="Getting page comments",
-        description="Get comments on a Confluence page.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Page ID"},
-                "limit": {"type": "integer", "description": "Max results", "default": 10},
-            },
-            "required": ["page_id"],
-        },
-        handler=confluence_get_comments,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_get_labels",
-        display_name="Getting page labels",
-        description="Get labels on a Confluence page.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Page ID"},
-            },
-            "required": ["page_id"],
-        },
-        handler=confluence_get_labels,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_create_page",
-        display_name="Creating Confluence page",
-        description="Create a new Confluence page in a space. Requires approval.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "space_key": {"type": "string", "description": "Space key (e.g. MYSPACE)"},
-                "title": {"type": "string", "description": "Page title"},
-                "body": {"type": "string", "description": "Page body (Confluence storage format)"},
-                "parent_id": {"type": "string", "description": "Optional parent page ID"},
-            },
-            "required": ["space_key", "title", "body"],
-        },
-        handler=confluence_create_page,
-        is_read_only=False,
-        toolset=_ts, check_fn=_ck,
-    ))
-
-    registry.register(ToolSpec(
-        name="confluence_update_page",
-        display_name="Updating Confluence page",
-        description="Update an existing Confluence page. Requires approval.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Page ID to update"},
-                "title": {"type": "string", "description": "New page title"},
-                "body": {"type": "string", "description": "New page body (storage format)"},
-                "version_number": {
-                    "type": "integer",
-                    "description": "New version number (current version + 1)",
+    registry.register(
+        ToolSpec(
+            name="confluence_search",
+            display_name="Searching Confluence",
+            description=(
+                "Search Confluence pages using CQL. Example: "
+                '"confluence_search(cql=\'type=page AND space=MYSPACE AND text~\\"deployment\\"\')"'
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "cql": {"type": "string", "description": "CQL query string"},
+                    "limit": {"type": "integer", "description": "Max results", "default": 10},
                 },
+                "required": ["cql"],
             },
-            "required": ["page_id", "title", "body", "version_number"],
-        },
-        handler=confluence_update_page,
-        is_read_only=False,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=confluence_search,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="confluence_add_comment",
-        display_name="Adding Confluence comment",
-        description="Add a comment to a Confluence page. Requires approval.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Page ID"},
-                "body": {"type": "string", "description": "Comment body (storage format)"},
+    registry.register(
+        ToolSpec(
+            name="confluence_get_page",
+            display_name="Getting Confluence page",
+            description="Get a Confluence page by ID, including its body content.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Confluence page ID"},
+                },
+                "required": ["page_id"],
             },
-            "required": ["page_id", "body"],
-        },
-        handler=confluence_add_comment,
-        is_read_only=False,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=confluence_get_page,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
 
-    registry.register(ToolSpec(
-        name="confluence_add_label",
-        display_name="Adding Confluence label",
-        description="Add a label to a Confluence page. Requires approval.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "page_id": {"type": "string", "description": "Page ID"},
-                "label": {"type": "string", "description": "Label name"},
+    registry.register(
+        ToolSpec(
+            name="confluence_get_page_children",
+            display_name="Listing child pages",
+            description="List child pages of a Confluence page.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Parent page ID"},
+                    "limit": {"type": "integer", "description": "Max results", "default": 10},
+                },
+                "required": ["page_id"],
             },
-            "required": ["page_id", "label"],
-        },
-        handler=confluence_add_label,
-        is_read_only=False,
-        toolset=_ts, check_fn=_ck,
-    ))
+            handler=confluence_get_page_children,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_get_comments",
+            display_name="Getting page comments",
+            description="Get comments on a Confluence page.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID"},
+                    "limit": {"type": "integer", "description": "Max results", "default": 10},
+                },
+                "required": ["page_id"],
+            },
+            handler=confluence_get_comments,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_get_labels",
+            display_name="Getting page labels",
+            description="Get labels on a Confluence page.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID"},
+                },
+                "required": ["page_id"],
+            },
+            handler=confluence_get_labels,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_create_page",
+            display_name="Creating Confluence page",
+            description="Create a new Confluence page in a space. Requires approval.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "space_key": {"type": "string", "description": "Space key (e.g. MYSPACE)"},
+                    "title": {"type": "string", "description": "Page title"},
+                    "body": {
+                        "type": "string",
+                        "description": "Page body (Confluence storage format)",
+                    },
+                    "parent_id": {"type": "string", "description": "Optional parent page ID"},
+                },
+                "required": ["space_key", "title", "body"],
+            },
+            handler=confluence_create_page,
+            is_read_only=False,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_update_page",
+            display_name="Updating Confluence page",
+            description="Update an existing Confluence page. Requires approval.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID to update"},
+                    "title": {"type": "string", "description": "New page title"},
+                    "body": {"type": "string", "description": "New page body (storage format)"},
+                    "version_number": {
+                        "type": "integer",
+                        "description": "New version number (current version + 1)",
+                    },
+                },
+                "required": ["page_id", "title", "body", "version_number"],
+            },
+            handler=confluence_update_page,
+            is_read_only=False,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_add_comment",
+            display_name="Adding Confluence comment",
+            description="Add a comment to a Confluence page. Requires approval.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID"},
+                    "body": {"type": "string", "description": "Comment body (storage format)"},
+                },
+                "required": ["page_id", "body"],
+            },
+            handler=confluence_add_comment,
+            is_read_only=False,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="confluence_add_label",
+            display_name="Adding Confluence label",
+            description="Add a label to a Confluence page. Requires approval.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID"},
+                    "label": {"type": "string", "description": "Label name"},
+                },
+                "required": ["page_id", "label"],
+            },
+            handler=confluence_add_label,
+            is_read_only=False,
+            toolset=_ts,
+            check_fn=_ck,
+        )
+    )

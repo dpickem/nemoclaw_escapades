@@ -25,6 +25,14 @@ DEFAULT_LOG_LEVEL: str = "INFO"
 DEFAULT_TEMPERATURE: float = 0.7
 DEFAULT_MAX_TOKENS: int = 2048
 
+# ── Agent loop defaults ──────────────────────────────────────────────
+
+# Safety limit: max inference calls per AgentLoop.run() before returning
+# a partial answer.  Prevents infinite tool-call spirals.
+DEFAULT_MAX_TOOL_ROUNDS: int = 10
+# How many times to re-prompt when finish_reason="length" truncates output.
+DEFAULT_MAX_CONTINUATION_RETRIES: int = 2
+
 # ── NMB broker defaults ───────────────────────────────────────────────
 
 DEFAULT_NMB_HOST: str = "0.0.0.0"
@@ -65,6 +73,9 @@ DEFAULT_NMB_CHANNEL_QUEUE_SIZE: int = 1_000
 DEFAULT_AUDIT_QUEUE_SIZE: int = 10_000
 # Maximum items flushed in a single audit batch commit.
 DEFAULT_AUDIT_BATCH_SIZE: int = 100
+# Commits between WAL checkpoints.  Keeps the main .db file fresh so
+# single-file copies (openshell sandbox download) contain all data.
+DEFAULT_AUDIT_CHECKPOINT_INTERVAL: int = 10
 
 # ── Jira tool defaults ────────────────────────────────────────────────
 

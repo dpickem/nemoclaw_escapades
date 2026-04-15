@@ -51,6 +51,7 @@ RUN mkdir -p /app/logs && chown sandbox:sandbox /app/logs
 
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+ENV LOG_FILE=/app/logs/nemoclaw.log
 
 # Do NOT set USER or ENTRYPOINT here.  OpenShell replaces the entrypoint
 # with its own supervisor (openshell-sandbox), which needs root to apply

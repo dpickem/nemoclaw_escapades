@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.config import OrchestratorConfig
 from nemoclaw_escapades.models.types import (
     ActionBlock,
@@ -17,7 +18,6 @@ from nemoclaw_escapades.models.types import (
     TokenUsage,
     ToolCall,
 )
-from nemoclaw_escapades.orchestrator.approval import WriteApproval
 from nemoclaw_escapades.orchestrator.orchestrator import (
     APPROVAL_ACTION_APPROVE,
     APPROVAL_ACTION_DENY,

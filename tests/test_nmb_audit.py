@@ -242,3 +242,103 @@ class TestAuditDB:
         out_path = str(tmp_path / "since.jsonl")
         count = await audit_db.export_messages_jsonl(out_path, since=250.0)
         assert count == len([r for r in all_rows if r["timestamp"] >= 250.0])
+
+
+class TestWALCheckpoint:
+    """Verify WAL checkpoint behaviour so downloads always get full data."""
+
+    async def test_checkpoint_folds_wal_into_main_db(self, tmp_path: Path) -> None:
+        """After checkpoint(), the main .db file is self-contained."""
+        db_path = str(tmp_path / "ckpt.db")
+        db = AuditDB(db_path)
+        await db.open()
+        try:
+            await db.log_connection("sandbox-ckpt-1")
+            await db.checkpoint()
+
+            import sqlite3
+
+            wal_path = Path(db_path + "-wal")
+            wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+            assert wal_size == 0, f"WAL should be truncated after checkpoint, got {wal_size}"
+
+            conn = sqlite3.connect(db_path)
+            row = conn.execute("SELECT COUNT(*) FROM connections").fetchone()
+            conn.close()
+            assert row[0] == 1
+        finally:
+            await db.close()
+
+    async def test_periodic_checkpoint_triggers_at_interval(self, tmp_path: Path) -> None:
+        """Auto-checkpoint fires after checkpoint_interval commits."""
+        db_path = str(tmp_path / "periodic.db")
+        db = AuditDB(db_path, checkpoint_interval=3)
+        await db.open()
+        try:
+            for i in range(2):
+                await db.log_connection(f"sandbox-{i}")
+            assert db._commits_since_checkpoint == 2
+
+            await db.log_connection("sandbox-2")
+            assert db._commits_since_checkpoint == 0, "Should reset after checkpoint"
+        finally:
+            await db.close()
+
+    async def test_checkpoint_disabled_when_interval_zero(self, tmp_path: Path) -> None:
+        """checkpoint_interval=0 disables periodic checkpoints."""
+        db_path = str(tmp_path / "no_periodic.db")
+        db = AuditDB(db_path, checkpoint_interval=0)
+        await db.open()
+        try:
+            for i in range(20):
+                await db.log_connection(f"sandbox-{i}")
+            assert db._commits_since_checkpoint == 0, "Counter should stay at 0 when disabled"
+        finally:
+            await db.close()
+
+    async def test_close_checkpoints_wal(self, tmp_path: Path) -> None:
+        """close() should checkpoint, leaving no WAL data behind."""
+        db_path = str(tmp_path / "close_ckpt.db")
+        db = AuditDB(db_path, checkpoint_interval=0)
+        await db.open()
+        await db.log_connection("sandbox-close")
+        await db.close()
+
+        wal_path = Path(db_path + "-wal")
+        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+        assert wal_size == 0
+
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute("SELECT COUNT(*) FROM connections").fetchone()
+        conn.close()
+        assert row[0] == 1
+
+    async def test_tool_call_triggers_checkpoint(self, tmp_path: Path) -> None:
+        """log_tool_call increments the checkpoint counter."""
+        db_path = str(tmp_path / "tc_ckpt.db")
+        db = AuditDB(db_path, checkpoint_interval=2)
+        await db.open()
+        try:
+            await db.log_tool_call(
+                service="test",
+                command="test_cmd",
+                args="{}",
+                operation_type="READ",
+                duration_ms=1.0,
+                success=True,
+            )
+            assert db._commits_since_checkpoint == 1
+
+            await db.log_tool_call(
+                service="test",
+                command="test_cmd_2",
+                args="{}",
+                operation_type="READ",
+                duration_ms=2.0,
+                success=True,
+            )
+            assert db._commits_since_checkpoint == 0
+        finally:
+            await db.close()

@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 
 from nemoclaw_escapades.config import SlackSearchConfig
+from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.slack_search import (
     SlackSearchClient,
     register_slack_search_tools,
 )
-from nemoclaw_escapades.tools.registry import ToolRegistry
 
 _TEST_CONFIG = SlackSearchConfig(user_token="xoxp-test-token")
 

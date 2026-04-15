@@ -14,7 +14,7 @@ synthetic placeholder injection, and malformed tool-input fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from nemoclaw_escapades.models.types import InferenceResponse
 from nemoclaw_escapades.observability.logging import get_logger
@@ -37,7 +37,7 @@ CONTINUATION_PROMPT = (
 MAX_CONTINUATION_RETRIES = 2
 
 
-class RepairReason(str, Enum):
+class RepairReason(StrEnum):
     EMPTY_RESPONSE = "empty_response"
     TRUNCATED = "truncated"
     CONTENT_FILTER = "content_filter"

@@ -16,7 +16,7 @@ _TEST_CONFIG = GitLabConfig(
     token="glpat-test-token",
 )
 
-_EXPECTED_TOOLS = {
+_EXPECTED_READ_TOOLS = {
     "gitlab_search_projects",
     "gitlab_get_project",
     "gitlab_list_merge_requests",
@@ -24,10 +24,33 @@ _EXPECTED_TOOLS = {
     "gitlab_get_merge_request_changes",
     "gitlab_list_pipelines",
     "gitlab_get_pipeline",
+    "gitlab_list_pipeline_jobs",
     "gitlab_get_job_log",
+    "gitlab_get_file",
+    "gitlab_list_mr_notes",
+    "gitlab_list_mr_discussions",
+    "gitlab_get_mr_approvals",
+    "gitlab_list_branches",
+    "gitlab_list_commits",
+    "gitlab_get_commit",
+    "gitlab_compare",
     "gitlab_me",
-    "gitlab_create_mr_note",
 }
+
+_EXPECTED_WRITE_TOOLS = {
+    "gitlab_create_mr_note",
+    "gitlab_update_mr_note",
+    "gitlab_reply_to_discussion",
+    "gitlab_resolve_discussion",
+    "gitlab_approve_mr",
+    "gitlab_unapprove_mr",
+    "gitlab_merge_mr",
+    "gitlab_rebase_mr",
+    "gitlab_update_mr",
+    "gitlab_create_mr",
+}
+
+_EXPECTED_TOOLS = _EXPECTED_READ_TOOLS | _EXPECTED_WRITE_TOOLS
 
 
 class TestGitLabToolRegistration:
@@ -39,8 +62,7 @@ class TestGitLabToolRegistration:
     def test_read_tools_are_read_only(self) -> None:
         registry = ToolRegistry()
         register_gitlab_tools(registry, _TEST_CONFIG)
-        read_tools = _EXPECTED_TOOLS - {"gitlab_create_mr_note"}
-        for name in read_tools:
+        for name in _EXPECTED_READ_TOOLS:
             spec = registry.get(name)
             assert spec is not None
             assert spec.is_read_only is True, f"{name} should be read_only"
@@ -48,9 +70,10 @@ class TestGitLabToolRegistration:
     def test_write_tools_are_not_read_only(self) -> None:
         registry = ToolRegistry()
         register_gitlab_tools(registry, _TEST_CONFIG)
-        spec = registry.get("gitlab_create_mr_note")
-        assert spec is not None
-        assert spec.is_read_only is False
+        for name in _EXPECTED_WRITE_TOOLS:
+            spec = registry.get(name)
+            assert spec is not None
+            assert spec.is_read_only is False, f"{name} should NOT be read_only"
 
     def test_all_tools_have_gitlab_toolset(self) -> None:
         registry = ToolRegistry()

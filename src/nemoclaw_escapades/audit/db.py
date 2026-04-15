@@ -8,6 +8,41 @@ flywheel.
 Schema is managed by Alembic — the application never issues DDL
 directly.  On first open, ``AuditDB`` runs ``alembic upgrade head``
 to ensure the schema is current.
+
+WAL mode and checkpointing
+--------------------------
+The database runs in SQLite WAL (Write-Ahead Logging) mode for
+concurrent-read performance.  In WAL mode, committed data lives in
+a separate ``-wal`` file until a *checkpoint* folds it back into the
+main ``.db`` file.
+
+SQLite's built-in auto-checkpoint only fires after 1 000 pages
+(~4 MB) of WAL growth **or** when the last connection closes.
+Because the orchestrator keeps a single long-lived connection,
+neither condition is reached during normal operation — data can
+accumulate in the WAL for hours.  This is a problem for tools like
+``openshell sandbox download`` that copy only the main ``.db`` file.
+
+To keep the main file up to date we apply three layers of defence:
+
+1. **Periodic auto-checkpoint** — after every *N* commits
+   (``checkpoint_interval``, default 10) the ``_maybe_checkpoint``
+   helper runs ``PRAGMA wal_checkpoint(TRUNCATE)``, resetting the
+   WAL to zero length.  Set ``checkpoint_interval=0`` to disable.
+2. **Shutdown checkpoint** — ``close()`` always checkpoints before
+   disposing the engine, so no data is stranded on clean exit.
+3. **Download-time checkpoint** — the Makefile ``audit-download``
+   and ``audit-sync`` targets SSH into the sandbox and checkpoint
+   before copying the file.
+
+The ``TRUNCATE`` mode (vs. ``PASSIVE``) is chosen deliberately: it
+resets the ``-wal`` file to zero bytes, making the main ``.db`` file
+fully self-contained for single-file copies.
+
+We also set ``PRAGMA synchronous=NORMAL`` — the recommended setting
+for WAL mode.  It provides the same crash-safety as ``DELETE`` +
+``FULL`` (data is never lost on OS crash) while skipping one
+``fsync`` per commit for better throughput.
 """
 
 from __future__ import annotations
@@ -32,7 +67,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from nemoclaw_escapades.audit.models import ConnectionRow, MessageRow, ToolCallRow
-from nemoclaw_escapades.config import DEFAULT_AUDIT_BATCH_SIZE, DEFAULT_AUDIT_QUEUE_SIZE
+from nemoclaw_escapades.config import (
+    DEFAULT_AUDIT_BATCH_SIZE,
+    DEFAULT_AUDIT_CHECKPOINT_INTERVAL,
+    DEFAULT_AUDIT_QUEUE_SIZE,
+)
 from nemoclaw_escapades.nmb.models import DeliveryStatus, NMBMessage
 
 logger = logging.getLogger("audit")
@@ -85,7 +124,13 @@ class AuditDB:
             of losing training data.
     """
 
-    def __init__(self, db_path: str, *, persist_payloads: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        persist_payloads: bool = True,
+        checkpoint_interval: int = DEFAULT_AUDIT_CHECKPOINT_INTERVAL,
+    ) -> None:
         """Initialise the audit DB handle (does not open the connection).
 
         Args:
@@ -94,9 +139,14 @@ class AuditDB:
             persist_payloads: Store full JSON payloads in the
                 ``messages`` and ``tool_calls`` tables.  When ``False``,
                 payloads are replaced with an empty string.
+            checkpoint_interval: Number of commits between automatic
+                WAL checkpoints.  Set to ``0`` to disable periodic
+                checkpoints (one will still run on ``close()``).
         """
         self.db_path: str = db_path
         self.persist_payloads: bool = persist_payloads
+        self._checkpoint_interval: int = checkpoint_interval
+        self._commits_since_checkpoint: int = 0
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._write_queue: asyncio.Queue[Any] | None = None
@@ -126,6 +176,7 @@ class AuditDB:
         def _set_sqlite_pragmas(dbapi_conn: Any, _connection_record: Any) -> None:
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")
             cursor.close()
 
@@ -135,19 +186,55 @@ class AuditDB:
         )
 
     async def close(self) -> None:
-        """Dispose of the engine and release all connections.
+        """Checkpoint the WAL, then dispose of the engine.
 
-        Safe to call even if the DB was never opened (no-op in that
-        case).  Does **not** stop the background writer — call
+        Runs a ``TRUNCATE`` checkpoint so the main ``.db`` file is
+        self-contained (no stale ``-wal``/``-shm`` companions).  Safe
+        to call even if the DB was never opened (no-op in that case).
+        Does **not** stop the background writer — call
         ``stop_background_writer`` first if it is running.
 
         Side effects:
             Sets ``_engine`` and ``_session_factory`` to ``None``.
         """
         if self._engine:
+            await self.checkpoint()
             await self._engine.dispose()
             self._engine = None
             self._session_factory = None
+            # Yield to let aiosqlite's background thread finish its
+            # call_soon_threadsafe callback before the event loop closes.
+            await asyncio.sleep(0)
+
+    async def checkpoint(self) -> None:
+        """Force a WAL checkpoint, folding all WAL data into the main DB file.
+
+        Uses ``TRUNCATE`` mode so the ``-wal`` file is reset to zero
+        length afterwards.  This makes the main ``.db`` file
+        self-contained — critical for ``openshell sandbox download``
+        which copies only the single file.
+
+        Safe to call at any time; no-op if the engine is not open.
+        Failures are logged but never raised so callers (especially
+        shutdown paths) are not disrupted.
+        """
+        if not self._engine:
+            return
+        try:
+            async with self._engine.connect() as conn:
+                await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+            self._commits_since_checkpoint = 0
+            logger.debug("WAL checkpoint completed")
+        except Exception:
+            logger.warning("WAL checkpoint failed", exc_info=True)
+
+    async def _maybe_checkpoint(self) -> None:
+        """Increment the commit counter and checkpoint if the interval is reached."""
+        if self._checkpoint_interval <= 0:
+            return
+        self._commits_since_checkpoint += 1
+        if self._commits_since_checkpoint >= self._checkpoint_interval:
+            await self.checkpoint()
 
     # ------------------------------------------------------------------
     # Background batch writer (NMB broker hot path)
@@ -324,6 +411,7 @@ class AuditDB:
                 )
 
             await session.commit()
+        await self._maybe_checkpoint()
 
     # ------------------------------------------------------------------
     # Direct status update (for callers not using the background writer)
@@ -355,6 +443,7 @@ class AuditDB:
             )
             await session.execute(stmt)
             await session.commit()
+        await self._maybe_checkpoint()
 
     # ------------------------------------------------------------------
     # Message logging
@@ -405,6 +494,7 @@ class AuditDB:
                 )
             )
             await session.commit()
+        await self._maybe_checkpoint()
 
     # ------------------------------------------------------------------
     # Connection logging
@@ -425,6 +515,7 @@ class AuditDB:
         async with self._session() as session:
             session.add(ConnectionRow(sandbox_id=sandbox_id, connected_at=time.time()))
             await session.commit()
+        await self._maybe_checkpoint()
 
     async def log_disconnection(self, sandbox_id: str, reason: str = "") -> None:
         """Record a sandbox disconnecting from the broker.
@@ -452,6 +543,7 @@ class AuditDB:
             )
             await session.execute(stmt)
             await session.commit()
+        await self._maybe_checkpoint()
 
     # ------------------------------------------------------------------
     # Tool-call logging
@@ -534,6 +626,7 @@ class AuditDB:
                 )
             )
             await session.commit()
+        await self._maybe_checkpoint()
 
         return row_id
 
@@ -665,7 +758,7 @@ class AuditDB:
         if not self._needs_migration():
             return
 
-        subprocess.run(
+        result = subprocess.run(
             [
                 sys.executable,
                 "-m",
@@ -675,13 +768,23 @@ class AuditDB:
                 "upgrade",
                 "head",
             ],
-            check=True,
             capture_output=True,
+            text=True,
             env={
                 **__import__("os").environ,
                 "AUDIT_DB_PATH": self.db_path,
             },
         )
+        if result.returncode != 0:
+            logger.error(
+                "Alembic migration failed",
+                extra={
+                    "returncode": result.returncode,
+                    "stderr": result.stderr.strip(),
+                    "db_path": self.db_path,
+                },
+            )
+            result.check_returncode()
 
     def _needs_migration(self) -> bool:
         """Check whether the DB schema is behind ``_HEAD_REVISION``.

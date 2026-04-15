@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from nemoclaw_escapades.agent.approval import ApprovalGate
 from nemoclaw_escapades.config import OrchestratorConfig
 from nemoclaw_escapades.models.types import (
     ApprovalResult,
@@ -16,8 +17,7 @@ from nemoclaw_escapades.models.types import (
     NormalizedRequest,
     TextBlock,
 )
-from nemoclaw_escapades.orchestrator import Orchestrator
-from nemoclaw_escapades.orchestrator.approval import ApprovalGate
+from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
 from nemoclaw_escapades.orchestrator.transcript_repair import EMPTY_RESPONSE_FALLBACK
 from tests.conftest import MockBackend
 

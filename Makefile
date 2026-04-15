@@ -2,9 +2,12 @@
 #
 # Quick start:
 #   cp .env.example .env        # fill in real values
-#   make setup                  # gateway + providers + sandbox (one-time)
+#   make setup                  # conda env + gateway + providers + sandbox
 #   make run-local-dev          # start the orchestrator outside a sandbox
 #   make run-local-sandbox      # start the orchestrator inside the sandbox
+#
+# All local Python targets run inside the "nemoclaw" conda environment.
+# `make install` creates it automatically if it doesn't exist.
 #
 # The sandbox runs inside OpenShell with proxy-mediated credential injection.
 # See policies/orchestrator.yaml for the full network and filesystem policy.
@@ -51,7 +54,10 @@ SERVICE_PROVIDERS := $(JIRA_PROVIDER) $(GITLAB_PROVIDER) $(GERRIT_PROVIDER) \
                      $(CONFLUENCE_PROVIDER) $(SLACK_USER_PROVIDER) $(GITHUB_PROVIDER)
 ALL_PROVIDERS     := $(INFERENCE_PROVIDER) $(SLACK_PROVIDER) $(SERVICE_PROVIDERS)
 
-# Python
+# Python — all local targets run inside this conda environment.
+CONDA_ENV     := nemoclaw
+PYTHON_VER    := 3.13
+CONDA_RUN     := conda run --live-stream -n $(CONDA_ENV)
 MAIN_MODULE   := nemoclaw_escapades.main
 BROKER_MODULE := nemoclaw_escapades.nmb.broker
 
@@ -83,32 +89,42 @@ help: ## Show this help
 setup: install setup-gateway setup-providers setup-sandbox ## One-time: deps + gateway + providers + sandbox
 
 .PHONY: install
-install: ## Install the package and dev dependencies
-	pip install -e ".[dev]"
+install: ## Create conda env (if needed) and install the package + dev deps
+	@conda env list 2>/dev/null | grep -q "^$(CONDA_ENV) " \
+		|| { echo "Creating conda env '$(CONDA_ENV)' with Python $(PYTHON_VER)..."; \
+		     conda create -n $(CONDA_ENV) python=$(PYTHON_VER) -y --solver=classic; }
+	$(CONDA_RUN) pip install -e ".[dev]"
 
 # OpenShell v0.0.21: `openshell gateway start` cannot restart a stopped
 # gateway without destroying it.  Try `docker start` first to preserve
 # provider/routing config.
 .PHONY: setup-gateway
 setup-gateway: ## Start the OpenShell gateway if not already running
-	@command -v openshell >/dev/null 2>&1 && { \
-		if openshell status >/dev/null 2>&1; then \
-			echo "✓ Gateway already running."; \
-		elif docker inspect $(GATEWAY_CONTAINER) >/dev/null 2>&1; then \
-			echo "Gateway stopped — restarting via docker..."; \
-			docker start $(GATEWAY_CONTAINER); \
-			echo "Waiting for k3s to initialise..."; \
-			sleep 10; \
+	@command -v openshell >/dev/null 2>&1 || { echo "✗ openshell CLI not found. Install it first."; exit 1; }
+	@command -v docker >/dev/null 2>&1 || { echo "✗ docker not found. Install Docker first."; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "✗ Docker is not running. Start Docker Desktop and retry."; exit 1; }
+	@if openshell status >/dev/null 2>&1; then \
+		echo "✓ Gateway already running."; \
+	elif docker inspect $(GATEWAY_CONTAINER) >/dev/null 2>&1; then \
+		echo "Gateway stopped — restarting via docker..."; \
+		docker start $(GATEWAY_CONTAINER); \
+		echo "Waiting for k3s to initialise (up to 60s)..."; \
+		for i in $$(seq 1 12); do \
+			sleep 5; \
 			if openshell status >/dev/null 2>&1; then \
-				echo "✓ Gateway restarted."; \
-			else \
-				echo "⚠  Gateway not ready yet — try 'openshell status' in a few seconds."; \
+				echo "✓ Gateway restarted (after $$(( i * 5 ))s)."; \
+				break; \
 			fi; \
-		else \
-			echo "No existing gateway — creating from scratch..."; \
-			openshell gateway start; \
+			printf "  ...%ds\n" "$$(( i * 5 ))"; \
+		done; \
+		if ! openshell status >/dev/null 2>&1; then \
+			echo "✗ Gateway failed to start after 60s. Run: openshell gateway destroy --name $(GATEWAY_NAME) && openshell gateway start"; \
+			exit 1; \
 		fi; \
-	} || echo "⚠  openshell CLI not found — skipping gateway setup."
+	else \
+		echo "No existing gateway — creating from scratch..."; \
+		openshell gateway start; \
+	fi
 
 # All provider targets are idempotent: delete-then-create ensures a clean
 # state regardless of whether the provider already exists.
@@ -171,7 +187,7 @@ setup-providers: .env ## Register all credential providers with the gateway
 
 .PHONY: gen-policy
 gen-policy: .env ## Generate resolved policy with allowed_ips from .env
-	@PYTHONPATH=src python scripts/gen_policy.py
+	@PYTHONPATH=src $(CONDA_RUN) python scripts/gen_policy.py
 
 # Symlink docker/Dockerfile.orchestrator → ./Dockerfile so the build
 # context is the project root.  Cleaned up immediately after.
@@ -213,14 +229,14 @@ setup-sandbox: gen-policy ## Build image, create sandbox, and start the app insi
 
 .PHONY: run-local-dev
 run-local-dev: ## Run the orchestrator outside a sandbox (bare process, .env creds)
-	PYTHONPATH=src python -m $(MAIN_MODULE)
+	PYTHONPATH=src $(CONDA_RUN) python -m $(MAIN_MODULE)
 
 .PHONY: run-local-sandbox
 run-local-sandbox: setup-gateway setup-providers setup-sandbox ## (Re)create and run the orchestrator in the sandbox
 
 .PHONY: run-broker
 run-broker: ## Run the NMB broker locally
-	PYTHONPATH=src python -m $(BROKER_MODULE) --audit-db $(AUDIT_DB_LOCAL)
+	PYTHONPATH=src $(CONDA_RUN) python -m $(BROKER_MODULE) --audit-db $(AUDIT_DB_LOCAL)
 
 # ---------------------------------------------------------------------------
 # Build
@@ -236,19 +252,19 @@ build: ## Build the orchestrator container image
 
 .PHONY: test
 test: ## Run unit tests (excludes integration)
-	PYTHONPATH=src pytest tests/ -v --ignore=tests/integration
+	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v --ignore=tests/integration
 
 .PHONY: test-integration
 test-integration: ## Run multi-sandbox NMB integration tests
-	PYTHONPATH=src pytest tests/integration/ -v
+	PYTHONPATH=src $(CONDA_RUN) pytest tests/integration/ -v
 
 .PHONY: test-all
 test-all: ## Run all tests (unit + integration)
-	PYTHONPATH=src pytest tests/ -v
+	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v
 
 .PHONY: test-auth
 test-auth: ## Verify .env credentials against their APIs (no sandbox needed)
-	@PYTHONPATH=src python scripts/test_auth.py
+	@PYTHONPATH=src $(CONDA_RUN) python scripts/test_auth.py
 
 # Sandbox connectivity tests — run against a live sandbox.
 .PHONY: test-jira-sandbox test-gitlab-sandbox test-gerrit-sandbox \
@@ -277,28 +293,34 @@ test-services-sandbox: test-jira-sandbox test-gitlab-sandbox test-gerrit-sandbox
 
 .PHONY: lint
 lint: ## Run ruff + mypy
-	ruff check src/ tests/
-	ruff format --check src/ tests/
-	mypy src/
+	$(CONDA_RUN) ruff check src/ tests/
+	$(CONDA_RUN) ruff format --check src/ tests/
+	$(CONDA_RUN) mypy src/
 
 .PHONY: typecheck
 typecheck: ## Run mypy type checks
-	mypy src/
+	$(CONDA_RUN) mypy src/
 
-.PHONY: fmt
-fmt: ## Auto-format code
-	ruff format src/ tests/
-	ruff check --fix src/ tests/
+.PHONY: fmt format
+fmt format: ## Auto-format code
+	$(CONDA_RUN) ruff format src/ tests/
+	$(CONDA_RUN) ruff check --fix src/ tests/
 
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
 
 .PHONY: logs
-logs: ## Tail orchestrator logs
+logs: ## Tail app logs from a second terminal (primary logs stream in setup-sandbox)
 	@command -v openshell >/dev/null 2>&1 && \
-		openshell logs $(SANDBOX_NAME) --follow 2>/dev/null || \
-		tail -f logs/*.log 2>/dev/null || echo "No log files found"
+		openshell sandbox exec -n $(SANDBOX_NAME) --no-tty -- tail -f /app/logs/nemoclaw.log \
+		|| echo "Could not tail sandbox logs. Is the sandbox running? Try: make status"
+
+.PHONY: logs-proxy
+logs-proxy: ## Show OpenShell proxy-level logs (network routing, L7 decisions)
+	@command -v openshell >/dev/null 2>&1 && \
+		openshell logs $(SANDBOX_NAME) || \
+		echo "openshell not installed or sandbox not running"
 
 .PHONY: status
 status: ## Print sandbox and provider status
@@ -312,11 +334,25 @@ status: ## Print sandbox and provider status
 # Audit DB
 # ---------------------------------------------------------------------------
 
+.PHONY: audit-checkpoint
+audit-checkpoint: ## Force a WAL checkpoint inside the sandbox (folds WAL into main DB)
+	@$(SSH_CMD) "python3 -c \"import sqlite3; c=sqlite3.connect('$(AUDIT_DB_SANDBOX)'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()\"" \
+		&& echo "✓ WAL checkpoint completed" \
+		|| echo "⚠  Checkpoint failed (sandbox not running?)"
+
 .PHONY: audit-download
-audit-download: ## Download the audit DB from the sandbox to the host
+audit-download: audit-checkpoint ## Checkpoint WAL then download the audit DB from the sandbox
 	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
+	@rm -rf "$(AUDIT_DB_LOCAL)"
 	@openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) \
 		&& echo "✓ Downloaded to $(AUDIT_DB_LOCAL)"
+	@if [ -d "$(AUDIT_DB_LOCAL)" ]; then \
+		mv "$(AUDIT_DB_LOCAL)/audit.db" "$(AUDIT_DB_LOCAL).tmp" 2>/dev/null \
+			|| mv "$(AUDIT_DB_LOCAL)/"* "$(AUDIT_DB_LOCAL).tmp" 2>/dev/null; \
+		rm -rf "$(AUDIT_DB_LOCAL)"; \
+		mv "$(AUDIT_DB_LOCAL).tmp" "$(AUDIT_DB_LOCAL)"; \
+		echo "  (fixed: openshell created directory instead of file)"; \
+	fi
 
 .PHONY: audit-stats
 audit-stats: ## Print audit DB summary (row counts, last entries)
@@ -335,7 +371,7 @@ audit-query: ## Run a SQL query against the local audit DB (SQL="SELECT ...")
 .PHONY: audit-export
 audit-export: ## Export tool calls to JSONL (writes to audit_tool_calls.jsonl)
 	@[ -f "$(AUDIT_DB_LOCAL)" ] || { echo "No audit DB at $(AUDIT_DB_LOCAL). Run: make audit-download"; exit 1; }
-	@PYTHONPATH=src python -c "\
+	@PYTHONPATH=src $(CONDA_RUN) python -c "\
 	import asyncio; from nemoclaw_escapades.audit.db import AuditDB; \
 	async def _e(): \
 	    db = AuditDB('$(AUDIT_DB_LOCAL)'); await db.open(); \
@@ -344,10 +380,11 @@ audit-export: ## Export tool calls to JSONL (writes to audit_tool_calls.jsonl)
 	asyncio.run(_e())"
 
 .PHONY: audit-sync
-audit-sync: ## Background loop: download audit DB every $(AUDIT_SYNC_INTERVAL)s
+audit-sync: ## Background loop: checkpoint + download audit DB every $(AUDIT_SYNC_INTERVAL)s
 	@mkdir -p "$$(dirname $(AUDIT_DB_LOCAL))"
 	@echo "Syncing audit DB every $(AUDIT_SYNC_INTERVAL)s  (Ctrl+C to stop)"
 	@while true; do \
+		$(SSH_CMD) "python3 -c \"import sqlite3; c=sqlite3.connect('$(AUDIT_DB_SANDBOX)'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()\"" 2>/dev/null; \
 		openshell sandbox download $(SANDBOX_NAME) $(AUDIT_DB_SANDBOX) $(AUDIT_DB_LOCAL) 2>/dev/null \
 			&& echo "$$(date '+%H:%M:%S') ✓ synced" \
 			|| echo "$$(date '+%H:%M:%S') · sandbox not ready"; \
@@ -357,6 +394,13 @@ audit-sync: ## Background loop: download audit DB every $(AUDIT_SYNC_INTERVAL)s
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
+.PHONY: stop
+stop: ## Stop the orchestrator sandbox
+	@command -v openshell >/dev/null 2>&1 && \
+		openshell sandbox delete $(SANDBOX_NAME) 2>/dev/null \
+		&& echo "✓ Sandbox '$(SANDBOX_NAME)' stopped." \
+		|| echo "⚠  Sandbox '$(SANDBOX_NAME)' not found or already stopped."
 
 .PHONY: stop-all
 stop-all: ## Delete ALL sandboxes in the gateway

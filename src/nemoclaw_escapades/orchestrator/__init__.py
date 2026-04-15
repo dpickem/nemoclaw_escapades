@@ -1,17 +1,17 @@
-"""Orchestrator — agent loop and conversation management."""
+"""Orchestrator — connector-facing handler and agent loop.
 
-from nemoclaw_escapades.orchestrator.approval import (
-    ApprovalGate,
-    AutoApproval,
-    WriteApproval,
-)
-from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
+Re-exports approval classes from ``agent.approval`` for backwards
+compatibility.  ``Orchestrator`` itself is imported directly from
+``orchestrator.orchestrator`` (not re-exported here) to avoid a
+circular import with ``agent.loop``.
+"""
+
+from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval, WriteApproval
 from nemoclaw_escapades.orchestrator.prompt_builder import PromptBuilder
 
 __all__ = [
     "ApprovalGate",
     "AutoApproval",
     "WriteApproval",
-    "Orchestrator",
     "PromptBuilder",
 ]
