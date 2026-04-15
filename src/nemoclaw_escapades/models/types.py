@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -15,7 +15,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-class ErrorCategory(str, Enum):
+class ErrorCategory(StrEnum):
     AUTH_ERROR = "auth_error"
     RATE_LIMIT = "rate_limit"
     TIMEOUT = "timeout"

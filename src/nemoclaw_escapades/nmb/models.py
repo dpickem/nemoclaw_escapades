@@ -13,7 +13,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -25,7 +25,7 @@ from nemoclaw_escapades.config import DEFAULT_NMB_MAX_PAYLOAD_BYTES
 # ---------------------------------------------------------------------------
 
 
-class Op(str, Enum):
+class Op(StrEnum):
     """Wire-level operation codes (``op`` field in every frame).
 
     Values are lower-case strings that appear directly in the JSON.
@@ -47,7 +47,7 @@ class Op(str, Enum):
     TIMEOUT = "timeout"
 
 
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     """Broker error codes returned in ``error`` frames.
 
     Each value is an upper-case constant that appears in the ``code``
@@ -64,7 +64,7 @@ class ErrorCode(str, Enum):
     POLICY_DENIED = "POLICY_DENIED"
 
 
-class DeliveryStatus(str, Enum):
+class DeliveryStatus(StrEnum):
     """Audit DB delivery status for a logged message."""
 
     DELIVERED = "delivered"
