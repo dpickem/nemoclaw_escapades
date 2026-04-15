@@ -16,9 +16,10 @@ dependencies = [
     "pydantic>=2.0.0",
     "tenacity>=9.0.0",
     "websockets>=13.0",
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
     "alembic>=1.13.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -45,20 +46,27 @@ packages = ["src/nemoclaw_escapades"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    # aiosqlite's background thread calls call_soon_threadsafe after the
+    # event loop closes during pytest teardown.  Harmless race — the DB
+    # is already checkpointed and disposed by AuditDB.close().
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
     "integration: multi-sandbox NMB integration tests (PolicyBroker + harness)",
     "live: integration tests against real service endpoints (require credentials)",
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
