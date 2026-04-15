@@ -24,12 +24,11 @@ import httpx
 
 from nemoclaw_escapades.config import JiraConfig
 from nemoclaw_escapades.observability.logging import get_logger
-from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec
+from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec, tool
 
 logger = get_logger("tools.jira")
 
-# Set by ``register_jira_tools``; ``None`` until first call.
-_jira_config: JiraConfig | None = None
+# ── Constants ─────────────────────────────────────────────────────────
 
 # Comma-separated field list included in every GET/search response.
 _DEFAULT_FIELDS: str = (
@@ -38,7 +37,7 @@ _DEFAULT_FIELDS: str = (
 )
 
 # Per-request timeout for the underlying ``httpx.AsyncClient``.
-_REQUEST_TIMEOUT_SECONDS: float = 30.0
+_REQUEST_TIMEOUT_S: float = 30.0
 
 # Error response bodies are clipped to this length in returned error dicts.
 _ERROR_BODY_MAX_CHARS: int = 500
@@ -55,10 +54,11 @@ _SUCCESS_NO_BODY_CODES: tuple[int, ...] = (201, 204)
 # Jira custom-field ID for the Epic Link field (server-specific).
 _EPIC_LINK_FIELD: str = "customfield_10014"
 
+# Logical toolset name used by the registry for grouping
+_TOOLSET: str = "jira"
 
-# ---------------------------------------------------------------------------
-# Async Jira client
-# ---------------------------------------------------------------------------
+
+# ── Async Jira client ────────────────────────────────────────────────
 
 
 class JiraClient:
@@ -104,7 +104,7 @@ class JiraClient:
                     "Content-Type": "application/json",
                     "Authorization": self._auth_header,
                 },
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=_REQUEST_TIMEOUT_S,
             )
         return self._client
 
@@ -344,6 +344,9 @@ class JiraClient:
         return await self.get_issue(issue_key)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────
+
+
 def _format(data: dict[str, Any]) -> str:
     """Serialize *data* to pretty-printed JSON.
 
@@ -353,461 +356,365 @@ def _format(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
-# ---------------------------------------------------------------------------
-# Tool handlers (async, return str)
-# ---------------------------------------------------------------------------
+# ── Tool specs ────────────────────────────────────────────────────────
 
 
-def _get_client() -> JiraClient:
-    """Create a JiraClient per call using the module-level ``_jira_config``.
+def _make_jira_get_issue(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_get_issue`` tool spec."""
 
-    A fresh client is needed because httpx.AsyncClient is bound to the
-    event loop that created it. In the orchestrator (single loop) this
-    is redundant but harmless; in test scripts that call asyncio.run()
-    multiple times, reusing a client from a closed loop would crash.
+    @tool(
+        "jira_get_issue",
+        "Get details of a Jira issue by key (e.g. PROJ-123).",
+        {
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "Issue key, e.g. PROJ-123"},
+            },
+            "required": ["issue_key"],
+        },
+        display_name="Getting Jira issue",
+        toolset=_TOOLSET,
+    )
+    async def jira_get_issue(issue_key: str) -> str:
+        """Fetch a Jira issue by key."""
+        return _format(await client.get_issue(issue_key))
 
-    Raises:
-        RuntimeError: If ``register_jira_tools`` has not been called yet.
-    """
-    if _jira_config is None:
-        raise RuntimeError("Jira tools not initialised — call register_jira_tools first")
-    return JiraClient(base_url=_jira_config.url, auth_header=_jira_config.auth_header)
-
-
-async def jira_get_issue(issue_key: str) -> str:
-    """Fetch a Jira issue by key and return it as formatted JSON.
-
-    Args:
-        issue_key: Issue identifier (e.g. ``PROJ-123``).
-
-    Returns:
-        Pretty-printed JSON string of the issue fields.
-    """
-    return _format(await _get_client().get_issue(issue_key))
+    return jira_get_issue
 
 
-async def jira_search(jql: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
-    """Search Jira issues using JQL and return formatted results.
+def _make_jira_search(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_search`` tool spec."""
 
-    Args:
-        jql: JQL query string.
-        limit: Maximum number of results to return.
+    @tool(
+        "jira_search",
+        (
+            "Search Jira issues using JQL. Example: "
+            'jira_search(jql="project = MYPROJ AND status = Open", limit=10)'
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "jql": {"type": "string", "description": "JQL query string"},
+                "limit": {
+                    "type": "integer",
+                    "description": f"Max results (default {_DEFAULT_SEARCH_LIMIT})",
+                    "default": _DEFAULT_SEARCH_LIMIT,
+                },
+            },
+            "required": ["jql"],
+        },
+        display_name="Searching Jira",
+        toolset=_TOOLSET,
+    )
+    async def jira_search(jql: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
+        """Search Jira issues using JQL."""
+        return _format(await client.search(jql, limit=limit))
 
-    Returns:
-        Pretty-printed JSON string of matching issues.
-    """
-    return _format(await _get_client().search(jql, limit=limit))
-
-
-async def jira_me() -> str:
-    """Return the authenticated user's Jira profile as formatted JSON.
-
-    Returns:
-        Pretty-printed JSON string of the user profile.
-    """
-    return _format(await _get_client().me())
-
-
-async def jira_get_transitions(issue_key: str) -> str:
-    """List available status transitions for a Jira issue.
-
-    Args:
-        issue_key: Issue identifier (e.g. ``PROJ-123``).
-
-    Returns:
-        Pretty-printed JSON string of available transitions.
-    """
-    return _format(await _get_client().get_transitions(issue_key))
+    return jira_search
 
 
-async def jira_create_issue(
-    project_key: str,
-    summary: str,
-    issue_type: str = "Task",
-    description: str = "",
-    assignee: str = "",
-    priority: str = "",
-    due_date: str = "",
-    labels: str = "",
-    components: str = "",
-    epic_key: str = "",
-) -> str:
-    """Create a new Jira issue and return the result as formatted JSON.
+def _make_jira_me(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_me`` tool spec."""
 
-    String parameters that accept comma-separated values (``labels``,
-    ``components``) are split before being forwarded to the API.
+    @tool(
+        "jira_me",
+        "Get the authenticated user's Jira profile.",
+        {"type": "object", "properties": {}},
+        display_name="Checking Jira profile",
+        toolset=_TOOLSET,
+    )
+    async def jira_me() -> str:
+        """Get the authenticated user's Jira profile."""
+        return _format(await client.me())
 
-    Args:
-        project_key: Target project (e.g. ``MYPROJ``).
-        summary: One-line issue title.
-        issue_type: Jira issue type name (default ``Task``).
-        description: Full issue description body.
-        assignee: Username to assign the issue to.
-        priority: Priority name (e.g. ``P1``, ``Medium``).
-        due_date: Due date in ``YYYY-MM-DD`` format.
-        labels: Comma-separated label strings.
-        components: Comma-separated component names.
-        epic_key: Issue key of the parent epic.
+    return jira_me
 
-    Returns:
-        Pretty-printed JSON string of the created issue.
-    """
-    return _format(
-        await _get_client().create_issue(
-            project_key,
-            summary,
-            issue_type,
-            description=description or None,
-            assignee=assignee or None,
-            priority=priority or None,
-            due_date=due_date or None,
-            labels=labels.split(",") if labels else None,
-            components=components.split(",") if components else None,
-            epic_key=epic_key or None,
+
+def _make_jira_get_transitions(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_get_transitions`` tool spec."""
+
+    @tool(
+        "jira_get_transitions",
+        "Get available status transitions for a Jira issue.",
+        {
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "Issue key"},
+            },
+            "required": ["issue_key"],
+        },
+        display_name="Getting issue transitions",
+        toolset=_TOOLSET,
+    )
+    async def jira_get_transitions(issue_key: str) -> str:
+        """Get available status transitions for a Jira issue."""
+        return _format(await client.get_transitions(issue_key))
+
+    return jira_get_transitions
+
+
+def _make_jira_create_issue(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_create_issue`` tool spec."""
+
+    @tool(
+        "jira_create_issue",
+        "Create a new Jira issue. Requires approval.",
+        {
+            "type": "object",
+            "properties": {
+                "project_key": {
+                    "type": "string",
+                    "description": "Project key, e.g. MYPROJ",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Issue summary/title",
+                },
+                "issue_type": {
+                    "type": "string",
+                    "description": "Issue type (default: Task)",
+                    "default": "Task",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Issue description",
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Assignee username",
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority name (e.g. P1, Medium)",
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "Due date in YYYY-MM-DD format",
+                },
+                "labels": {
+                    "type": "string",
+                    "description": "Comma-separated labels",
+                },
+                "components": {
+                    "type": "string",
+                    "description": "Comma-separated component names",
+                },
+                "epic_key": {
+                    "type": "string",
+                    "description": "Epic issue key to link to (e.g. PROJ-100)",
+                },
+            },
+            "required": ["project_key", "summary"],
+        },
+        display_name="Creating Jira issue",
+        toolset=_TOOLSET,
+        is_read_only=False,
+    )
+    async def jira_create_issue(
+        project_key: str,
+        summary: str,
+        issue_type: str = "Task",
+        description: str = "",
+        assignee: str = "",
+        priority: str = "",
+        due_date: str = "",
+        labels: str = "",
+        components: str = "",
+        epic_key: str = "",
+    ) -> str:
+        """Create a new Jira issue."""
+        return _format(
+            await client.create_issue(
+                project_key,
+                summary,
+                issue_type,
+                description=description or None,
+                assignee=assignee or None,
+                priority=priority or None,
+                due_date=due_date or None,
+                labels=labels.split(",") if labels else None,
+                components=components.split(",") if components else None,
+                epic_key=epic_key or None,
+            )
         )
+
+    return jira_create_issue
+
+
+def _make_jira_update_issue(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_update_issue`` tool spec."""
+
+    @tool(
+        "jira_update_issue",
+        (
+            "Update fields on an existing Jira issue. "
+            "Pass only the fields you want to change. Requires approval."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "issue_key": {
+                    "type": "string",
+                    "description": "Issue key",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "New summary",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New description",
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "New assignee username",
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "New priority (e.g. P1, Medium)",
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "New due date in YYYY-MM-DD format",
+                },
+                "labels": {
+                    "type": "string",
+                    "description": "Comma-separated labels (replaces all)",
+                },
+                "components": {
+                    "type": "string",
+                    "description": "Comma-separated component names (replaces all)",
+                },
+                "epic_key": {
+                    "type": "string",
+                    "description": "Epic issue key to link to",
+                },
+            },
+            "required": ["issue_key"],
+        },
+        display_name="Updating Jira issue",
+        toolset=_TOOLSET,
+        is_read_only=False,
     )
-
-
-async def jira_update_issue(
-    issue_key: str,
-    summary: str = "",
-    description: str = "",
-    assignee: str = "",
-    priority: str = "",
-    due_date: str = "",
-    labels: str = "",
-    components: str = "",
-    epic_key: str = "",
-) -> str:
-    """Update fields on an existing Jira issue.
-
-    Only non-empty parameters are included in the update payload.
-    String parameters that accept comma-separated values (``labels``,
-    ``components``) are split before being forwarded to the API.
-
-    Args:
-        issue_key: Issue identifier (e.g. ``PROJ-123``).
-        summary: New summary/title.
-        description: New description body.
-        assignee: New assignee username.
-        priority: New priority name (e.g. ``P1``, ``Medium``).
-        due_date: New due date in ``YYYY-MM-DD`` format.
-        labels: Comma-separated labels (replaces existing labels).
-        components: Comma-separated component names (replaces existing).
-        epic_key: Epic issue key to link to.
-
-    Returns:
-        Pretty-printed JSON string of the updated issue, or an error
-        JSON string if no fields were provided.
-    """
-    return _format(
-        await _get_client().update_issue(
-            issue_key,
-            summary=summary or None,
-            description=description or None,
-            assignee=assignee or None,
-            priority=priority or None,
-            due_date=due_date or None,
-            labels=labels.split(",") if labels else None,
-            components=[c.strip() for c in components.split(",")] if components else None,
-            epic_key=epic_key or None,
+    async def jira_update_issue(
+        issue_key: str,
+        summary: str = "",
+        description: str = "",
+        assignee: str = "",
+        priority: str = "",
+        due_date: str = "",
+        labels: str = "",
+        components: str = "",
+        epic_key: str = "",
+    ) -> str:
+        """Update fields on an existing Jira issue."""
+        return _format(
+            await client.update_issue(
+                issue_key,
+                summary=summary or None,
+                description=description or None,
+                assignee=assignee or None,
+                priority=priority or None,
+                due_date=due_date or None,
+                labels=labels.split(",") if labels else None,
+                components=[c.strip() for c in components.split(",")] if components else None,
+                epic_key=epic_key or None,
+            )
         )
+
+    return jira_update_issue
+
+
+def _make_jira_add_comment(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_add_comment`` tool spec."""
+
+    @tool(
+        "jira_add_comment",
+        "Add a comment to a Jira issue. Requires approval.",
+        {
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "Issue key"},
+                "body": {"type": "string", "description": "Comment text (Jira wiki markup)"},
+            },
+            "required": ["issue_key", "body"],
+        },
+        display_name="Adding Jira comment",
+        toolset=_TOOLSET,
+        is_read_only=False,
     )
+    async def jira_add_comment(issue_key: str, body: str) -> str:
+        """Add a comment to a Jira issue."""
+        return _format(await client.add_comment(issue_key, body))
+
+    return jira_add_comment
 
 
-async def jira_add_comment(issue_key: str, body: str) -> str:
-    """Add a comment to a Jira issue.
+def _make_jira_transition_issue(client: JiraClient) -> ToolSpec:
+    """Create the ``jira_transition_issue`` tool spec."""
 
-    Args:
-        issue_key: Issue identifier (e.g. ``PROJ-123``).
-        body: Comment text (Jira wiki markup).
-
-    Returns:
-        Pretty-printed JSON string of the created comment.
-    """
-    return _format(await _get_client().add_comment(issue_key, body))
-
-
-async def jira_transition_issue(issue_key: str, transition_id: str, comment: str = "") -> str:
-    """Transition a Jira issue to a new status.
-
-    Args:
-        issue_key: Issue identifier (e.g. ``PROJ-123``).
-        transition_id: Numeric transition ID (from ``jira_get_transitions``).
-        comment: Optional comment to attach with the transition.
-
-    Returns:
-        Pretty-printed JSON string of the issue after the transition.
-    """
-    return _format(
-        await _get_client().transition_issue(issue_key, transition_id, comment=comment or None)
+    @tool(
+        "jira_transition_issue",
+        (
+            "Transition a Jira issue to a new status. Use jira_get_transitions first "
+            "to find the transition_id. Requires approval."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "Issue key"},
+                "transition_id": {
+                    "type": "string",
+                    "description": "Transition ID (from jira_get_transitions)",
+                },
+                "comment": {"type": "string", "description": "Optional transition comment"},
+            },
+            "required": ["issue_key", "transition_id"],
+        },
+        display_name="Transitioning Jira issue",
+        toolset=_TOOLSET,
+        is_read_only=False,
     )
+    async def jira_transition_issue(
+        issue_key: str, transition_id: str, comment: str = ""
+    ) -> str:
+        """Transition a Jira issue to a new status."""
+        return _format(
+            await client.transition_issue(issue_key, transition_id, comment=comment or None)
+        )
+
+    return jira_transition_issue
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
-def _jira_available() -> bool:
-    """Return ``True`` when Jira credentials are present."""
-    return _jira_config is not None and _get_client().configured
+# ── Registration ──────────────────────────────────────────────────────
 
 
 def register_jira_tools(registry: ToolRegistry, config: JiraConfig) -> None:
     """Register all Jira tools with the orchestrator's tool registry.
 
-    Stores *config* at module level so tool handlers can create properly
-    configured ``JiraClient`` instances via ``_get_client()``.
-
-    Each tool is registered with ``toolset="jira"`` and a ``check_fn``
-    that verifies the Jira auth header is present.  If the check fails,
-    the registry skips the tool with a warning.
+    Creates a single ``JiraClient`` from *config* and binds every tool
+    handler to it via closures.  Tools whose ``check_fn`` returns
+    ``False`` are silently skipped by the registry.
 
     Args:
-        registry: The orchestrator's tool registry to add tools to.
-        config: Jira configuration (URL, auth env var, etc.).
+        registry: The tool registry to populate.
+        config: Jira connection settings.
     """
-    global _jira_config  # noqa: PLW0603
-    _jira_config = config
+    client = JiraClient(base_url=config.url, auth_header=config.auth_header)
 
-    registry.register(
-        ToolSpec(
-            name="jira_get_issue",
-            display_name="Getting Jira issue",
-            description="Get details of a Jira issue by key (e.g. PROJ-123).",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {"type": "string", "description": "Issue key, e.g. PROJ-123"},
-                },
-                "required": ["issue_key"],
-            },
-            handler=jira_get_issue,
-            is_read_only=True,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
+    def _check() -> bool:
+        return client.configured
 
-    registry.register(
-        ToolSpec(
-            name="jira_search",
-            display_name="Searching Jira",
-            description=(
-                "Search Jira issues using JQL. Example: "
-                'jira_search(jql="project = MYPROJ AND status = Open", limit=10)'
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "jql": {"type": "string", "description": "JQL query string"},
-                    "limit": {
-                        "type": "integer",
-                        "description": f"Max results (default {_DEFAULT_SEARCH_LIMIT})",
-                        "default": _DEFAULT_SEARCH_LIMIT,
-                    },
-                },
-                "required": ["jql"],
-            },
-            handler=jira_search,
-            is_read_only=True,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_me",
-            display_name="Checking Jira profile",
-            description="Get the authenticated user's Jira profile.",
-            input_schema={"type": "object", "properties": {}},
-            handler=jira_me,
-            is_read_only=True,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_get_transitions",
-            display_name="Getting issue transitions",
-            description="Get available status transitions for a Jira issue.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {"type": "string", "description": "Issue key"},
-                },
-                "required": ["issue_key"],
-            },
-            handler=jira_get_transitions,
-            is_read_only=True,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_create_issue",
-            display_name="Creating Jira issue",
-            description="Create a new Jira issue. Requires approval.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "project_key": {
-                        "type": "string",
-                        "description": "Project key, e.g. MYPROJ",
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "Issue summary/title",
-                    },
-                    "issue_type": {
-                        "type": "string",
-                        "description": "Issue type (default: Task)",
-                        "default": "Task",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Issue description",
-                    },
-                    "assignee": {
-                        "type": "string",
-                        "description": "Assignee username",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "description": "Priority name (e.g. P1, Medium)",
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "Due date in YYYY-MM-DD format",
-                    },
-                    "labels": {
-                        "type": "string",
-                        "description": "Comma-separated labels",
-                    },
-                    "components": {
-                        "type": "string",
-                        "description": "Comma-separated component names",
-                    },
-                    "epic_key": {
-                        "type": "string",
-                        "description": "Epic issue key to link to (e.g. PROJ-100)",
-                    },
-                },
-                "required": ["project_key", "summary"],
-            },
-            handler=jira_create_issue,
-            is_read_only=False,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_update_issue",
-            display_name="Updating Jira issue",
-            description=(
-                "Update fields on an existing Jira issue. "
-                "Pass only the fields you want to change. Requires approval."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key",
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "New summary",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "New description",
-                    },
-                    "assignee": {
-                        "type": "string",
-                        "description": "New assignee username",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "description": "New priority (e.g. P1, Medium)",
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "New due date in YYYY-MM-DD format",
-                    },
-                    "labels": {
-                        "type": "string",
-                        "description": "Comma-separated labels (replaces all)",
-                    },
-                    "components": {
-                        "type": "string",
-                        "description": "Comma-separated component names (replaces all)",
-                    },
-                    "epic_key": {
-                        "type": "string",
-                        "description": "Epic issue key to link to",
-                    },
-                },
-                "required": ["issue_key"],
-            },
-            handler=jira_update_issue,
-            is_read_only=False,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_add_comment",
-            display_name="Adding Jira comment",
-            description="Add a comment to a Jira issue. Requires approval.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {"type": "string", "description": "Issue key"},
-                    "body": {"type": "string", "description": "Comment text (Jira wiki markup)"},
-                },
-                "required": ["issue_key", "body"],
-            },
-            handler=jira_add_comment,
-            is_read_only=False,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
-
-    registry.register(
-        ToolSpec(
-            name="jira_transition_issue",
-            display_name="Transitioning Jira issue",
-            description=(
-                "Transition a Jira issue to a new status. Use jira_get_transitions first "
-                "to find the transition_id. Requires approval."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {"type": "string", "description": "Issue key"},
-                    "transition_id": {
-                        "type": "string",
-                        "description": "Transition ID (from jira_get_transitions)",
-                    },
-                    "comment": {"type": "string", "description": "Optional transition comment"},
-                },
-                "required": ["issue_key", "transition_id"],
-            },
-            handler=jira_transition_issue,
-            is_read_only=False,
-            toolset="jira",
-            check_fn=_jira_available,
-        )
-    )
+    for factory in (
+        _make_jira_get_issue,
+        _make_jira_search,
+        _make_jira_me,
+        _make_jira_get_transitions,
+        _make_jira_create_issue,
+        _make_jira_update_issue,
+        _make_jira_add_comment,
+        _make_jira_transition_issue,
+    ):
+        spec = factory(client)
+        spec.check_fn = _check
+        registry.register(spec)
