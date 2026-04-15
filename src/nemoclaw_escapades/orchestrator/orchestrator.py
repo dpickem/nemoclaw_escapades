@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
-from nemoclaw_escapades.agent.types import AgentLoopConfig
+from nemoclaw_escapades.agent.types import AgentLoopConfig, ToolStartCallback
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import OrchestratorConfig, load_system_prompt
 from nemoclaw_escapades.connectors.base import StatusCallback
@@ -66,6 +66,9 @@ if TYPE_CHECKING:
 
 logger = get_logger("orchestrator")
 
+# Slack ``action_id`` values attached to the Approve / Deny buttons
+# rendered by ``_build_approval_response``.  The connector routes
+# button clicks back to ``handle()`` keyed on these IDs.
 APPROVAL_ACTION_APPROVE = "approve_write"
 APPROVAL_ACTION_DENY = "deny_write"
 
@@ -235,8 +238,13 @@ class Orchestrator:
             # tool calling) or without (single inference call with
             # transcript repair for truncation/empty responses).
             if self._agent_loop:
-                loop = self._with_status_callback(on_status)
-                result = await loop.run(messages, request.request_id, thread_ts=thread_key)
+                callback = self._make_tool_start_callback(on_status)
+                result = await self._agent_loop.run(
+                    messages,
+                    request.request_id,
+                    thread_ts=thread_key,
+                    on_tool_start=callback,
+                )
                 content = result.content
             else:
                 # No tools registered — fall back to single-shot
@@ -338,34 +346,25 @@ class Orchestrator:
     # AgentLoop wiring
     # ------------------------------------------------------------------
 
-    def _with_status_callback(self, on_status: StatusCallback | None) -> AgentLoop:
-        """Return an AgentLoop with the on_tool_start callback wired.
+    @staticmethod
+    def _make_tool_start_callback(
+        on_status: StatusCallback | None,
+    ) -> ToolStartCallback | None:
+        """Build a per-request tool-start callback from the connector's status callback.
 
-        Rebuilds the loop only when the callback differs from the
-        current one to avoid unnecessary object churn on every request.
+        Returns a closure that appends "..." to the display name, or
+        ``None`` if no status callback was provided.  The returned
+        closure is passed to ``AgentLoop.run()`` as a parameter —
+        never stored on the shared loop instance — so concurrent
+        requests can't clobber each other's callbacks.
         """
-        if self._agent_loop is None:
-            raise RuntimeError("_with_status_callback called without tools")
+        if on_status is None:
+            return None
 
-        # Fast path: if neither the caller nor the loop has a callback,
-        # skip the adapter entirely to avoid closure allocation per request.
-        if on_status is None and self._agent_loop._on_tool_start is None:
-            return self._agent_loop
+        async def _tool_start_adapter(display_name: str) -> None:
+            await on_status(f"{display_name}...")
 
-        if on_status is not None:
-            # Wrap the connector's status callback (which expects a
-            # human-readable string like "Searching Jira...") to match
-            # the AgentLoop's ToolStartCallback signature (which receives
-            # just the display name).  The "..." suffix is appended here
-            # so individual tools don't need to worry about it.
-            async def _tool_start_adapter(display_name: str) -> None:
-                await on_status(f"{display_name}...")
-
-            self._agent_loop._on_tool_start = _tool_start_adapter
-        else:
-            self._agent_loop._on_tool_start = None
-
-        return self._agent_loop
+        return _tool_start_adapter
 
     # ------------------------------------------------------------------
     # Inference + transcript repair (non-tool path)
@@ -517,9 +516,12 @@ class Orchestrator:
         # Now execute the previously-blocked write tools.  This runs
         # outside the loop's normal cycle because the loop already
         # exited via WriteApprovalError.
-        loop = self._with_status_callback(on_status)
-        tool_results = await loop.execute_tool_calls(
-            pending.tool_calls, pending.request_id, thread_ts=thread_key
+        callback = self._make_tool_start_callback(on_status)
+        tool_results = await self._agent_loop.execute_tool_calls(
+            pending.tool_calls,
+            pending.request_id,
+            thread_ts=thread_key,
+            on_tool_start=callback,
         )
         pending.working_messages.extend(tool_results)
 
@@ -528,10 +530,11 @@ class Orchestrator:
         # write tool (cascading approval), we catch and re-save — the
         # user will see a second Approve/Deny prompt.
         try:
-            result = await loop.run(
+            result = await self._agent_loop.run(
                 pending.working_messages,
                 pending.request_id,
                 thread_ts=thread_key,
+                on_tool_start=callback,
             )
             content = result.content
         except WriteApprovalError as exc:

@@ -52,6 +52,14 @@ class WriteApprovalError(Exception):
     """
 
     def __init__(self, pending: PendingApproval) -> None:
+        """Wrap the pending approval state for propagation to the orchestrator.
+
+        Args:
+            pending: Snapshot of the conversation at the point the
+                write was blocked — includes working messages, the
+                assistant's tool-call message, and a human-readable
+                description of the proposed write.
+        """
         self.pending = pending
 
 
@@ -84,6 +92,25 @@ class AgentLoop:
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,
     ) -> None:
+        """Initialise the loop with its injected dependencies.
+
+        Args:
+            backend: Inference provider used for chat-completion calls.
+            tools: Registry of available tool definitions and handlers.
+            config: Model parameters and safety limits (max rounds,
+                continuation retries, temperature, etc.).
+            audit: Optional audit database.  When provided, every tool
+                invocation is logged with service, args, latency, and
+                success/failure status.
+            approval: Gate consulted before executing write tools.
+                Defaults to ``AutoApproval`` (allow everything).
+                Inject ``WriteApproval`` for interactive approval.
+            on_tool_start: Instance-level default callback invoked
+                before each tool execution.  Per-request callbacks
+                passed to ``run()`` take precedence.
+            on_tool_end: Callback invoked after each tool execution
+                with timing and outcome.
+        """
         self._backend = backend
         self._tools = tools
         self._config = config
@@ -97,6 +124,7 @@ class AgentLoop:
         messages: list[Message],
         request_id: str,
         thread_ts: str | None = None,
+        on_tool_start: ToolStartCallback | None = None,
     ) -> AgentLoopResult:
         """Run the multi-turn tool-use loop.
 
@@ -110,6 +138,11 @@ class AgentLoop:
             messages: Initial message list (system + history + user).
             request_id: Correlation ID for structured logging.
             thread_ts: Optional thread timestamp for audit correlation.
+            on_tool_start: Per-request callback invoked before each tool
+                execution (e.g. to update a thinking indicator).  Takes
+                precedence over the instance-level ``_on_tool_start``.
+                Passed as a parameter (not shared state) so concurrent
+                requests don't clobber each other's callbacks.
 
         Returns:
             An ``AgentLoopResult`` with the final text, round/tool
@@ -205,7 +238,10 @@ class AgentLoop:
             working_messages.append(assistant_msg)
 
             tool_results = await self.execute_tool_calls(
-                result.tool_calls, request_id, thread_ts=thread_ts
+                result.tool_calls,
+                request_id,
+                thread_ts=thread_ts,
+                on_tool_start=on_tool_start,
             )
             working_messages.extend(tool_results)
             total_tool_calls += len(result.tool_calls)
@@ -239,6 +275,7 @@ class AgentLoop:
         tool_calls: list[ToolCall],
         request_id: str,
         thread_ts: str | None = None,
+        on_tool_start: ToolStartCallback | None = None,
     ) -> list[Message]:
         """Execute a batch of tool calls and return tool-result messages.
 
@@ -250,19 +287,26 @@ class AgentLoop:
             tool_calls: Tool invocations from the model's response.
             request_id: Correlation ID for structured logging.
             thread_ts: Optional thread timestamp for audit correlation.
+            on_tool_start: Per-request callback, takes precedence over
+                the instance-level default.
 
         Returns:
             A list of ``tool`` role messages, one per tool call.
         """
+        # Per-request callback takes precedence over the instance default.
+        # This avoids shared mutable state — critical for concurrent
+        # requests whose callbacks target different Slack channels.
+        effective_on_tool_start = on_tool_start or self._on_tool_start
+
         results: list[Message] = []
         for tc in tool_calls:
             # Notify the connector so it can update the thinking indicator
             # in real time (e.g. "Searching Jira…").  Failures here must
             # not block tool execution.
-            if self._on_tool_start:
+            if effective_on_tool_start:
                 display = self._tools.display_name(tc.name)
                 try:
-                    await self._on_tool_start(display)
+                    await effective_on_tool_start(display)
                 except Exception:
                     logger.debug("on_tool_start callback failed", exc_info=True)
 
@@ -347,7 +391,20 @@ class AgentLoop:
 
     @staticmethod
     def _build_assistant_tool_message(result: InferenceResponse) -> Message:
-        """Build the assistant message that carries tool_calls for the conversation."""
+        """Build the assistant message that carries tool_calls for the conversation.
+
+        The OpenAI chat protocol requires this message to appear in the
+        conversation before the corresponding tool-result messages.
+
+        Args:
+            result: The inference response containing the model's
+                content and any tool-call requests.
+
+        Returns:
+            A ``Message`` dict with role ``assistant``, the model's
+            text content, and a ``tool_calls`` list in OpenAI wire
+            format (if the model requested tool calls).
+        """
         # The OpenAI chat protocol requires the assistant message with
         # tool_calls to appear in the conversation *before* the
         # corresponding tool-result messages.  We reconstruct it from
@@ -370,7 +427,22 @@ class AgentLoop:
         result: InferenceResponse,
         request_id: str,
     ) -> str:
-        """Re-prompt the model when ``finish_reason=length`` truncates output."""
+        """Re-prompt the model when ``finish_reason=length`` truncates output.
+
+        Appends the partial response and a continuation prompt, then
+        calls the backend again (up to ``max_continuation_retries``
+        times).  All chunks are stitched into one seamless string.
+
+        Args:
+            messages: The message list at the point of truncation
+                (not modified — a local copy is used).
+            result: The truncated inference response.
+            request_id: Correlation ID for structured logging.
+
+        Returns:
+            The concatenated text from the initial truncated response
+            and all continuation chunks.
+        """
         chunks = [result.content]
         # Build a separate working list — we don't want continuation
         # scaffolding (assistant partial + "please continue" user msgs)
@@ -409,7 +481,16 @@ class AgentLoop:
         return "".join(chunks)
 
     def _get_write_tool_calls(self, tool_calls: list[ToolCall]) -> list[ToolCall]:
-        """Return tool calls targeting non-read-only tools."""
+        """Filter *tool_calls* to only those targeting non-read-only tools.
+
+        Args:
+            tool_calls: All tool invocations from the model's response.
+
+        Returns:
+            Subset of *tool_calls* whose ``ToolSpec.is_read_only`` is
+            ``False``.  Unknown tool names (spec not found) are
+            excluded — they'll fail at execute time instead.
+        """
         writes: list[ToolCall] = []
         for tc in tool_calls:
             spec = self._tools.get(tc.name)
@@ -423,7 +504,16 @@ class AgentLoop:
     async def _needs_write_approval(self, write_calls: list[ToolCall], request_id: str) -> bool:
         """Check the approval gate for write tools.
 
-        Returns ``True`` if at least one tool call was denied.
+        Short-circuits on the first denial — if any write is blocked,
+        the entire batch is paused for approval together.
+
+        Args:
+            write_calls: Write-only tool calls to check.
+            request_id: Correlation ID forwarded to the gate.
+
+        Returns:
+            ``True`` if at least one tool call was denied by the gate,
+            ``False`` if all were approved.
         """
         # Short-circuit on the first denied call.  We don't need to
         # check every write — if any is blocked, the entire batch is
@@ -445,8 +535,16 @@ class AgentLoop:
     def _format_write_description(self, write_calls: list[ToolCall]) -> str:
         """Render a human-readable summary of blocked write tool calls.
 
-        This text is shown in the Slack approval prompt so the user
-        knows exactly what will happen if they click Approve.
+        Shown in the Slack approval prompt so the user knows exactly
+        what will happen if they click Approve.  Long argument values
+        (e.g. MR descriptions) are truncated to 200 characters.
+
+        Args:
+            write_calls: The write tool calls to describe.
+
+        Returns:
+            Slack mrkdwn-formatted string with one section per tool
+            call, each listing the display name and key arguments.
         """
         parts: list[str] = []
         for tc in write_calls:
