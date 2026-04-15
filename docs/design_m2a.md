@@ -511,34 +511,39 @@ def _channel_hint(self, source_type: str) -> str:
 
 ## 9  Implementation Plan
 
-### Phase 1 — `AgentLoop` extraction + concurrent tool execution
+### Phase 1 — `AgentLoop` extraction + concurrent tool execution ✅
 
-| Task | Files |
-|------|-------|
-| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `agent/types.py` |
-| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py` |
-| Implement concurrent tool execution: partition by `is_concurrency_safe`, `asyncio.gather` for safe, sequential for unsafe | `agent/loop.py` |
-| Refactor `Orchestrator` to use `AgentLoop` internally | `orchestrator/orchestrator.py` |
-| Unit tests for `AgentLoop` (mock backend + tools) | `tests/test_agent_loop.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `agent/types.py` | ✅ Done |
+| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py` | ✅ Done |
+| Implement concurrent tool execution: partition by `is_concurrency_safe`, `asyncio.gather` for safe, sequential for unsafe | `agent/loop.py` | ✅ Done |
+| Refactor `Orchestrator` to use `AgentLoop` internally | `orchestrator/orchestrator.py` | ✅ Done |
+| Unit tests for `AgentLoop` (mock backend + tools) | `tests/test_agent_loop.py` | ✅ Done |
 
-**Exit criteria:** Existing orchestrator tests pass with `AgentLoop` under the
+**Exit criteria:** ✅ Existing orchestrator tests pass with `AgentLoop` under the
 hood. Safe tools run concurrently; unsafe tools run sequentially.
 
-### Phase 2 — File tools, scratchpad, and search tools
+### Phase 2 — File tools, scratchpad, and search tools ✅
 
-| Task | Files |
-|------|-------|
-| Implement workspace-rooted file tools with `is_concurrency_safe` flags | `tools/files.py` |
-| Implement search tools (`grep`, `glob`) — concurrency-safe | `tools/search.py` |
-| Implement `bash` tool with timeout and output truncation | `tools/bash.py` |
-| Implement git tools (`git_diff`, `git_commit`, `git_log`) | `tools/git.py` |
-| Implement `Scratchpad` class | `agent/scratchpad.py` |
-| Register scratchpad tools; add scratchpad context injection to `AgentLoop` | `tools/scratchpad.py`, `agent/loop.py` |
-| Create `create_coding_tool_registry()` factory | `tools/coding.py` |
-| Unit tests for all file tools and scratchpad | `tests/test_file_tools.py`, `tests/test_scratchpad.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Simplify `@tool` decorator to explicit JSON Schema (BYOO style) | `tools/registry.py` | ✅ Done |
+| Implement workspace-rooted file tools | `tools/files.py` | ✅ Done |
+| Implement search tools (`grep`, `glob`) | `tools/search.py` | ✅ Done |
+| Implement `bash` tool with timeout and output truncation | `tools/bash.py` | ✅ Done |
+| Implement git tools (`git_diff`, `git_commit`, `git_log`) | `tools/git.py` | ✅ Done |
+| Implement `Scratchpad` class | `agent/scratchpad.py` | ✅ Done |
+| Register scratchpad tools; add scratchpad context injection to `AgentLoop` | `tools/scratchpad.py`, `agent/loop.py` | ✅ Done |
+| Create `create_coding_tool_registry()` factory | `tools/tool_registry_factory.py` | ✅ Done |
+| Implement web search (`web_search`) and URL fetch (`web_fetch`) tools | `tools/web_search.py` | ✅ Done |
+| Standardize orchestrator tools (confluence, gerrit, gitlab, jira, slack_search) | `tools/*.py` | ✅ Done |
+| Unit tests for all tools (136 passing) | `tests/test_*_tools.py` | ✅ Done |
+| Add constant annotation rule to CONTRIBUTING.md | `CONTRIBUTING.md` | ✅ Done |
 
-**Exit criteria:** A `ToolRegistry` with all coding file tools can be created.
-Scratchpad reads/writes work and are included in `AgentLoopResult`.
+**Exit criteria:** ✅ A `ToolRegistry` with all coding file tools can be created.
+Scratchpad reads/writes work and are included in `AgentLoopResult`. All
+orchestrator tools use the `@tool` decorator with closures (no global state).
 
 ### Phase 3 — Context compaction + basic skill loading + prompt builder
 
