@@ -7,11 +7,11 @@ circular import with ``agent.loop``.
 """
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval, WriteApproval
-from nemoclaw_escapades.orchestrator.prompt_builder import PromptBuilder
+from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder
 
 __all__ = [
     "ApprovalGate",
     "AutoApproval",
     "WriteApproval",
-    "PromptBuilder",
+    "LayeredPromptBuilder",
 ]

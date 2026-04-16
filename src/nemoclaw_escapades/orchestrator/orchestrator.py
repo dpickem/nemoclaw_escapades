@@ -35,9 +35,10 @@ from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
-from nemoclaw_escapades.agent.types import AgentLoopConfig, ToolStartCallback
+from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder
+from nemoclaw_escapades.agent.types import ToolStartCallback
 from nemoclaw_escapades.backends.base import BackendBase
-from nemoclaw_escapades.config import OrchestratorConfig, load_system_prompt
+from nemoclaw_escapades.config import AgentLoopConfig, OrchestratorConfig, load_system_prompt
 from nemoclaw_escapades.connectors.base import StatusCallback
 from nemoclaw_escapades.models.types import (
     ActionBlock,
@@ -46,6 +47,7 @@ from nemoclaw_escapades.models.types import (
     InferenceError,
     InferenceRequest,
     Message,
+    MessageRole,
     NormalizedRequest,
     PendingApproval,
     RichResponse,
@@ -53,7 +55,6 @@ from nemoclaw_escapades.models.types import (
 )
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.observability.timer import Timer
-from nemoclaw_escapades.orchestrator.prompt_builder import PromptBuilder
 from nemoclaw_escapades.orchestrator.transcript_repair import (
     CONTINUATION_PROMPT,
     MAX_CONTINUATION_RETRIES,
@@ -78,7 +79,7 @@ class Orchestrator:
 
     Wraps ``AgentLoop`` to add orchestrator-specific concerns:
 
-    1. **Prompt assembly** — ``PromptBuilder`` prepends the system prompt
+    1. **Prompt assembly** — ``LayeredPromptBuilder`` prepends the system prompt
        to the per-thread conversation history and the latest user message.
     2. **Tool-use delegation** — when tools are registered, an
        ``AgentLoop`` handles the multi-turn inference + tool cycle.
@@ -126,10 +127,12 @@ class Orchestrator:
         self._approval = approval or WriteApproval()
         self._tools = tools
         self._audit = audit
-        # PromptBuilder owns per-thread conversation histories and
-        # handles the system prompt + history + user message assembly.
-        self._prompt = PromptBuilder(
-            system_prompt=load_system_prompt(config.system_prompt_path),
+        # LayeredPromptBuilder owns per-thread conversation histories,
+        # the 5-layer system prompt (identity, task context, cache
+        # boundary, runtime metadata, channel hint), and the message
+        # assembly for inference calls.
+        self._prompt = LayeredPromptBuilder(
+            identity=load_system_prompt(config.system_prompt_path),
             max_thread_history=config.max_thread_history,
         )
         # Keyed by thread_ts — stores the full conversation snapshot
@@ -405,8 +408,8 @@ class Orchestrator:
             # said so it can pick up exactly where it left off.
             call_messages: list[dict[str, Any]] = list(base_messages)
             for chunk in prior_continuation_chunks:
-                call_messages.append({"role": "assistant", "content": chunk})
-                call_messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+                call_messages.append({"role": MessageRole.ASSISTANT, "content": chunk})
+                call_messages.append({"role": MessageRole.USER, "content": CONTINUATION_PROMPT})
 
             if attempt > 0:
                 logger.info(

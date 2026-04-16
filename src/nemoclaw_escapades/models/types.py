@@ -177,6 +177,16 @@ class ToolResult:
 # Inference types
 # ---------------------------------------------------------------------------
 
+
+class MessageRole(StrEnum):
+    """OpenAI chat-completion message roles."""
+
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
 # Messages may contain tool_calls (assistant role) or tool_call_id (tool role),
 # so the value type must be Any rather than str.
 Message = dict[str, Any]

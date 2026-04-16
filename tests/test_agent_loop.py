@@ -8,7 +8,8 @@ import pytest
 
 from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
-from nemoclaw_escapades.agent.types import AgentLoopConfig, AgentLoopResult
+from nemoclaw_escapades.agent.types import AgentLoopResult
+from nemoclaw_escapades.config import AgentLoopConfig
 from nemoclaw_escapades.models.types import (
     InferenceRequest,
     InferenceResponse,
