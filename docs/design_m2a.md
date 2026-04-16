@@ -545,22 +545,23 @@ hood. Safe tools run concurrently; unsafe tools run sequentially.
 Scratchpad reads/writes work and are included in `AgentLoopResult`. All
 orchestrator tools use the `@tool` decorator with closures (no global state).
 
-### Phase 3 — Context compaction + basic skill loading + prompt builder
+### Phase 3 — Context compaction + basic skill loading + prompt builder ✅
 
-| Task | Files |
-|------|-------|
-| Implement micro-compaction (tool result truncation at configurable char limit) | `agent/compaction.py` |
-| Implement full compaction (LLM summary + session roll with synthetic messages) | `agent/compaction.py` |
-| Integrate compaction into `AgentLoop` (micro on every round, full on threshold) | `agent/loop.py` |
-| Implement `SkillLoader` — scan skills directory, load by name | `agent/skill_loader.py` |
-| Implement `skill` tool with enum of available skill IDs | `tools/skill.py` |
-| Implement layered `PromptBuilder` with cache boundary | `agent/prompt_builder.py` |
-| Implement channel hint layer (user / agent / cron) | `agent/prompt_builder.py` |
-| Unit tests for compaction (truncation, summary, session roll) | `tests/test_compaction.py` |
-| Unit tests for skill loading | `tests/test_skill_loader.py` |
-| Unit tests for prompt builder (layer ordering, cache boundary) | `tests/test_prompt_builder.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Implement micro-compaction (tool result truncation at configurable char limit) | `agent/compaction.py` | ✅ Done |
+| Implement full compaction (LLM summary + session roll with synthetic messages) | `agent/compaction.py` | ✅ Done |
+| Integrate compaction into `AgentLoop` (micro on every round, full on threshold) | `agent/loop.py` | ✅ Done |
+| Add compaction configuration to `AgentLoopConfig` | `agent/types.py`, `config.py` | ✅ Done |
+| Implement `SkillLoader` — scan skills directory, load by name | `agent/skill_loader.py` | ✅ Done |
+| Implement `skill` tool with enum of available skill IDs | `tools/skill.py` | ✅ Done |
+| Implement layered `LayeredPromptBuilder` with cache boundary | `agent/prompt_builder.py` | ✅ Done |
+| Implement channel hint layer (user / agent / cron) | `agent/prompt_builder.py` | ✅ Done |
+| Unit tests for compaction (truncation, summary, session roll) | `tests/test_compaction.py` | ✅ Done |
+| Unit tests for skill loading | `tests/test_skill_loader.py` | ✅ Done |
+| Unit tests for prompt builder (layer ordering, cache boundary) | `tests/test_prompt_builder.py` | ✅ Done |
 
-**Exit criteria:** Long conversations compact without crashing. Skills load
+**Exit criteria:** ✅ Long conversations compact without crashing. Skills load
 via tool. System prompt has cache boundary and channel hint.
 
 ---
