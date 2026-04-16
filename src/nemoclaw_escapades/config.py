@@ -33,6 +33,58 @@ DEFAULT_MAX_TOOL_ROUNDS: int = 10
 # How many times to re-prompt when finish_reason="length" truncates output.
 DEFAULT_MAX_CONTINUATION_RETRIES: int = 2
 
+# ── Context compaction defaults ───────────────────────────────────────
+
+# Micro-compaction: tool results exceeding this char count are truncated
+# in-place before inference (no API call, zero cost).
+DEFAULT_MICRO_COMPACTION_CHARS: int = 10_000
+# Full compaction triggers when total message chars exceed this threshold.
+# Approximates ~80% of a 128K-token context window at ~4 chars/token.
+DEFAULT_COMPACTION_THRESHOLD_CHARS: int = 400_000
+# Fraction of oldest messages to summarize during full compaction.
+DEFAULT_COMPACTION_COMPRESS_RATIO: float = 0.5
+# Minimum number of messages to keep verbatim (most recent) after compaction.
+DEFAULT_COMPACTION_MIN_KEEP: int = 4
+# Model used for the compaction summary call (same as main model by default).
+DEFAULT_COMPACTION_MODEL: str = ""
+
+
+@dataclass
+class AgentLoopConfig:
+    """Configuration for a single ``AgentLoop`` instance.
+
+    Attributes:
+        model: Model identifier forwarded to the inference backend.
+        temperature: Sampling temperature for chat completions.
+        max_tokens: Maximum tokens per completion response.
+        max_tool_rounds: Safety limit — maximum inference calls per
+            ``run()`` invocation before returning a partial answer.
+        max_continuation_retries: How many times to re-prompt the model
+            when ``finish_reason="length"`` truncates the output.
+        micro_compaction_chars: Tool results exceeding this char count
+            are truncated in-place before inference (zero-cost).
+        compaction_threshold_chars: Total message chars that trigger
+            full compaction (LLM summary + session roll).
+        compaction_compress_ratio: Fraction of oldest messages to
+            summarize during full compaction.
+        compaction_min_keep: Minimum messages to keep verbatim after
+            full compaction (always the most recent).
+        compaction_model: Model for the summary call.  Empty string
+            means use the same model as ``model``.
+    """
+
+    model: str = DEFAULT_INFERENCE_MODEL
+    temperature: float = DEFAULT_TEMPERATURE
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
+    max_continuation_retries: int = DEFAULT_MAX_CONTINUATION_RETRIES
+    micro_compaction_chars: int = DEFAULT_MICRO_COMPACTION_CHARS
+    compaction_threshold_chars: int = DEFAULT_COMPACTION_THRESHOLD_CHARS
+    compaction_compress_ratio: float = DEFAULT_COMPACTION_COMPRESS_RATIO
+    compaction_min_keep: int = DEFAULT_COMPACTION_MIN_KEEP
+    compaction_model: str = DEFAULT_COMPACTION_MODEL
+
+
 # ── NMB broker defaults ───────────────────────────────────────────────
 
 DEFAULT_NMB_HOST: str = "0.0.0.0"

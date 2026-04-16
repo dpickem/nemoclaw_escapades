@@ -16,18 +16,20 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval
+from nemoclaw_escapades.agent.compaction import ContextCompactor
 from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import (
-    AgentLoopConfig,
     AgentLoopResult,
     ToolEndCallback,
     ToolStartCallback,
 )
 from nemoclaw_escapades.backends.base import BackendBase
+from nemoclaw_escapades.config import AgentLoopConfig
 from nemoclaw_escapades.models.types import (
     InferenceRequest,
     InferenceResponse,
     Message,
+    MessageRole,
     PendingApproval,
     ToolCall,
 )
@@ -125,6 +127,7 @@ class AgentLoop:
         self._scratchpad = scratchpad
         self._on_tool_start = on_tool_start
         self._on_tool_end = on_tool_end
+        self._compactor = ContextCompactor(backend, config)
 
     async def run(
         self,
@@ -172,6 +175,17 @@ class AgentLoop:
         # emitting tool calls (e.g. cyclic tool dependencies or hallucinated
         # tool names that always error).
         for round_num in range(self._config.max_tool_rounds):
+            # Micro-compaction: truncate oversized tool results (zero
+            # cost — pure string slicing, no API call).  Applied before
+            # every inference round so the context window stays healthy.
+            working_messages = self._compactor.truncate_tool_results(working_messages)
+
+            # Full compaction: when total message chars exceed the
+            # threshold, summarize the oldest half via a dedicated
+            # inference call and session-roll.
+            if self._compactor.should_compact(working_messages):
+                working_messages = await self._compactor.compact(working_messages, request_id)
+
             # Inject the scratchpad into the system message so the model
             # always sees its latest notes.  We modify a copy of the
             # first message (not the original) to avoid accumulating
@@ -396,7 +410,7 @@ class AgentLoop:
             # Each tool result must reference the tool_call_id from the
             # assistant message — this is how the model matches results
             # back to the tool invocation it requested.
-            results.append({"role": "tool", "tool_call_id": tc.id, "content": output})
+            results.append({"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": output})
 
         return results
 
@@ -426,7 +440,7 @@ class AgentLoop:
 
         # Copy only the system message; the rest are shared references.
         result: list[Message] = list(messages)
-        if result and result[0].get("role") == "system":
+        if result and result[0].get("role") == MessageRole.SYSTEM:
             system = dict(result[0])
             system["content"] = str(system.get("content", "")) + "\n\n" + block
             result[0] = system
@@ -453,7 +467,7 @@ class AgentLoop:
         # tool_calls to appear in the conversation *before* the
         # corresponding tool-result messages.  We reconstruct it from
         # the InferenceResponse so it matches the wire format exactly.
-        msg: Message = {"role": "assistant", "content": result.content or ""}
+        msg: Message = {"role": MessageRole.ASSISTANT, "content": result.content or ""}
         if result.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -492,11 +506,11 @@ class AgentLoop:
         # scaffolding (assistant partial + "please continue" user msgs)
         # to leak into the caller's message history.
         working: list[Message] = list(messages)
-        working.append({"role": "assistant", "content": result.content})
+        working.append({"role": MessageRole.ASSISTANT, "content": result.content})
 
         for attempt in range(self._config.max_continuation_retries):
             # Append a nudge asking the model to pick up where it left off.
-            working.append({"role": "user", "content": CONTINUATION_PROMPT})
+            working.append({"role": MessageRole.USER, "content": CONTINUATION_PROMPT})
             logger.info(
                 "Continuation retry",
                 extra={"request_id": request_id, "attempt": attempt + 1},
@@ -517,7 +531,7 @@ class AgentLoop:
             # Otherwise, stack another round of partial output.
             if cont_result.finish_reason != "length":
                 break
-            working.append({"role": "assistant", "content": cont_result.content})
+            working.append({"role": MessageRole.ASSISTANT, "content": cont_result.content})
 
         # Stitch all chunks into one seamless response — the model is
         # instructed to continue mid-sentence, so the seams should be
