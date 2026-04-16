@@ -64,7 +64,7 @@ async def _run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_
             cwd=workspace_root,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return f"Error: git command timed out after {timeout}s"
     except FileNotFoundError:
         return "Error: git is not installed"

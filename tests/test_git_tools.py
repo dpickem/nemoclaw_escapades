@@ -76,11 +76,15 @@ class TestGitHandlers:
         subprocess.run(["git", "init"], cwd=workspace, capture_output=True, check=True)
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=workspace, capture_output=True, check=True,
+            cwd=workspace,
+            capture_output=True,
+            check=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
-            cwd=workspace, capture_output=True, check=True,
+            cwd=workspace,
+            capture_output=True,
+            check=True,
         )
         reg = ToolRegistry()
         register_git_tools(reg, str(workspace))

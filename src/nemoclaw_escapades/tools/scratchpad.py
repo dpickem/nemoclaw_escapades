@@ -42,7 +42,10 @@ def register_scratchpad_tools(registry: ToolRegistry, scratchpad: Scratchpad) ->
 
     @tool(
         "scratchpad_write",
-        "Overwrite the scratchpad with new content. Use for recording plans, observations, and decisions.",
+        (
+            "Overwrite the scratchpad with new content. "
+            "Use for recording plans, observations, and decisions."
+        ),
         {
             "type": "object",
             "properties": {
@@ -63,7 +66,10 @@ def register_scratchpad_tools(registry: ToolRegistry, scratchpad: Scratchpad) ->
 
     @tool(
         "scratchpad_append",
-        "Append content under a named section in the scratchpad. Creates the section if it doesn't exist.",
+        (
+            "Append content under a named section in the scratchpad. "
+            "Creates the section if it doesn't exist."
+        ),
         {
             "type": "object",
             "properties": {

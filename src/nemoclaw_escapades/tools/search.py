@@ -68,10 +68,8 @@ async def _grep_with_rg(
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_root,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_GREP_TIMEOUT_S
-        )
-    except asyncio.TimeoutError:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_GREP_TIMEOUT_S)
+    except TimeoutError:
         return f"Error: grep timed out after {_GREP_TIMEOUT_S}s"
 
     if proc.returncode == 1:
@@ -119,9 +117,7 @@ def _grep_with_re(
         if not file_path.is_file():
             continue
         try:
-            for line_num, line in enumerate(
-                file_path.read_text(errors="replace").splitlines(), 1
-            ):
+            for line_num, line in enumerate(file_path.read_text(errors="replace").splitlines(), 1):
                 if compiled.search(line):
                     rel = file_path.relative_to(root)
                     matches.append(f"{rel}:{line_num}:{line.rstrip()}")
@@ -145,14 +141,17 @@ def _make_grep(workspace_root: str) -> ToolSpec:
 
     @tool(
         "grep",
-        "Search file contents by regex pattern. Returns matching lines with file paths and line numbers. Supports glob filtering.",
+        (
+            "Search file contents by regex pattern. Returns matching lines "
+            "with file paths and line numbers. Supports glob filtering."
+        ),
         {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Regex pattern to search for."},
                 "path": {
                     "type": "string",
-                    "description": "Relative directory or file to search (default: workspace root).",
+                    "description": "Relative directory or file to search (default: root).",
                     "default": ".",
                 },
                 "include": {

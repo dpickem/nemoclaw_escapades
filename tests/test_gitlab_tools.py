@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from nemoclaw_escapades.config import GitLabConfig
 from nemoclaw_escapades.tools.gitlab import (
     GitLabClient,

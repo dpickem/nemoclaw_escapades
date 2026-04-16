@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 from nemoclaw_escapades.tools.files import _safe_resolve, register_file_tools
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.search import register_search_tools
-
+from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 
 # ── Path safety tests ─────────────────────────────────────────────────
 
@@ -84,9 +83,7 @@ class TestReadFile:
         assert "Error" in result
 
     async def test_read_nested_file(self, registry: ToolRegistry) -> None:
-        result = await registry.execute(
-            "read_file", json.dumps({"path": "subdir/nested.py"})
-        )
+        result = await registry.execute("read_file", json.dumps({"path": "subdir/nested.py"}))
         assert "print" in result
 
 
@@ -98,9 +95,7 @@ class TestWriteFile:
         assert "Wrote" in result
         assert (workspace / "new.txt").read_text() == "hello world"
 
-    async def test_write_creates_parent_dirs(
-        self, registry: ToolRegistry, workspace: Path
-    ) -> None:
+    async def test_write_creates_parent_dirs(self, registry: ToolRegistry, workspace: Path) -> None:
         await registry.execute(
             "write_file",
             json.dumps({"path": "deep/nested/file.txt", "content": "deep"}),
@@ -128,17 +123,17 @@ class TestEditFile:
     async def test_edit_missing_string(self, registry: ToolRegistry) -> None:
         result = await registry.execute(
             "edit_file",
-            json.dumps({
-                "path": "hello.txt",
-                "old_string": "not in file",
-                "new_string": "x",
-            }),
+            json.dumps(
+                {
+                    "path": "hello.txt",
+                    "old_string": "not in file",
+                    "new_string": "x",
+                }
+            ),
         )
         assert "not found" in result
 
-    async def test_edit_ambiguous_string(
-        self, registry: ToolRegistry, workspace: Path
-    ) -> None:
+    async def test_edit_ambiguous_string(self, registry: ToolRegistry, workspace: Path) -> None:
         (workspace / "dup.txt").write_text("aaa\naaa\n")
         result = await registry.execute(
             "edit_file",
@@ -172,9 +167,7 @@ class TestGrep:
         assert "No matches" in result
 
     async def test_grep_with_include(self, registry: ToolRegistry) -> None:
-        result = await registry.execute(
-            "grep", json.dumps({"pattern": "print", "include": "*.py"})
-        )
+        result = await registry.execute("grep", json.dumps({"pattern": "print", "include": "*.py"}))
         assert "nested.py" in result
 
 

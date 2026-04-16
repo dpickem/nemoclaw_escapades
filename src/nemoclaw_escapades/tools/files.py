@@ -106,7 +106,10 @@ def _make_read_file(workspace_root: str) -> ToolSpec:
 
     @tool(
         "read_file",
-        "Read a text file from the workspace. Returns numbered lines. Use offset/limit for large files.",
+        (
+            "Read a text file from the workspace. Returns numbered lines. "
+            "Use offset/limit for large files."
+        ),
         {
             "type": "object",
             "properties": {
@@ -208,7 +211,11 @@ def _make_edit_file(workspace_root: str) -> ToolSpec:
 
     @tool(
         "edit_file",
-        "Apply a targeted edit to a file via old/new string replacement. The old_string must occur exactly once. Preferred over write_file for surgical changes.",
+        (
+            "Apply a targeted edit to a file via old/new string replacement. "
+            "The old_string must occur exactly once. "
+            "Preferred over write_file for surgical changes."
+        ),
         {
             "type": "object",
             "properties": {

@@ -675,9 +675,7 @@ def _make_jira_transition_issue(client: JiraClient) -> ToolSpec:
         toolset=_TOOLSET,
         is_read_only=False,
     )
-    async def jira_transition_issue(
-        issue_key: str, transition_id: str, comment: str = ""
-    ) -> str:
+    async def jira_transition_issue(issue_key: str, transition_id: str, comment: str = "") -> str:
         """Transition a Jira issue to a new status."""
         return _format(
             await client.transition_issue(issue_key, transition_id, comment=comment or None)

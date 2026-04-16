@@ -167,7 +167,11 @@ def _make_web_search(
 
     @tool(
         "web_search",
-        "Search the web for real-time information. Returns titles, URLs, and snippets for the top results. Use for current events, documentation lookups, or any question that needs up-to-date information.",
+        (
+            "Search the web for real-time information. Returns titles, URLs, "
+            "and snippets for the top results. Use for current events, "
+            "documentation lookups, or any question that needs up-to-date info."
+        ),
         {
             "type": "object",
             "properties": {
@@ -289,7 +293,11 @@ def _make_web_fetch(jina_api_key: str = "") -> ToolSpec:
 
     @tool(
         "web_fetch",
-        "Fetch a web page by URL and return its content as Markdown. Use after web_search to read a specific page, or to fetch documentation, README files, API references, etc.",
+        (
+            "Fetch a web page by URL and return its content as Markdown. "
+            "Use after web_search to read a specific page, or to fetch "
+            "documentation, README files, API references, etc."
+        ),
         {
             "type": "object",
             "properties": {

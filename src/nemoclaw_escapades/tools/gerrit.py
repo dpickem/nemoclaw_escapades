@@ -400,9 +400,7 @@ def _make_gerrit_get_diff(client: GerritClient) -> ToolSpec:
         display_name="Getting file diff",
         toolset=_TOOLSET,
     )
-    async def gerrit_get_diff(
-        change_id: str, file_path: str, revision: str = "current"
-    ) -> str:
+    async def gerrit_get_diff(change_id: str, file_path: str, revision: str = "current") -> str:
         """Get the diff for a specific file in a Gerrit change."""
         return _format(await client.get_diff(change_id, file_path, revision=revision))
 
@@ -433,7 +431,7 @@ def _make_gerrit_set_review(client: GerritClient) -> ToolSpec:
         "gerrit_set_review",
         (
             "Post a review on a Gerrit change with a message and/or labels. "
-            'Labels should be a JSON string like \'{"Code-Review": 1}\'. Requires approval.'
+            "Labels should be a JSON string like '{\"Code-Review\": 1}'. Requires approval."
         ),
         {
             "type": "object",

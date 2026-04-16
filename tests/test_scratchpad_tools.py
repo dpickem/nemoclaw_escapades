@@ -74,9 +74,7 @@ class TestScratchpadHandlers:
         assert "empty" in result
 
     async def test_write_and_read(self, registry: ToolRegistry) -> None:
-        await registry.execute(
-            "scratchpad_write", json.dumps({"content": "# Plan\nStep 1"})
-        )
+        await registry.execute("scratchpad_write", json.dumps({"content": "# Plan\nStep 1"}))
         result = await registry.execute("scratchpad_read", "{}")
         assert "Plan" in result
         assert "Step 1" in result
@@ -91,12 +89,8 @@ class TestScratchpadHandlers:
         assert "Found a bug" in result
 
     async def test_write_overwrites(self, registry: ToolRegistry) -> None:
-        await registry.execute(
-            "scratchpad_write", json.dumps({"content": "first"})
-        )
-        await registry.execute(
-            "scratchpad_write", json.dumps({"content": "second"})
-        )
+        await registry.execute("scratchpad_write", json.dumps({"content": "first"}))
+        await registry.execute("scratchpad_write", json.dumps({"content": "second"}))
         result = await registry.execute("scratchpad_read", "{}")
         assert "second" in result
         assert "first" not in result
