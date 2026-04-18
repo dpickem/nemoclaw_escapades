@@ -71,9 +71,7 @@ class ScriptedBackend(MockBackend):
                 usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
                 latency_ms=1.0,
                 finish_reason="tool_calls",
-                tool_calls=[
-                    ToolCall(id=call_id, name=tool_name, arguments=json.dumps(arguments))
-                ],
+                tool_calls=[ToolCall(id=call_id, name=tool_name, arguments=json.dumps(arguments))],
             )
         )
 
@@ -204,6 +202,63 @@ class TestOrchestratorAgentLoopE2E:
 
         assert "## Finding" in scratchpad.read()
         assert "missing semicolon" in scratchpad.read()
+
+    async def test_scratchpad_injected_exactly_once_per_round(self, tmp_path: Path) -> None:
+        """Scratchpad must appear exactly once per inference round — not twice.
+
+        Regression: before the fix, the orchestrator baked the scratchpad
+        into the system message (Layer 5) AND ``AgentLoop._inject_scratchpad``
+        appended another ``<scratchpad>`` block each round.  Besides
+        duplication, the baked copy was never updated, so after a
+        ``scratchpad_write`` the model saw stale + fresh content side by
+        side.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        scratchpad = Scratchpad(str(tmp_path / "scratchpad.md"))
+        # Seed the scratchpad so it's non-empty on the very first round.
+        scratchpad.write("## Initial\nPre-existing notes from a prior task.")
+        tools = create_coding_tool_registry(str(workspace), scratchpad=scratchpad)
+
+        # Three rounds: read_file → scratchpad_write → final text.  This
+        # covers both "no mutation this round" (round 1) and "mutation
+        # last round" (rounds 2-3) paths.
+        (workspace / "x.py").write_text("print('hi')")
+        backend = ScriptedBackend()
+        backend.enqueue_tool_call("read_file", {"path": "x.py"}, "tc-1")
+        backend.enqueue_tool_call(
+            "scratchpad_write",
+            {"content": "## Updated\nRead x.py; it prints hi."},
+            "tc-2",
+        )
+        backend.enqueue_text("Done.")
+
+        orch = Orchestrator(
+            backend,
+            _orchestrator_config(),
+            approval=AutoApproval(),
+            tools=tools,
+            scratchpad=scratchpad,
+        )
+
+        await orch.handle(_slack_request("Check x.py."))
+
+        # Every inference call must see exactly ONE <scratchpad> block.
+        for i, call in enumerate(backend.calls):
+            system_msg = next(m for m in call.messages if m["role"] == MessageRole.SYSTEM)
+            count = system_msg["content"].count("<scratchpad>")
+            assert count == 1, (
+                f"Round {i}: system message contains {count} <scratchpad> blocks, "
+                f"expected exactly 1"
+            )
+
+        # Round 3 (after scratchpad_write) must see the POST-write content,
+        # not the pre-existing notes.
+        final_system = next(
+            m for m in backend.calls[-1].messages if m["role"] == MessageRole.SYSTEM
+        )
+        assert "## Updated" in final_system["content"]
+        assert "## Initial" not in final_system["content"]
 
     async def test_source_type_reaches_system_prompt(self, tmp_path: Path) -> None:
         """``NormalizedRequest.source`` flows through to the channel-hint layer."""

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
-from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, SourceType
+from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder
 from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import ToolStartCallback
 from nemoclaw_escapades.backends.base import BackendBase
@@ -242,12 +242,25 @@ class Orchestrator:
             # Build the full message list: system prompt + per-thread
             # conversation history + the new user message.  History is
             # capped at max_thread_history to bound context window usage.
+            #
+            # Note: scratchpad is deliberately NOT passed here.  The
+            # AgentLoop owns scratchpad injection — it re-reads on every
+            # round so ``scratchpad_write`` tool calls show up in the
+            # next inference immediately.  Baking the scratchpad into the
+            # system message here would cause two problems: (1) it would
+            # appear twice in the prompt (once baked, once injected by
+            # AgentLoop); (2) the baked copy goes stale after any
+            # ``scratchpad_write`` because it lives in ``working_messages``
+            # for the rest of the run.
             messages = self._prompt.messages_for_inference(
                 thread_key,
                 request.text,
                 agent_id=self._agent_id,
-                source_type=self._resolve_source_type(request.source),
-                scratchpad=(self._scratchpad.read() if self._scratchpad else ""),
+                # Raw source string flows straight through — the prompt
+                # builder's channel-hint renders any platform name
+                # (e.g. "slack", "teams", "cli") into the Layer-4 text
+                # without needing enum coercion.
+                source_type=request.source,
                 tools_summary=self._tools_summary,
             )
 
@@ -392,19 +405,6 @@ class Orchestrator:
             await on_status(f"{display_name}...")
 
         return _tool_start_adapter
-
-    @staticmethod
-    def _resolve_source_type(source: str) -> SourceType:
-        """Map a ``NormalizedRequest.source`` string to a ``SourceType`` enum.
-
-        Unknown platforms (e.g. ``"teams"``, ``"test"``) fall back to
-        ``SourceType.USER`` — the channel hint still renders correctly
-        via the fallback branch in ``LayeredPromptBuilder._channel_hint``.
-        """
-        try:
-            return SourceType(source)
-        except ValueError:
-            return SourceType.USER
 
     # ------------------------------------------------------------------
     # Inference + transcript repair (non-tool path)

@@ -56,11 +56,17 @@ CACHE_BOUNDARY_MARKER: str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"
 
 
 class SourceType(StrEnum):
-    """How the agent was invoked — controls the channel hint in Layer 4.
+    """Well-known source types that control the channel hint in Layer 4.
 
-    Well-known values have dedicated hint text.  Because ``SourceType``
-    is a ``StrEnum``, unknown platform names (e.g. ``"teams"``) can be
-    constructed at runtime and still work with the fallback hint.
+    ``CRON`` and ``AGENT`` produce dedicated hint text; any other value
+    (including ``USER``, ``SLACK``, or a platform name like ``"teams"``)
+    falls through to ``"You are responding to a user via {source}."``.
+
+    The prompt-builder APIs accept ``str``, not this enum, so callers
+    can forward raw platform names like ``NormalizedRequest.source``
+    without round-tripping through ``StrEnum()`` (which raises on
+    unknown values).  These constants exist for type-safe comparisons
+    and as a canonical reference for the two special-cased values.
     """
 
     USER = "user"
@@ -128,7 +134,7 @@ class LayeredPromptBuilder:
     def build(
         self,
         agent_id: str = "",
-        source_type: SourceType = SourceType.USER,
+        source_type: str = SourceType.USER,
         scratchpad: str = "",
         tools_summary: str = "",
     ) -> str:
@@ -137,8 +143,11 @@ class LayeredPromptBuilder:
         Args:
             agent_id: Unique identifier for this agent instance
                 (included in runtime metadata for traceability).
-            source_type: How the agent was invoked.  Controls the
-                channel hint layer (Layer 4).
+            source_type: How the agent was invoked — a ``SourceType``
+                enum value or any platform string (e.g. ``"slack"``,
+                ``"teams"``, ``"cli"``).  ``CRON`` and ``AGENT`` produce
+                dedicated hint text; everything else renders as
+                ``"responding to a user via {source_type}"``.
             scratchpad: Current scratchpad contents (may be empty).
             tools_summary: Brief summary of available tools (may be empty).
 
@@ -224,7 +233,7 @@ class LayeredPromptBuilder:
         user_text: str,
         *,
         agent_id: str = "",
-        source_type: SourceType = SourceType.USER,
+        source_type: str = SourceType.USER,
         scratchpad: str = "",
         tools_summary: str = "",
     ) -> list[dict[str, str]]:
@@ -283,6 +292,11 @@ class LayeredPromptBuilder:
         """
         hist = self.history_with_user_message(thread_key, user_text)
         hist.append({"role": MessageRole.ASSISTANT, "content": assistant_content})
+        # Re-cap after the assistant append — history_with_user_message
+        # capped before we added the reply, so without this we'd store
+        # max_thread_history + 1 entries once the cap is reached.
+        if len(hist) > self._max_history:
+            hist = hist[-self._max_history :]
         self._thread_history[thread_key] = hist
 
     # ------------------------------------------------------------------
@@ -309,14 +323,17 @@ class LayeredPromptBuilder:
         return "\n".join(parts)
 
     @staticmethod
-    def _channel_hint(source_type: SourceType) -> str:
+    def _channel_hint(source_type: str) -> str:
         """Build the channel hint layer (Layer 4).
 
         Tells the agent how its response will be consumed so it can
         adjust tone and format accordingly.
 
         Args:
-            source_type: The invocation channel.
+            source_type: The invocation channel — a ``SourceType`` enum
+                value or any platform string (``"slack"``, ``"teams"``,
+                ``"cli"``, …).  ``StrEnum`` members equal their string
+                value, so both work interchangeably.
 
         Returns:
             A single sentence describing the response context.

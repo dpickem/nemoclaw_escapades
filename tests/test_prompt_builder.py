@@ -106,6 +106,28 @@ class TestChannelHint:
         prompt = minimal_builder.build()
         assert "responding to a user via user" in prompt.lower()
 
+    def test_arbitrary_platform_string_preserved(
+        self, minimal_builder: LayeredPromptBuilder
+    ) -> None:
+        """Non-enum platform names (e.g. "teams", "cli") flow through verbatim.
+
+        Regression: the orchestrator used to coerce unknown sources to
+        ``SourceType.USER`` via ``StrEnum(source)``, which raises
+        ``ValueError`` for non-members and silently lost the platform
+        name.  The APIs now accept ``str`` directly.
+        """
+        prompt = minimal_builder.build(source_type="teams")
+        assert "responding to a user via teams" in prompt.lower()
+        assert "via user" not in prompt.lower().replace("user via teams", "")
+
+    def test_arbitrary_source_in_messages_for_inference(
+        self, minimal_builder: LayeredPromptBuilder
+    ) -> None:
+        """The history-aware API preserves custom platform names too."""
+        msgs = minimal_builder.messages_for_inference("t1", "hi", source_type="cli")
+        system = next(m for m in msgs if m["role"] == "system")
+        assert "responding to a user via cli" in system["content"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Scratchpad layer
@@ -234,6 +256,33 @@ class TestThreadHistory:
         msgs = builder.messages_for_inference("t1", "final")
         non_system = [m for m in msgs if m["role"] != "system"]
         assert len(non_system) <= 4
+
+    def test_stored_history_respects_cap(self) -> None:
+        """``commit_turn`` must not leave the stored history over the cap.
+
+        Regression: the previous implementation called
+        ``history_with_user_message`` (which capped the list) and then
+        appended the assistant reply *without* re-capping, so once the
+        cap was reached the stored list held ``max_thread_history + 1``
+        entries.  ``messages_for_inference`` re-capped on read, masking
+        the issue for inference but not for callers that inspect
+        ``thread_history`` directly.
+        """
+        builder = LayeredPromptBuilder(identity="sys", max_thread_history=4)
+        for i in range(10):
+            builder.commit_turn("t1", f"u{i}", f"a{i}")
+            assert len(builder.thread_history["t1"]) <= 4
+
+    def test_stored_history_preserves_newest_pair(self) -> None:
+        """When the cap kicks in, the newest turn (user + assistant) is intact."""
+        builder = LayeredPromptBuilder(identity="sys", max_thread_history=4)
+        for i in range(5):
+            builder.commit_turn("t1", f"u{i}", f"a{i}")
+
+        stored = builder.thread_history["t1"]
+        assert len(stored) == 4
+        assert stored[-2] == {"role": "user", "content": "u4"}
+        assert stored[-1] == {"role": "assistant", "content": "a4"}
 
     def test_separate_threads_independent(self, minimal_builder: LayeredPromptBuilder) -> None:
         minimal_builder.commit_turn("t1", "thread1-msg", "thread1-reply")
