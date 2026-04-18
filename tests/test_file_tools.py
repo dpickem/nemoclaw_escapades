@@ -209,3 +209,50 @@ class TestCodingToolRegistry:
         assert "scratchpad_read" in reg.names
         assert "scratchpad_write" in reg.names
         assert "scratchpad_append" in reg.names
+
+
+# ── Output truncation ─────────────────────────────────────────────────
+
+
+class TestOutputTruncation:
+    """Large file reads and grep results are truncated to bounded size."""
+
+    async def test_read_file_truncates_large_output(self, tmp_path: Path) -> None:
+        """Reading a large file returns output capped at the registry limit."""
+        # Generate a file comfortably larger than both _DEFAULT_READ_CHAR_LIMIT
+        # (32K) and the registry's default max_result_chars (8K).
+        big = tmp_path / "big.txt"
+        big.write_text("\n".join(f"line content {i}" for i in range(5000)))
+
+        reg = ToolRegistry()
+        register_file_tools(reg, str(tmp_path))
+        # Raise the line limit so read_file actually produces a huge body
+        # that's then trimmed by the registry's max_result_chars cap.
+        result = await reg.execute("read_file", json.dumps({"path": "big.txt", "limit": 5000}))
+        assert "truncated" in result.lower()
+        # Registry default max_result_chars = 8000; allow some slack for the
+        # truncation notice appended by the registry (~50 chars).
+        assert len(result) <= 8100
+
+    async def test_grep_truncates_many_matches(self, tmp_path: Path) -> None:
+        """Grep output over the cap gets a truncation marker."""
+        for i in range(200):
+            (tmp_path / f"file_{i:03d}.txt").write_text(
+                "\n".join(f"hit {i} line {j}" for j in range(50))
+            )
+
+        reg = ToolRegistry()
+        register_search_tools(reg, str(tmp_path))
+        result = await reg.execute("grep", json.dumps({"pattern": "hit"}))
+        assert "truncated" in result.lower()
+        assert len(result) <= 8100
+
+    async def test_small_read_not_truncated(self, tmp_path: Path) -> None:
+        """Small files pass through without a truncation marker."""
+        small = tmp_path / "small.txt"
+        small.write_text("just three\nshort\nlines\n")
+
+        reg = ToolRegistry()
+        register_file_tools(reg, str(tmp_path))
+        result = await reg.execute("read_file", json.dumps({"path": "small.txt"}))
+        assert "truncated" not in result.lower()
