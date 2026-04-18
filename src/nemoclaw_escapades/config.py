@@ -154,6 +154,22 @@ DEFAULT_CONFLUENCE_URL: str = "https://nvidia.atlassian.net/wiki"
 DEFAULT_WEB_SEARCH_API: str = "brave"
 DEFAULT_WEB_SEARCH_LIMIT: int = 5
 
+# ── Coding agent defaults ────────────────────────────────────────────
+
+# Default workspace root used when the coding agent is enabled.  Inside
+# the OpenShell sandbox this is a dedicated PVC; locally it's a folder
+# under the user's home.
+DEFAULT_CODING_WORKSPACE_ROOT: str = "~/.nemoclaw/workspace"
+# Default location for the agent's per-task scratchpad Markdown file.
+DEFAULT_SCRATCHPAD_PATH: str = "~/.nemoclaw/scratchpad.md"
+
+# ── Skills defaults ──────────────────────────────────────────────────
+
+# Directory that ``SkillLoader`` scans for ``SKILL.md`` files.  Relative
+# paths resolve against the process CWD; shipped starter skills live in
+# the repo's top-level ``skills/`` folder.
+DEFAULT_SKILLS_DIR: str = "skills"
+
 # ── Misc ─────────────────────────────────────────────────────────────
 
 _TRUTHY_VALUES: frozenset[str] = frozenset({"true", "1", "yes"})
@@ -374,6 +390,45 @@ class WebSearchConfig:
 
 
 @dataclass
+class CodingAgentConfig:
+    """Configuration for the coding-agent tool suite and scratchpad.
+
+    When ``enabled`` is true, ``main`` registers the workspace-rooted
+    file, search, bash, git, and scratchpad tools into the orchestrator's
+    ``ToolRegistry``.  The scratchpad is a per-process Markdown file —
+    persistent cross-session memory is deferred to M5.
+
+    Attributes:
+        enabled: Whether the coding tools + scratchpad are wired in.
+        workspace_root: Absolute path to the directory that file/search/
+            bash/git tools operate on.  Path traversal outside this
+            directory is rejected by the file tools.
+        scratchpad_path: Filesystem path for the agent's scratchpad.
+    """
+
+    enabled: bool = False
+    workspace_root: str = DEFAULT_CODING_WORKSPACE_ROOT
+    scratchpad_path: str = DEFAULT_SCRATCHPAD_PATH
+
+
+@dataclass
+class SkillsConfig:
+    """Configuration for the ``SkillLoader`` and ``skill`` tool.
+
+    When ``enabled`` is true (and ``skills_dir`` contains at least one
+    ``SKILL.md`` file), the ``skill`` tool is registered with a dynamic
+    enum of discovered skill IDs.
+
+    Attributes:
+        enabled: Whether skill loading is wired in.
+        skills_dir: Directory tree scanned for ``SKILL.md`` files.
+    """
+
+    enabled: bool = True
+    skills_dir: str = DEFAULT_SKILLS_DIR
+
+
+@dataclass
 class AuditConfig:
     """Configuration for the SQLite audit database.
 
@@ -413,6 +468,8 @@ class AppConfig:
         confluence: Confluence REST integration settings.
         slack_search: Slack user-token search/history settings.
         web_search: Web search and URL fetch settings.
+        coding: Coding-agent tool suite + scratchpad settings.
+        skills: ``SkillLoader`` + ``skill`` tool settings.
     """
 
     slack: SlackConfig = field(default_factory=SlackConfig)
@@ -426,6 +483,8 @@ class AppConfig:
     confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
     slack_search: SlackSearchConfig = field(default_factory=SlackSearchConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    coding: CodingAgentConfig = field(default_factory=CodingAgentConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
 
 
 def load_config() -> AppConfig:
@@ -543,6 +602,17 @@ def load_config() -> AppConfig:
             default_limit=int(
                 os.environ.get("WEB_SEARCH_DEFAULT_LIMIT", str(DEFAULT_WEB_SEARCH_LIMIT))
             ),
+        ),
+        coding=CodingAgentConfig(
+            # Default OFF — the coding tools mutate the filesystem and
+            # run shell commands, so they must be explicitly opted in.
+            enabled=os.environ.get("CODING_AGENT_ENABLED", "false").lower() in _TRUTHY_VALUES,
+            workspace_root=os.environ.get("CODING_WORKSPACE_ROOT", DEFAULT_CODING_WORKSPACE_ROOT),
+            scratchpad_path=os.environ.get("SCRATCHPAD_PATH", DEFAULT_SCRATCHPAD_PATH),
+        ),
+        skills=SkillsConfig(
+            enabled=os.environ.get("SKILLS_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            skills_dir=os.environ.get("SKILLS_DIR", DEFAULT_SKILLS_DIR),
         ),
     )
 

@@ -35,7 +35,8 @@ from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
-from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder
+from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, SourceType
+from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import ToolStartCallback
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import AgentLoopConfig, OrchestratorConfig, load_system_prompt
@@ -103,6 +104,8 @@ class Orchestrator:
         approval: ApprovalGate | None = None,
         tools: ToolRegistry | None = None,
         audit: AuditDB | None = None,
+        scratchpad: Scratchpad | None = None,
+        agent_id: str = "",
     ) -> None:
         """Initialise the orchestrator.
 
@@ -118,6 +121,13 @@ class Orchestrator:
                 tool calling.
             audit: Optional audit database.  When provided, every tool
                 invocation is logged (service, args, latency, success).
+            scratchpad: Optional scratchpad.  When provided, its contents
+                are injected into the system prompt and returned in
+                ``AgentLoopResult``; the scratchpad tools are expected
+                to already be registered in *tools*.
+            agent_id: Identifier surfaced in the runtime-metadata prompt
+                layer (useful for multi-agent traceability once M2b
+                lands).  Empty string omits the line.
         """
         self._backend = backend
         self._config = config
@@ -127,6 +137,8 @@ class Orchestrator:
         self._approval = approval or WriteApproval()
         self._tools = tools
         self._audit = audit
+        self._scratchpad = scratchpad
+        self._agent_id = agent_id
         # LayeredPromptBuilder owns per-thread conversation histories,
         # the 5-layer system prompt (identity, task context, cache
         # boundary, runtime metadata, channel hint), and the message
@@ -135,6 +147,10 @@ class Orchestrator:
             identity=load_system_prompt(config.system_prompt_path),
             max_thread_history=config.max_thread_history,
         )
+        # Cache a comma-separated list of available tool names for the
+        # runtime-metadata layer.  Kept empty when no tools are
+        # registered so the prompt doesn't advertise nothing.
+        self._tools_summary = ", ".join(sorted(tools.names)) if tools else ""
         # Keyed by thread_ts — stores the full conversation snapshot
         # when a write tool is blocked.  Popped on Approve (resume
         # execution) or Deny (discard), or when a new user message
@@ -160,6 +176,7 @@ class Orchestrator:
                 # response-level check and the loop's tool-level check
                 # use the same policy.
                 approval=self._approval,
+                scratchpad=scratchpad,
             )
 
     async def handle(
@@ -225,7 +242,14 @@ class Orchestrator:
             # Build the full message list: system prompt + per-thread
             # conversation history + the new user message.  History is
             # capped at max_thread_history to bound context window usage.
-            messages = self._prompt.messages_for_inference(thread_key, request.text)
+            messages = self._prompt.messages_for_inference(
+                thread_key,
+                request.text,
+                agent_id=self._agent_id,
+                source_type=self._resolve_source_type(request.source),
+                scratchpad=(self._scratchpad.read() if self._scratchpad else ""),
+                tools_summary=self._tools_summary,
+            )
 
             logger.info(
                 "Prompt built",
@@ -368,6 +392,19 @@ class Orchestrator:
             await on_status(f"{display_name}...")
 
         return _tool_start_adapter
+
+    @staticmethod
+    def _resolve_source_type(source: str) -> SourceType:
+        """Map a ``NormalizedRequest.source`` string to a ``SourceType`` enum.
+
+        Unknown platforms (e.g. ``"teams"``, ``"test"``) fall back to
+        ``SourceType.USER`` — the channel hint still renders correctly
+        via the fallback branch in ``LayeredPromptBuilder._channel_hint``.
+        """
+        try:
+            return SourceType(source)
+        except ValueError:
+            return SourceType.USER
 
     # ------------------------------------------------------------------
     # Inference + transcript repair (non-tool path)

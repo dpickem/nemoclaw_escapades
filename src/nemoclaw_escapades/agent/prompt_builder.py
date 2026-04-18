@@ -218,7 +218,16 @@ class LayeredPromptBuilder:
             return hist[-self._max_history :]
         return hist
 
-    def messages_for_inference(self, thread_key: str, user_text: str) -> list[dict[str, str]]:
+    def messages_for_inference(
+        self,
+        thread_key: str,
+        user_text: str,
+        *,
+        agent_id: str = "",
+        source_type: SourceType = SourceType.USER,
+        scratchpad: str = "",
+        tools_summary: str = "",
+    ) -> list[dict[str, str]]:
         """Assemble the full message list for an inference call.
 
         Prepends the system prompt (from ``build()``) to the capped
@@ -230,13 +239,27 @@ class LayeredPromptBuilder:
         Args:
             thread_key: Conversation identifier.
             user_text: The new user message.
+            agent_id: Forwarded to ``build()`` for the runtime-metadata
+                layer.  Typically the connector's request correlation ID
+                or the thread key.
+            source_type: Forwarded to ``build()`` for the channel-hint
+                layer.
+            scratchpad: Forwarded to ``build()`` for the scratchpad
+                layer.  Passing an empty string omits that layer.
+            tools_summary: Forwarded to ``build()`` for the
+                runtime-metadata layer.
 
         Returns:
             An OpenAI-format message list starting with the system
             prompt, followed by conversation history, ending with the
             latest user message.
         """
-        system_prompt = self.build()
+        system_prompt = self.build(
+            agent_id=agent_id,
+            source_type=source_type,
+            scratchpad=scratchpad,
+            tools_summary=tools_summary,
+        )
         hist = self.history_with_user_message(thread_key, user_text)
         return [{"role": MessageRole.SYSTEM, "content": system_prompt}] + hist
 
