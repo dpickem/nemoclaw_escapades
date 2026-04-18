@@ -142,6 +142,7 @@ def _make_git_commit(workspace_root: str) -> ToolSpec:
         display_name="Committing changes",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def git_commit(message: str, add_all: bool = True) -> str:
         """Stage changes (optionally) and create a commit with *message*.

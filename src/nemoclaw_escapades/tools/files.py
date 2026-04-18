@@ -181,6 +181,7 @@ def _make_write_file(workspace_root: str) -> ToolSpec:
         display_name="Writing file",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def write_file(path: str, content: str) -> str:
         """Create or overwrite a file at *path* with *content*.
@@ -231,6 +232,7 @@ def _make_edit_file(workspace_root: str) -> ToolSpec:
         display_name="Editing file",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def edit_file(path: str, old_string: str, new_string: str) -> str:
         """Replace a unique occurrence of *old_string* with *new_string* in a file.

@@ -44,6 +44,11 @@ class ToolSpec:
         handler: Async callable that accepts keyword arguments matching
             the schema and returns a string result.
         is_read_only: Whether this tool only reads data (affects approval).
+        is_concurrency_safe: Whether this tool can safely run in parallel
+            with other concurrent-safe tool calls via ``asyncio.gather``.
+            Default ``True`` (safe).  Set ``False`` for tools that mutate
+            shared workspace state (``write_file``, ``edit_file``,
+            ``bash``, ``git_commit``, ``scratchpad_write``, etc.).
         display_name: Short label for the thinking indicator
             (e.g. "Searching Jira"). Falls back to ``name`` if empty.
         toolset: Logical group this tool belongs to (e.g. ``"jira"``,
@@ -61,6 +66,7 @@ class ToolSpec:
     input_schema: dict[str, Any]
     handler: Callable[..., Awaitable[str]]
     is_read_only: bool = True
+    is_concurrency_safe: bool = True
     display_name: str = ""
     toolset: str = ""
     check_fn: Callable[[], bool] | None = None
@@ -88,6 +94,7 @@ def tool(
     display_name: str = "",
     toolset: str = "",
     is_read_only: bool = True,
+    is_concurrency_safe: bool = True,
     check_fn: Callable[[], bool] | None = None,
     max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
 ) -> Callable[[Callable[..., Awaitable[str]]], ToolSpec]:
@@ -125,6 +132,7 @@ def tool(
             input_schema=parameters,
             handler=fn,
             is_read_only=is_read_only,
+            is_concurrency_safe=is_concurrency_safe,
             display_name=display_name,
             toolset=toolset,
             check_fn=check_fn,

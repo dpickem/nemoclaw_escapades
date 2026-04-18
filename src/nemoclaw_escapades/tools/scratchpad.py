@@ -59,6 +59,7 @@ def register_scratchpad_tools(registry: ToolRegistry, scratchpad: Scratchpad) ->
         display_name="Writing scratchpad",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def scratchpad_write(content: str) -> str:
         """Overwrite the scratchpad with *content*."""
@@ -84,6 +85,7 @@ def register_scratchpad_tools(registry: ToolRegistry, scratchpad: Scratchpad) ->
         display_name="Appending to scratchpad",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def scratchpad_append(section: str, content: str) -> str:
         """Append *content* under the heading *section*."""

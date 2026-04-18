@@ -49,6 +49,7 @@ def _make_bash(workspace_root: str) -> ToolSpec:
         display_name="Running command",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def bash(command: str, timeout: int = _DEFAULT_TIMEOUT_S) -> str:
         """Run *command* via ``asyncio.create_subprocess_shell`` and return its output.

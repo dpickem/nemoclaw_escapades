@@ -12,6 +12,7 @@ backend they inject.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -308,6 +309,14 @@ class AgentLoop:
     ) -> list[Message]:
         """Execute a batch of tool calls and return tool-result messages.
 
+        Concurrency-safe tools (``ToolSpec.is_concurrency_safe=True``)
+        run in parallel via ``asyncio.gather``.  Unsafe tools run
+        sequentially afterwards so workspace mutations are serialized.
+
+        Results are returned in the **same order** as ``tool_calls`` —
+        the OpenAI protocol requires each tool-result message to appear
+        in a stable position matching the assistant's tool-call message.
+
         Public so the orchestrator can call this during approval-resume
         flows (execute the previously-blocked tools, then call ``run()``
         to continue the loop).
@@ -320,99 +329,171 @@ class AgentLoop:
                 the instance-level default.
 
         Returns:
-            A list of ``tool`` role messages, one per tool call.
+            A list of ``tool`` role messages, one per tool call, in the
+            same order as the input.
         """
         # Per-request callback takes precedence over the instance default.
         # This avoids shared mutable state — critical for concurrent
         # requests whose callbacks target different Slack channels.
         effective_on_tool_start = on_tool_start or self._on_tool_start
 
-        results: list[Message] = []
-        for tc in tool_calls:
-            # Notify the connector so it can update the thinking indicator
-            # in real time (e.g. "Searching Jira…").  Failures here must
-            # not block tool execution.
-            if effective_on_tool_start:
-                display = self._tools.display_name(tc.name)
-                try:
-                    await effective_on_tool_start(display)
-                except Exception:
-                    logger.debug("on_tool_start callback failed", exc_info=True)
-
-            # Look up the spec before execution — needed later for audit
-            # metadata even if execute() raises.
+        # Partition by is_concurrency_safe.  Unknown tool names (spec is
+        # None) are treated as safe — they'll fail at execute time with a
+        # clear error, which is better than blocking the whole batch on a
+        # sequential run for a hallucinated tool.
+        safe_indices: list[int] = []
+        unsafe_indices: list[int] = []
+        for i, tc in enumerate(tool_calls):
             spec = self._tools.get(tc.name)
-            tool_timer = Timer()
-            success = True
-            error_msg: str | None = None
+            if spec is None or spec.is_concurrency_safe:
+                safe_indices.append(i)
+            else:
+                unsafe_indices.append(i)
+
+        # Slot-based reassembly: each tool call has a fixed output slot
+        # so the final list matches input order even after parallel
+        # execution reorders completions.
+        results: list[Message | None] = [None] * len(tool_calls)
+
+        # ── Concurrent batch (safe tools) ──────────────────────────────
+        # Fire all safe tools at once via asyncio.gather.  Thinking-
+        # indicator callbacks fire upfront so the user sees them in
+        # input order, not the completion-order (which would be jittery).
+        if safe_indices:
+            for i in safe_indices:
+                await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
+
+            safe_results = await asyncio.gather(
+                *(
+                    self._execute_one(tool_calls[i], request_id, thread_ts)
+                    for i in safe_indices
+                ),
+                return_exceptions=False,
+            )
+            for i, msg in zip(safe_indices, safe_results):
+                results[i] = msg
+
+        # ── Sequential tail (unsafe tools) ─────────────────────────────
+        # Workspace mutations (write_file, bash, git_commit, etc.) must
+        # serialize to avoid races on the filesystem.
+        for i in unsafe_indices:
+            await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
+            results[i] = await self._execute_one(tool_calls[i], request_id, thread_ts)
+
+        # None should remain at this point — every slot was filled.  The
+        # cast is safe because both branches above populate every index.
+        return [r for r in results if r is not None]
+
+    async def _notify_tool_start(
+        self,
+        tc: ToolCall,
+        callback: ToolStartCallback | None,
+    ) -> None:
+        """Fire the thinking-indicator callback for a single tool call.
+
+        Failures are swallowed — a flaky connector must never block
+        tool execution.
+        """
+        if callback is None:
+            return
+        display = self._tools.display_name(tc.name)
+        try:
+            await callback(display)
+        except Exception:
+            logger.debug("on_tool_start callback failed", exc_info=True)
+
+    async def _execute_one(
+        self,
+        tc: ToolCall,
+        request_id: str,
+        thread_ts: str | None,
+    ) -> Message:
+        """Execute a single tool call and produce its tool-result message.
+
+        Handles tool dispatch, error serialization, audit logging, and
+        the per-tool ``on_tool_end`` telemetry callback.  Never raises —
+        errors are serialized as JSON and fed back to the model.
+
+        Args:
+            tc: The tool invocation to execute.
+            request_id: Correlation ID for structured logging.
+            thread_ts: Optional thread timestamp for audit correlation.
+
+        Returns:
+            A tool-role message referencing the input's tool_call_id.
+        """
+        # Look up the spec before execution — needed later for audit
+        # metadata even if execute() raises.
+        spec = self._tools.get(tc.name)
+        tool_timer = Timer()
+        success = True
+        error_msg: str | None = None
+        try:
+            # The registry handles argument parsing (JSON → kwargs),
+            # dispatch, and output truncation (max_result_chars).
+            output = await self._tools.execute(tc.name, tc.arguments)
+            logger.info(
+                "Tool call succeeded",
+                extra={
+                    "request_id": request_id,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "duration_ms": round(tool_timer.ms, 1),
+                },
+            )
+        except Exception as exc:
+            # Tool errors are serialized as JSON and fed back to the
+            # model — this lets the model explain the failure to the
+            # user or try an alternative approach.
+            success = False
+            error_msg = str(exc)
+            output = json.dumps({"error": error_msg, "tool": tc.name})
+            logger.error(
+                "Tool call failed",
+                extra={
+                    "request_id": request_id,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "duration_ms": round(tool_timer.ms, 1),
+                },
+                exc_info=True,
+            )
+
+        duration_ms = round(tool_timer.ms, 1)
+
+        # Telemetry callback — used by the orchestrator for latency
+        # tracking and by future sub-agents for SLA monitoring.
+        if self._on_tool_end:
             try:
-                # The registry handles argument parsing (JSON → kwargs),
-                # dispatch, and output truncation (max_result_chars).
-                output = await self._tools.execute(tc.name, tc.arguments)
-                logger.info(
-                    "Tool call succeeded",
-                    extra={
-                        "request_id": request_id,
-                        "tool": tc.name,
-                        "tool_call_id": tc.id,
-                        "duration_ms": round(tool_timer.ms, 1),
-                    },
+                await self._on_tool_end(tc.name, duration_ms, success)
+            except Exception:
+                logger.debug("on_tool_end callback failed", exc_info=True)
+
+        # Audit logging is fire-and-forget: the background writer
+        # batches inserts off the hot path so a slow DB never blocks
+        # the tool loop.  Failures are swallowed to avoid poisoning
+        # the user-facing conversation.
+        if self._audit:
+            try:
+                await self._audit.log_tool_call(
+                    session_id=request_id,
+                    thread_ts=thread_ts,
+                    service=spec.toolset if spec else "",
+                    command=tc.name,
+                    args=tc.arguments,
+                    operation_type=("READ" if (spec and spec.is_read_only) else "WRITE"),
+                    duration_ms=duration_ms,
+                    success=success,
+                    error_message=error_msg,
+                    response_payload=output,
                 )
-            except Exception as exc:
-                # Tool errors are serialized as JSON and fed back to the
-                # model — this lets the model explain the failure to the
-                # user or try an alternative approach.
-                success = False
-                error_msg = str(exc)
-                output = json.dumps({"error": error_msg, "tool": tc.name})
-                logger.error(
-                    "Tool call failed",
-                    extra={
-                        "request_id": request_id,
-                        "tool": tc.name,
-                        "tool_call_id": tc.id,
-                        "duration_ms": round(tool_timer.ms, 1),
-                    },
-                    exc_info=True,
-                )
+            except Exception:
+                logger.debug("Audit log_tool_call failed", exc_info=True)
 
-            duration_ms = round(tool_timer.ms, 1)
-
-            # Telemetry callback — used by the orchestrator for latency
-            # tracking and by future sub-agents for SLA monitoring.
-            if self._on_tool_end:
-                try:
-                    await self._on_tool_end(tc.name, duration_ms, success)
-                except Exception:
-                    logger.debug("on_tool_end callback failed", exc_info=True)
-
-            # Audit logging is fire-and-forget: the background writer
-            # batches inserts off the hot path so a slow DB never blocks
-            # the tool loop.  Failures are swallowed to avoid poisoning
-            # the user-facing conversation.
-            if self._audit:
-                try:
-                    await self._audit.log_tool_call(
-                        session_id=request_id,
-                        thread_ts=thread_ts,
-                        service=spec.toolset if spec else "",
-                        command=tc.name,
-                        args=tc.arguments,
-                        operation_type=("READ" if (spec and spec.is_read_only) else "WRITE"),
-                        duration_ms=duration_ms,
-                        success=success,
-                        error_message=error_msg,
-                        response_payload=output,
-                    )
-                except Exception:
-                    logger.debug("Audit log_tool_call failed", exc_info=True)
-
-            # Each tool result must reference the tool_call_id from the
-            # assistant message — this is how the model matches results
-            # back to the tool invocation it requested.
-            results.append({"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": output})
-
-        return results
+        # Each tool result must reference the tool_call_id from the
+        # assistant message — this is how the model matches results
+        # back to the tool invocation it requested.
+        return {"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": output}
 
     # ------------------------------------------------------------------
     # Internal helpers

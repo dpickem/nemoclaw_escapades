@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -479,3 +480,226 @@ class TestExecuteToolCalls:
         assert results[0]["tool_call_id"] == "tc-1"
         payload = json.loads(results[0]["content"])
         assert payload["result"] == "echo: test"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent tool execution (is_concurrency_safe partitioning)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentExecution:
+    """Safe tools run in parallel; unsafe tools run sequentially."""
+
+    @staticmethod
+    def _make_timing_registry() -> tuple[ToolRegistry, list[str]]:
+        """Registry with two safe + two unsafe tools that record start/end events."""
+        events: list[str] = []
+
+        async def _safe_a(delay: float = 0.1) -> str:
+            events.append("safe_a:start")
+            await asyncio.sleep(delay)
+            events.append("safe_a:end")
+            return "a"
+
+        async def _safe_b(delay: float = 0.1) -> str:
+            events.append("safe_b:start")
+            await asyncio.sleep(delay)
+            events.append("safe_b:end")
+            return "b"
+
+        async def _unsafe_x(delay: float = 0.05) -> str:
+            events.append("unsafe_x:start")
+            await asyncio.sleep(delay)
+            events.append("unsafe_x:end")
+            return "x"
+
+        async def _unsafe_y(delay: float = 0.05) -> str:
+            events.append("unsafe_y:start")
+            await asyncio.sleep(delay)
+            events.append("unsafe_y:end")
+            return "y"
+
+        schema = {
+            "type": "object",
+            "properties": {"delay": {"type": "number"}},
+        }
+        reg = ToolRegistry()
+        reg.register(
+            ToolSpec(
+                name="safe_a",
+                description="",
+                input_schema=schema,
+                handler=_safe_a,
+                is_concurrency_safe=True,
+                toolset="t",
+            )
+        )
+        reg.register(
+            ToolSpec(
+                name="safe_b",
+                description="",
+                input_schema=schema,
+                handler=_safe_b,
+                is_concurrency_safe=True,
+                toolset="t",
+            )
+        )
+        reg.register(
+            ToolSpec(
+                name="unsafe_x",
+                description="",
+                input_schema=schema,
+                handler=_unsafe_x,
+                is_concurrency_safe=False,
+                toolset="t",
+            )
+        )
+        reg.register(
+            ToolSpec(
+                name="unsafe_y",
+                description="",
+                input_schema=schema,
+                handler=_unsafe_y,
+                is_concurrency_safe=False,
+                toolset="t",
+            )
+        )
+        return reg, events
+
+    async def test_safe_tools_run_in_parallel(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Both safe tools start before either finishes (interleaved events)."""
+        reg, events = self._make_timing_registry()
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config)
+
+        await loop.execute_tool_calls(
+            [
+                ToolCall(id="1", name="safe_a", arguments="{}"),
+                ToolCall(id="2", name="safe_b", arguments="{}"),
+            ],
+            request_id="req-conc",
+        )
+
+        assert events[0].endswith(":start")
+        assert events[1].endswith(":start")
+        assert {events[0], events[1]} == {"safe_a:start", "safe_b:start"}
+
+    async def test_unsafe_tools_run_sequentially(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Unsafe tools complete one after another — never interleave."""
+        reg, events = self._make_timing_registry()
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config)
+
+        await loop.execute_tool_calls(
+            [
+                ToolCall(id="1", name="unsafe_x", arguments="{}"),
+                ToolCall(id="2", name="unsafe_y", arguments="{}"),
+            ],
+            request_id="req-seq",
+        )
+
+        assert events == [
+            "unsafe_x:start",
+            "unsafe_x:end",
+            "unsafe_y:start",
+            "unsafe_y:end",
+        ]
+
+    async def test_mixed_batch_preserves_input_order(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Results come back in the same order as the input tool_calls."""
+        reg, _ = self._make_timing_registry()
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config)
+
+        calls = [
+            ToolCall(id="t1", name="unsafe_x", arguments="{}"),
+            ToolCall(id="t2", name="safe_a", arguments="{}"),
+            ToolCall(id="t3", name="unsafe_y", arguments="{}"),
+            ToolCall(id="t4", name="safe_b", arguments="{}"),
+        ]
+        results = await loop.execute_tool_calls(calls, request_id="req-mix")
+
+        assert [r["tool_call_id"] for r in results] == ["t1", "t2", "t3", "t4"]
+
+    async def test_mixed_batch_runs_safe_before_unsafe(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Safe tools start first (in the concurrent batch), unsafe run after."""
+        reg, events = self._make_timing_registry()
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config)
+
+        await loop.execute_tool_calls(
+            [
+                ToolCall(id="t1", name="unsafe_x", arguments="{}"),
+                ToolCall(id="t2", name="safe_a", arguments="{}"),
+                ToolCall(id="t3", name="safe_b", arguments="{}"),
+            ],
+            request_id="req-mix2",
+        )
+
+        safe_done_idx = max(
+            events.index("safe_a:end"),
+            events.index("safe_b:end"),
+        )
+        unsafe_start_idx = events.index("unsafe_x:start")
+        assert unsafe_start_idx > safe_done_idx
+
+    async def test_unknown_tool_treated_as_safe(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Tool names with no registered spec go into the safe batch.
+
+        They fail at execute time with a clear error rather than blocking
+        the whole batch into sequential mode.
+        """
+        reg, _ = self._make_timing_registry()
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config)
+
+        results = await loop.execute_tool_calls(
+            [
+                ToolCall(id="1", name="safe_a", arguments="{}"),
+                ToolCall(id="2", name="does_not_exist", arguments="{}"),
+            ],
+            request_id="req-unknown",
+        )
+
+        assert len(results) == 2
+        unknown_payload = json.loads(results[1]["content"])
+        assert "error" in unknown_payload
+
+    async def test_callbacks_fire_for_all_tools(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Thinking-indicator callback fires for both safe and unsafe tools."""
+        reg, _ = self._make_timing_registry()
+        invocations: list[str] = []
+
+        async def _on_start(display: str) -> None:
+            invocations.append(display)
+
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=reg, config=config, on_tool_start=_on_start)
+
+        await loop.execute_tool_calls(
+            [
+                ToolCall(id="1", name="safe_a", arguments="{}"),
+                ToolCall(id="2", name="unsafe_x", arguments="{}"),
+            ],
+            request_id="req-cb-mix",
+        )
+
+        assert len(invocations) == 2
