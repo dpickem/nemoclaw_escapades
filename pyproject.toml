@@ -53,6 +53,17 @@ filterwarnings = [
     # event loop closes during pytest teardown.  Harmless race — the DB
     # is already checkpointed and disposed by AuditDB.close().
     "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+    # Same teardown race from a different angle: aiosqlite.Connection's
+    # __del__ emits a ResourceWarning when it's garbage-collected after
+    # the event loop has shut down, even though AuditDB.close() already
+    # ran.  Pytest 8+ promotes this unraisable exception to a warning,
+    # which our "error" filter would otherwise upgrade to a test
+    # failure.  Mirrors the PytestUnhandledThreadExceptionWarning
+    # ignore above; both come from the same aiosqlite teardown race.
+    # We can't narrow further via a message regex because pytest's
+    # filterwarnings parser splits on ":" and the warning message
+    # contains colons.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 markers = [
     "integration: multi-sandbox NMB integration tests (PolicyBroker + harness)",
