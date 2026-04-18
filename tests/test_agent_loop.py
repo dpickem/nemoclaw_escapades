@@ -703,3 +703,30 @@ class TestConcurrentExecution:
         )
 
         assert len(invocations) == 2
+
+    async def test_dispatched_calls_registered_with_compactor(
+        self,
+        tool_registry: ToolRegistry,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Each dispatched call populates the compactor's id → name map.
+
+        This is how the compaction summary resolves opaque
+        ``tool_call_id`` values back to human-readable function names
+        without walking the message history.
+        """
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=tool_registry, config=config)
+
+        await loop.execute_tool_calls(
+            [
+                ToolCall(id="call_aaa", name="echo", arguments='{"message": "x"}'),
+                ToolCall(id="call_bbb", name="echo", arguments='{"message": "y"}'),
+            ],
+            request_id="req-reg",
+        )
+
+        assert loop._compactor._tool_names_by_id == {
+            "call_aaa": "echo",
+            "call_bbb": "echo",
+        }

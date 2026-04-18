@@ -364,10 +364,7 @@ class AgentLoop:
                 await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
 
             safe_results = await asyncio.gather(
-                *(
-                    self._execute_one(tool_calls[i], request_id, thread_ts)
-                    for i in safe_indices
-                ),
+                *(self._execute_one(tool_calls[i], request_id, thread_ts) for i in safe_indices),
                 return_exceptions=False,
             )
             for i, msg in zip(safe_indices, safe_results):
@@ -425,6 +422,12 @@ class AgentLoop:
         # Look up the spec before execution — needed later for audit
         # metadata even if execute() raises.
         spec = self._tools.get(tc.name)
+
+        # Tell the compactor about this call.  At summary time it uses
+        # the (id → name) map to render ``[Tool result (read_file)]``
+        # instead of the opaque tool_call_id — no message walking.
+        self._compactor.register_tool_call(tc.id, tc.name)
+
         tool_timer = Timer()
         success = True
         error_msg: str | None = None

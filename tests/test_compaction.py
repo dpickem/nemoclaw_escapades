@@ -6,9 +6,12 @@ from typing import Any
 
 import pytest
 
-from nemoclaw_escapades.agent.compaction import ContextCompactor, _extract_tool_name
+from nemoclaw_escapades.agent.compaction import (
+    ContextCompactor,
+    _extract_tool_name,
+)
 from nemoclaw_escapades.config import AgentLoopConfig
-from nemoclaw_escapades.models.types import Message
+from nemoclaw_escapades.models.types import Message, MessageRole
 from tests.conftest import MockBackend
 
 # ---------------------------------------------------------------------------
@@ -253,3 +256,148 @@ class TestExtractToolName:
 
     def test_non_dict(self) -> None:
         assert _extract_tool_name("not a dict") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Summary-transcript formatting (tool name resolution)
+# ---------------------------------------------------------------------------
+
+
+def _tool_calls_msg(calls: list[tuple[str, str]]) -> Message:
+    """Build an assistant message carrying tool_calls.
+
+    Args:
+        calls: List of (id, function_name) tuples.
+
+    Returns:
+        A message dict in the OpenAI wire format used by AgentLoop.
+    """
+    return {
+        "role": MessageRole.ASSISTANT,
+        "content": "",
+        "tool_calls": [
+            {
+                "id": tc_id,
+                "type": "function",
+                "function": {"name": name, "arguments": "{}"},
+            }
+            for tc_id, name in calls
+        ],
+    }
+
+
+class TestRegisterToolCall:
+    """register_tool_call populates the compactor's id → name map."""
+
+    def test_registers_call_id(self, backend: MockBackend, config: AgentLoopConfig) -> None:
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("call_abc", "read_file")
+        assert c._tool_names_by_id == {"call_abc": "read_file"}
+
+    def test_multiple_registrations(self, backend: MockBackend, config: AgentLoopConfig) -> None:
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("tc-1", "read_file")
+        c.register_tool_call("tc-2", "grep")
+        assert c._tool_names_by_id == {"tc-1": "read_file", "tc-2": "grep"}
+
+    def test_empty_call_id_ignored(self, backend: MockBackend, config: AgentLoopConfig) -> None:
+        """Defensive: empty call-ids aren't stored (avoids a spurious "" key)."""
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("", "read_file")
+        assert c._tool_names_by_id == {}
+
+    def test_duplicate_registration_overwrites(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        """Registering the same id twice takes the newest name.
+
+        In practice ids are unique per call, but this documents the
+        behaviour so a caller that retries registration doesn't get
+        stale state.
+        """
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("tc-1", "old")
+        c.register_tool_call("tc-1", "new")
+        assert c._tool_names_by_id["tc-1"] == "new"
+
+
+class TestFormatForSummaryToolName:
+    """_format_for_summary surfaces the function name, not the opaque id."""
+
+    def test_tool_result_uses_registered_name(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        """Regression: the transcript reads ``[Tool result (read_file)]``,
+        not ``[Tool result (call_abc123)]``.  Names come from the
+        compactor's registered-call map, not from message walking.
+        """
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("call_abc123", "read_file")
+
+        messages: list[Message] = [
+            _tool_calls_msg([("call_abc123", "read_file")]),
+            {
+                "role": MessageRole.TOOL,
+                "tool_call_id": "call_abc123",
+                "content": "file contents",
+            },
+        ]
+        transcript = c._format_for_summary(messages)
+        assert "[Tool result (read_file)]" in transcript
+        # The opaque id does appear in the assistant tool_calls entry's
+        # raw dict, but NOT as the tool-result label.
+        assert "[Tool result (call_abc123)]" not in transcript
+
+    def test_multiple_registered_calls_resolved_independently(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        c = ContextCompactor(backend, config)
+        c.register_tool_call("c1", "read_file")
+        c.register_tool_call("c2", "grep")
+
+        messages: list[Message] = [
+            _tool_calls_msg([("c1", "read_file"), ("c2", "grep")]),
+            {"role": MessageRole.TOOL, "tool_call_id": "c1", "content": "A"},
+            {"role": MessageRole.TOOL, "tool_call_id": "c2", "content": "B"},
+        ]
+        transcript = c._format_for_summary(messages)
+        assert "[Tool result (read_file)]: A" in transcript
+        assert "[Tool result (grep)]: B" in transcript
+
+    def test_unregistered_call_falls_back_to_id(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        """If a tool result's id was never registered (e.g. carried over
+        from a different AgentLoop instance's history), we fall back to
+        the id itself so the audit trail stays correlatable.
+        """
+        c = ContextCompactor(backend, config)
+        # Deliberately don't register the id.
+
+        messages: list[Message] = [
+            {"role": MessageRole.TOOL, "tool_call_id": "unknown-id", "content": "x"},
+        ]
+        transcript = c._format_for_summary(messages)
+        assert "[Tool result (unknown-id)]" in transcript
+
+    def test_tool_result_with_no_id_falls_back_to_tool(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        """Missing ``tool_call_id`` entirely falls back to the word 'tool'."""
+        c = ContextCompactor(backend, config)
+        messages: list[Message] = [{"role": MessageRole.TOOL, "content": "x"}]
+        transcript = c._format_for_summary(messages)
+        assert "[Tool result (tool)]" in transcript
+
+    def test_assistant_tool_calls_listed_by_name(
+        self, backend: MockBackend, config: AgentLoopConfig
+    ) -> None:
+        """The assistant's ``[called tools: ...]`` line reads ``name`` from
+        the tool_calls entry directly — no map lookup needed.
+        """
+        c = ContextCompactor(backend, config)
+        messages: list[Message] = [
+            _tool_calls_msg([("c1", "read_file"), ("c2", "grep")]),
+        ]
+        transcript = c._format_for_summary(messages)
+        assert "called tools: read_file, grep" in transcript

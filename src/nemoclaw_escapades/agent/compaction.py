@@ -92,6 +92,28 @@ class ContextCompactor:
         self.min_keep = config.compaction_min_keep
         self._model = config.compaction_model or config.model
 
+        # Tool-call-id → function-name map.  ``AgentLoop`` populates this
+        # via ``register_tool_call`` at dispatch time, so the summary
+        # transcript can render ``[Tool result (read_file)]`` instead of
+        # ``[Tool result (call_abc123)]`` without walking the message
+        # history at compaction time.
+        self._tool_names_by_id: dict[str, str] = {}
+
+    def register_tool_call(self, call_id: str, tool_name: str) -> None:
+        """Record a dispatched tool call so the summary can use its name.
+
+        Called by ``AgentLoop`` each time it dispatches a tool.  The map
+        is append-only and persists across ``run()`` calls on the same
+        compactor instance — useful when a later round compacts tool
+        results whose ids were produced in an earlier round.
+
+        Args:
+            call_id: The opaque ``tool_call_id`` the model assigned.
+            tool_name: The ``ToolSpec.name`` (e.g. ``"read_file"``).
+        """
+        if call_id:
+            self._tool_names_by_id[call_id] = tool_name
+
     def truncate_tool_results(self, messages: list[Message]) -> list[Message]:
         """Micro-compaction: truncate large tool results in-place.
 
@@ -255,9 +277,15 @@ class ContextCompactor:
 
         return result.content
 
-    @staticmethod
-    def _format_for_summary(messages: list[Message]) -> str:
+    def _format_for_summary(self, messages: list[Message]) -> str:
         """Render messages as a readable transcript for the summary model.
+
+        Uses ``self._tool_names_by_id`` (populated by ``AgentLoop`` via
+        ``register_tool_call`` at dispatch time) to resolve tool-result
+        messages — which only carry the opaque ``tool_call_id`` — back
+        to their human-readable function name.  The map-based approach
+        keeps the compactor decoupled from message structure: no
+        walking, no pre-scans.
 
         Args:
             messages: Messages to format.
@@ -270,12 +298,17 @@ class ContextCompactor:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if role == MessageRole.TOOL:
-                tool_name = msg.get("tool_call_id", "tool")
-                # Keep tool results short in the summary input
+                tc_id = str(msg.get("tool_call_id", ""))
+                # Fall back to the id itself (then "tool") if the call
+                # wasn't registered — defensive against messages carried
+                # over from a different AgentLoop instance's history.
+                tool_name = self._tool_names_by_id.get(tc_id) or tc_id or "tool"
                 if isinstance(content, str) and len(content) > _MAX_TOOL_RESULT_IN_SUMMARY:
                     content = content[:_MAX_TOOL_RESULT_IN_SUMMARY] + "..."
                 lines.append(f"[Tool result ({tool_name})]: {content}")
             elif role == MessageRole.ASSISTANT and "tool_calls" in msg:
+                # Assistant's tool_calls entries carry the name inline
+                # (``function.name``) — no map lookup needed.
                 tc_list = msg.get("tool_calls", [])
                 calls_desc = ", ".join(_extract_tool_name(tc) for tc in tc_list)
                 lines.append(f"Assistant: [called tools: {calls_desc}]")
@@ -287,7 +320,11 @@ class ContextCompactor:
 
 
 def _extract_tool_name(tc: dict[str, object] | object) -> str:
-    """Extract the tool function name from a tool_call dict or object.
+    """Extract the tool function name from a single ``tool_calls`` entry.
+
+    Used only for the assistant-role branch, which carries the name
+    inline via ``tool_calls[i].function.name``.  Not used for tool-role
+    messages (those are resolved via the registered-call map).
 
     Args:
         tc: A tool call in dict format (from working messages).
