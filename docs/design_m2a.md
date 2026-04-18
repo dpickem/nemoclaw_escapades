@@ -515,11 +515,11 @@ def _channel_hint(self, source_type: str) -> str:
 
 | Task | Files | Status |
 |------|-------|--------|
-| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `agent/types.py` | ✅ Done |
-| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py` | ✅ Done |
+| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `tools/registry.py` | ✅ Done |
+| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py`, `agent/types.py` | ✅ Done |
 | Implement concurrent tool execution: partition by `is_concurrency_safe`, `asyncio.gather` for safe, sequential for unsafe | `agent/loop.py` | ✅ Done |
 | Refactor `Orchestrator` to use `AgentLoop` internally | `orchestrator/orchestrator.py` | ✅ Done |
-| Unit tests for `AgentLoop` (mock backend + tools) | `tests/test_agent_loop.py` | ✅ Done |
+| Unit tests for `AgentLoop` + concurrency (mock backend + tools) | `tests/test_agent_loop.py` | ✅ Done |
 
 **Exit criteria:** ✅ Existing orchestrator tests pass with `AgentLoop` under the
 hood. Safe tools run concurrently; unsafe tools run sequentially.
@@ -563,6 +563,28 @@ orchestrator tools use the `@tool` decorator with closures (no global state).
 
 **Exit criteria:** ✅ Long conversations compact without crashing. Skills load
 via tool. System prompt has cache boundary and channel hint.
+
+### Phase 4 — Runtime wiring, integration tests, starter skills ✅
+
+A closure phase that takes the Phase 1–3 building blocks and makes them
+actually reachable at runtime.  Before this phase, the compaction /
+skill / scratchpad code compiled and passed unit tests but the running
+orchestrator never exercised them.
+
+| Task | Files | Status |
+|------|-------|--------|
+| Add `CodingAgentConfig` + `SkillsConfig` to `AppConfig`; env-var wiring | `config.py` | ✅ Done |
+| Pass `scratchpad`, `agent_id`, `source_type` through `Orchestrator` into the prompt builder + agent loop | `orchestrator/orchestrator.py`, `agent/prompt_builder.py` | ✅ Done |
+| Wire `Scratchpad`, coding tool registry, `SkillLoader`, and `skill` tool in `main.py` | `main.py` | ✅ Done |
+| Integration test: orchestrator + `AgentLoop` end-to-end (real coding tools, real workspace) | `tests/test_integration_agent.py` | ✅ Done |
+| Integration test: long-conversation compaction (50+ msgs, tool-result truncation in loop) | `tests/test_integration_agent.py` | ✅ Done |
+| Integration test: skill-guided task (agent calls `skill` tool, follows loaded content) | `tests/test_integration_agent.py` | ✅ Done |
+| Ship starter skills (`code-review`, `debugging`, `refactor`) | `skills/*/SKILL.md` | ✅ Done |
+
+**Exit criteria:** ✅ A running NemoClaw process with `CODING_AGENT_ENABLED=true`
+has a scratchpad, the full coding tool suite, and the `skill` tool wired
+in.  The three integration tests from §10.2 pass.  The `skills/`
+directory ships with at least three starter skills.
 
 ---
 
