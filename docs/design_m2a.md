@@ -592,32 +592,32 @@ directory ships with at least three starter skills.
 
 ### 10.1 Unit Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| `AgentLoop` with mock backend and tools | Multi-turn loop, tool execution, safety limit, truncation handling |
-| `AgentLoop` concurrent tool execution | Safe tools run via `asyncio.gather`; unsafe run sequentially; mixed batches respect ordering |
-| `AgentLoop` with scratchpad | Scratchpad context injection, read/write tools, snapshot in result |
-| `AgentLoop` approval gate | Write tool gating (orchestrator mode), pre-approved pass-through (sub-agent mode) |
-| `Scratchpad` class | Read, write, append, size cap, snapshot |
-| `Orchestrator` refactor | All existing tests pass with `AgentLoop` under the hood |
-| File tools path validation | Rejects `..` traversals, absolute paths, paths outside workspace root |
-| File tools output truncation | Large file reads and grep results truncated at configured limits |
-| `edit_file` replacement | Correct old→new string replacement; fails on non-unique matches |
-| `bash` tool timeout | Commands killed after timeout; stderr captured |
-| Micro-compaction | Tool results > 10K chars are truncated; annotation appended |
-| Full compaction | Summary generated; session rolled; newest messages preserved |
-| Compaction threshold | Compaction triggers at configured token threshold; not before |
-| `SkillLoader` | Scans directory; loads by name; returns content |
-| `skill` tool | Returns skill content as tool result; enum matches available skills |
-| `PromptBuilder` layer ordering | Layers in correct order; cache boundary present; channel hint correct |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| `AgentLoop` with mock backend and tools | Multi-turn loop, tool execution, safety limit, truncation handling | ✅ `TestAgentLoopBasic`, `TestSafetyLimit`, `TestContinuationRetries`, `TestToolErrors` |
+| `AgentLoop` concurrent tool execution | Safe tools run via `asyncio.gather`; unsafe run sequentially; mixed batches respect ordering | ✅ `TestConcurrentExecution` (6 tests) |
+| `AgentLoop` with scratchpad | Scratchpad context injection, read/write tools, snapshot in result | ✅ `TestAgentLoopScratchpad` (5 tests) |
+| `AgentLoop` approval gate | Write tool gating (orchestrator mode), pre-approved pass-through (sub-agent mode) | ✅ `TestWriteApproval` |
+| `Scratchpad` class | Read, write, append, size cap, snapshot | ✅ `tests/test_scratchpad.py::TestScratchpadClass` |
+| `Orchestrator` refactor | All existing tests pass with `AgentLoop` under the hood | ✅ `tests/test_orchestrator.py` (all suites) |
+| File tools path validation | Rejects `..` traversals, absolute paths, paths outside workspace root | ✅ `TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` |
+| File tools output truncation | Large file reads and grep results truncated at configured limits | ✅ `TestOutputTruncation` |
+| `edit_file` replacement | Correct old→new string replacement; fails on non-unique matches | ✅ `TestEditFile` |
+| `bash` tool timeout | Commands killed after timeout; stderr captured | ✅ `tests/test_bash_tools.py::TestBashHandler::test_timeout` |
+| Micro-compaction | Tool results > 10K chars are truncated; annotation appended | ✅ `tests/test_compaction.py::TestMicroCompaction` |
+| Full compaction | Summary generated; session rolled; newest messages preserved | ✅ `tests/test_compaction.py::TestFullCompaction` |
+| Compaction threshold | Compaction triggers at configured token threshold; not before | ✅ `tests/test_compaction.py::TestShouldCompact` |
+| `SkillLoader` | Scans directory; loads by name; returns content | ✅ `tests/test_skill_loader.py::TestSkillLoaderScan`, `TestSkillLoaderLoad` |
+| `skill` tool | Returns skill content as tool result; enum matches available skills | ✅ `tests/test_skill_loader.py::TestSkillTool` |
+| `PromptBuilder` layer ordering | Layers in correct order; cache boundary present; channel hint correct | ✅ `tests/test_prompt_builder.py::TestLayerOrdering`, `TestChannelHint` |
 
 ### 10.2 Integration Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| Orchestrator + `AgentLoop` end-to-end | Slack message → agent loop with file tools → response |
-| Long conversation compaction | 50+ message conversation triggers full compaction; conversation continues coherently |
-| Skill-guided coding task | Load a coding skill → agent follows skill instructions |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| Orchestrator + `AgentLoop` end-to-end | Slack message → agent loop with file tools → response | ✅ `tests/test_integration_agent.py::TestOrchestratorAgentLoopE2E` |
+| Long conversation compaction | 50+ message conversation triggers full compaction; conversation continues coherently | ✅ `tests/test_integration_agent.py::TestLongConversationCompaction` |
+| Skill-guided coding task | Load a coding skill → agent follows skill instructions | ✅ `tests/test_integration_agent.py::TestSkillGuidedTask` |
 
 ---
 
