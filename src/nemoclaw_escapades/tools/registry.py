@@ -48,7 +48,7 @@ class ToolSpec:
             with other concurrent-safe tool calls via ``asyncio.gather``.
             Default ``True`` (safe).  Set ``False`` for tools that mutate
             shared workspace state (``write_file``, ``edit_file``,
-            ``bash``, ``git_commit``, ``scratchpad_write``, etc.).
+            ``bash``, ``git_commit``, etc.).
         display_name: Short label for the thinking indicator
             (e.g. "Searching Jira"). Falls back to ``name`` if empty.
         toolset: Logical group this tool belongs to (e.g. ``"jira"``,

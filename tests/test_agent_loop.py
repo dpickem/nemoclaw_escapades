@@ -483,152 +483,6 @@ class TestExecuteToolCalls:
 
 
 # ---------------------------------------------------------------------------
-# AgentLoop + scratchpad
-# ---------------------------------------------------------------------------
-
-
-class TestAgentLoopScratchpad:
-    """AgentLoop injects scratchpad context and returns its snapshot."""
-
-    async def test_scratchpad_contents_injected_into_system_prompt(
-        self,
-        tool_registry: ToolRegistry,
-        config: AgentLoopConfig,
-        tmp_path: pytest.TempPathFactory,
-    ) -> None:
-        """When a scratchpad is provided, its contents appear in the system message."""
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
-
-        scratchpad = Scratchpad(str(tmp_path / "sp.md"))  # type: ignore[operator]
-        scratchpad.write("## Plan\nDo the thing.")
-
-        backend = ToolMockBackend()
-        backend.add_response(content="OK.", finish_reason="stop")
-        loop = AgentLoop(
-            backend=backend,
-            tools=tool_registry,
-            config=config,
-            scratchpad=scratchpad,
-        )
-
-        await loop.run(_make_messages(), request_id="req-sp")
-
-        system_msg = next(m for m in backend.calls[0].messages if m["role"] == "system")
-        assert "<scratchpad>" in system_msg["content"]
-        assert "Do the thing." in system_msg["content"]
-
-    async def test_empty_scratchpad_not_injected(
-        self,
-        tool_registry: ToolRegistry,
-        config: AgentLoopConfig,
-        tmp_path: pytest.TempPathFactory,
-    ) -> None:
-        """Empty scratchpad is omitted — no stray ``<scratchpad>`` block."""
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
-
-        scratchpad = Scratchpad(str(tmp_path / "sp.md"))  # type: ignore[operator]
-
-        backend = ToolMockBackend()
-        backend.add_response(content="OK.", finish_reason="stop")
-        loop = AgentLoop(
-            backend=backend,
-            tools=tool_registry,
-            config=config,
-            scratchpad=scratchpad,
-        )
-
-        await loop.run(_make_messages(), request_id="req-empty-sp")
-
-        system_msg = next(m for m in backend.calls[0].messages if m["role"] == "system")
-        assert "<scratchpad>" not in system_msg["content"]
-
-    async def test_scratchpad_snapshot_in_result(
-        self,
-        tool_registry: ToolRegistry,
-        config: AgentLoopConfig,
-        tmp_path: pytest.TempPathFactory,
-    ) -> None:
-        """``AgentLoopResult.scratchpad_contents`` holds the final scratchpad text."""
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
-
-        scratchpad = Scratchpad(str(tmp_path / "sp.md"))  # type: ignore[operator]
-        scratchpad.write("final notes")
-
-        backend = ToolMockBackend()
-        backend.add_response(content="done", finish_reason="stop")
-        loop = AgentLoop(
-            backend=backend,
-            tools=tool_registry,
-            config=config,
-            scratchpad=scratchpad,
-        )
-
-        result = await loop.run(_make_messages(), request_id="req-snap")
-        assert result.scratchpad_contents == "final notes"
-
-    async def test_result_scratchpad_contents_none_when_no_scratchpad(
-        self,
-        tool_registry: ToolRegistry,
-        config: AgentLoopConfig,
-    ) -> None:
-        """Without a scratchpad, the result's ``scratchpad_contents`` is ``None``."""
-        backend = ToolMockBackend()
-        backend.add_response(content="done", finish_reason="stop")
-        loop = AgentLoop(backend=backend, tools=tool_registry, config=config)
-
-        result = await loop.run(_make_messages(), request_id="req-none")
-        assert result.scratchpad_contents is None
-
-    async def test_scratchpad_re_read_between_rounds(
-        self,
-        config: AgentLoopConfig,
-        tmp_path: pytest.TempPathFactory,
-    ) -> None:
-        """Scratchpad is re-read every round so write-then-read reflects the update.
-
-        Simulates the model writing to the scratchpad on round 1 and the
-        value appearing in the system prompt on round 2.
-        """
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
-        from nemoclaw_escapades.tools.scratchpad import register_scratchpad_tools
-
-        scratchpad = Scratchpad(str(tmp_path / "sp.md"))  # type: ignore[operator]
-        reg = ToolRegistry()
-        register_scratchpad_tools(reg, scratchpad)
-
-        backend = ToolMockBackend()
-        backend.add_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[
-                ToolCall(
-                    id="tc-1",
-                    name="scratchpad_write",
-                    arguments='{"content": "## Progress\\nStep 1 done."}',
-                )
-            ],
-        )
-        backend.add_response(content="Noted.", finish_reason="stop")
-        loop = AgentLoop(
-            backend=backend,
-            tools=reg,
-            config=config,
-            scratchpad=scratchpad,
-        )
-
-        await loop.run(_make_messages(), request_id="req-reread")
-
-        # Round 1: scratchpad was empty — no block.
-        round1_system = next(m for m in backend.calls[0].messages if m["role"] == "system")
-        assert "<scratchpad>" not in round1_system["content"]
-
-        # Round 2: post-write content shows up in the injected block.
-        round2_system = next(m for m in backend.calls[1].messages if m["role"] == "system")
-        assert "<scratchpad>" in round2_system["content"]
-        assert "Step 1 done." in round2_system["content"]
-
-
-# ---------------------------------------------------------------------------
 # Concurrent tool execution (is_concurrency_safe partitioning)
 # ---------------------------------------------------------------------------
 
@@ -876,3 +730,31 @@ class TestConcurrentExecution:
             "call_aaa": "echo",
             "call_bbb": "echo",
         }
+
+    async def test_result_length_matches_input_even_when_slot_missing(
+        self,
+        tool_registry: ToolRegistry,
+        config: AgentLoopConfig,
+    ) -> None:
+        """``execute_tool_calls`` must never return a shorter list than it got.
+
+        The OpenAI tool-call protocol requires exactly one tool-role
+        message per assistant tool_call, keyed by tool_call_id.  A
+        dropped slot would leave the next inference call with an
+        unmatched tool_call and the backend would reject the request.
+        If a slot somehow goes unfilled we synthesise an error message
+        rather than silently dropping it.
+        """
+        backend = MockBackend()
+        loop = AgentLoop(backend=backend, tools=tool_registry, config=config)
+
+        # Exercise the defensive fallback directly: feed a synthesized
+        # ``None`` through the static helper to ensure the placeholder
+        # carries the input tool_call_id.
+        tc = ToolCall(id="call_unfilled", name="echo", arguments="{}")
+        msg = loop._synthesize_missing_tool_result(tc)
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_unfilled"
+        payload = json.loads(msg["content"])
+        assert "error" in payload
+        assert payload["tool"] == "echo"

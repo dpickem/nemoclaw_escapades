@@ -117,7 +117,7 @@ no code duplication.
 │  │  (WebSocket, single-host)         │   │                        │   │
 │  └──────────────────────────────────┘   │  AgentLoop (from M2a)  │   │
 │                                          │  File Tools            │   │
-│                                          │  Scratchpad            │   │
+│                                          │  Notes file (skill)    │   │
 │                                          │  AuditBuffer           │   │
 │                                          └────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
@@ -153,7 +153,8 @@ no code duplication.
 5. Sub-agent connects to NMB broker, sends `sandbox.ready`.
 6. Orchestrator sends `task.assign` with task description and workspace path.
 7. Sub-agent runs `AgentLoop` with coding file tools.
-8. Sub-agent sends `task.complete` with result, diff, scratchpad.
+8. Sub-agent sends `task.complete` with result, diff, and any notes file
+   the agent created in its workspace.
 9. Orchestrator runs model-driven finalization (§7).
 
 ### 4.2 Workspace Content Seeding
@@ -162,15 +163,16 @@ no code duplication.
 
 The orchestrator prepares the workspace before spawning the sub-agent:
 - Clone/checkout the target repository (shallow clone for speed)
-- Create scratchpad with initial template
+- Seed `notes.md` with an initial template (via the `scratchpad` skill)
 - Seed skills directory (placeholder for M5+)
 - Seed memory directory (placeholder for M5+)
 
 ### 4.3 Sandbox Cleanup
 
 After `task.complete` or timeout:
-1. Read artifacts from the sub-agent's workspace (diff, scratchpad, audit
-   JSONL fallback). Same sandbox — direct filesystem access, no download.
+1. Read artifacts from the sub-agent's workspace (diff, notes file,
+   audit JSONL fallback). Same sandbox — direct filesystem access, no
+   download.
    *(Multi-sandbox delegation in M3 will require `openshell sandbox exec` to
    pull files across sandbox boundaries.)*
 2. Kill the sub-agent process.
@@ -238,7 +240,9 @@ async def main():
 ```
 
 The `CodingAgent` (Layer 3) uses the same `AgentLoop` (Layer 1) from M2a with
-a coding-specific tool registry and scratchpad.
+a coding-specific tool registry.  Working memory is maintained by the
+agent itself via the `scratchpad` skill — a convention for using the
+ordinary file tools against a well-known notes file.
 
 ---
 
@@ -250,11 +254,11 @@ a coding-specific tool registry and scratchpad.
 
 After receiving `task.complete`, the orchestrator runs a second `AgentLoop`
 invocation with **finalization tools**. The model sees the sub-agent's result
-(diff, scratchpad, summary, test output) and **synthesizes** it before deciding
+(diff, notes file, summary, test output) and **synthesizes** it before deciding
 what to do:
 
 - **Quality assessment** — inspect the diff for obvious issues, check whether
-  tests passed, note any open questions from the scratchpad.
+  tests passed, note any open questions from the sub-agent's notes.
 - **Result summarization** — produce a user-facing summary that distills the
   sub-agent's work into a concise description (the sub-agent's raw output is
   often too verbose or technical for direct presentation).
@@ -262,8 +266,8 @@ what to do:
   same task (e.g., coding agent + review agent), the finalization model merges
   their outputs, resolves conflicts, and presents a unified result.
 - **Proactive iteration** — if the model notices failing tests or incomplete
-  work in the scratchpad, it can call `re_delegate` with a fix prompt without
-  waiting for user feedback.
+  work in the sub-agent's notes, it can call `re_delegate` with a fix prompt
+  without waiting for user feedback.
 
 After synthesis, the model calls one of the finalization tools:
 
@@ -484,7 +488,7 @@ rendering (thinking indicator, step count, current tool).
 5. `task.assign` sent via NMB with task description.
 6. **Coding Agent** runs `AgentLoop` → reads files, edits code, runs tests.
 7. `task.progress` messages stream to orchestrator → Slack thinking indicator.
-8. `task.complete` sent with diff, scratchpad, summary.
+8. `task.complete` sent with diff, notes file, summary.
 9. **Orchestrator** runs finalization `AgentLoop` → model calls
    `present_work_to_user`.
 10. **User** sees diff in Slack, clicks **[Push & PR]**.
@@ -597,7 +601,7 @@ progress reporting, and robust handling.
 | Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` |
 | Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` |
 | No recursive delegation | Coding agent cannot spawn sub-agents |
-| Scratchpad size cap | Large writes truncated |
+| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context |
 
 ---
 
@@ -609,7 +613,7 @@ progress reporting, and robust handling.
 | NMB broker unavailability | Cannot communicate with sub-agent | Fail-open: detect broker down, surface error to user, retry on recovery |
 | Sub-agent infinite loop | Consumes tokens without progress | `max_tool_rounds` + TTL watchdog |
 | Large workspace clones | Slow setup, high storage | Shallow clones; NMB context for small tasks |
-| Credential leakage via scratchpad | Agent writes secrets | Scratchpad sanitization before return to orchestrator. *(M2b: same sandbox, so process-level isolation only. M3 adds kernel-level sandbox isolation.)* |
+| Credential leakage via notes file | Agent writes secrets | Notes-file sanitisation before return to orchestrator. *(M2b: same sandbox, so process-level isolation only. M3 adds kernel-level sandbox isolation.)* |
 
 ---
 

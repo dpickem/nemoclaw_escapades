@@ -1495,6 +1495,18 @@ Future milestones may add: `undo_edit` (checkpoint-based rollback),
 
 ## 8  Agent Scratchpad
 
+> **Superseded.** M2a originally shipped a dedicated `Scratchpad` class,
+> three purpose-built tools (`scratchpad_read` / `_write` / `_append`),
+> per-thread `set_path()` retargeting, and auto-injection of the
+> scratchpad into the system prompt.  That machinery was removed in favour
+> of a simple convention: the agent keeps a Markdown notes file in its
+> workspace and reads/writes it via the ordinary file tools.  The
+> [`scratchpad` skill](../skills/scratchpad/SKILL.md) documents the naming
+> and section conventions.  See
+> [design_m2a.md §5](design_m2a.md#5--agent-working-memory-scratchpad-skill)
+> for the current design.  The rest of this section is retained for
+> historical reference only.
+
 ### 7.1 Purpose
 
 The scratchpad is a sub-agent's working memory for the current task. It serves

@@ -38,11 +38,10 @@ def minimal_builder() -> LayeredPromptBuilder:
 class TestLayerOrdering:
     """Layers appear in the correct order with the cache boundary."""
 
-    def test_all_five_layers_present(self, builder: LayeredPromptBuilder) -> None:
+    def test_all_layers_present(self, builder: LayeredPromptBuilder) -> None:
         prompt = builder.build(
             agent_id="agent-001",
             source_type=SourceType.SLACK,
-            scratchpad="My notes here",
             tools_summary="read_file, grep, bash",
         )
 
@@ -58,8 +57,6 @@ class TestLayerOrdering:
         after_boundary = "\n\n".join(texts[boundary_idx + 1 :])
         assert "agent-001" in after_boundary
         assert "slack" in after_boundary
-        assert "<scratchpad>" in after_boundary
-        assert "My notes here" in after_boundary
 
     def test_identity_is_first(self, builder: LayeredPromptBuilder) -> None:
         prompt = builder.build()
@@ -127,29 +124,6 @@ class TestChannelHint:
         msgs = minimal_builder.messages_for_inference("t1", "hi", source_type="cli")
         system = next(m for m in msgs if m["role"] == "system")
         assert "responding to a user via cli" in system["content"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Scratchpad layer
-# ---------------------------------------------------------------------------
-
-
-class TestScratchpadLayer:
-    """Layer 5: scratchpad injection."""
-
-    def test_scratchpad_included(self, minimal_builder: LayeredPromptBuilder) -> None:
-        prompt = minimal_builder.build(scratchpad="## Plan\nStep 1: read code")
-        assert "<scratchpad>" in prompt
-        assert "Step 1: read code" in prompt
-        assert "</scratchpad>" in prompt
-
-    def test_empty_scratchpad_excluded(self, minimal_builder: LayeredPromptBuilder) -> None:
-        prompt = minimal_builder.build(scratchpad="")
-        assert "<scratchpad>" not in prompt
-
-    def test_whitespace_scratchpad_excluded(self, minimal_builder: LayeredPromptBuilder) -> None:
-        prompt = minimal_builder.build(scratchpad="   \n  ")
-        assert "<scratchpad>" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +196,7 @@ class TestStaticPrefix:
     def test_no_dynamic_content(self, builder: LayeredPromptBuilder) -> None:
         prefix = builder.static_prefix
         assert "Current time:" not in prefix
-        assert "<scratchpad>" not in prefix
+        assert "Tools available" not in prefix
 
 
 # ---------------------------------------------------------------------------

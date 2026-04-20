@@ -37,7 +37,6 @@ import sys
 from pathlib import Path
 
 from nemoclaw_escapades.agent.approval import WriteApproval
-from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
@@ -45,19 +44,8 @@ from nemoclaw_escapades.config import load_config
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
-from nemoclaw_escapades.tools.bash import register_bash_tool
-from nemoclaw_escapades.tools.confluence import register_confluence_tools
-from nemoclaw_escapades.tools.files import register_file_tools
-from nemoclaw_escapades.tools.gerrit import register_gerrit_tools
-from nemoclaw_escapades.tools.git import register_git_tools
-from nemoclaw_escapades.tools.gitlab import register_gitlab_tools
-from nemoclaw_escapades.tools.jira import register_jira_tools
 from nemoclaw_escapades.tools.registry import ToolRegistry
-from nemoclaw_escapades.tools.scratchpad import register_scratchpad_tools
-from nemoclaw_escapades.tools.search import register_search_tools
-from nemoclaw_escapades.tools.skill import register_skill_tool
-from nemoclaw_escapades.tools.slack_search import register_slack_search_tools
-from nemoclaw_escapades.tools.web_search import register_web_search_tools
+from nemoclaw_escapades.tools.tool_registry_factory import build_full_tool_registry
 
 
 async def main() -> None:
@@ -74,18 +62,7 @@ async def main() -> None:
     # ── 2. Inference backend ──────────────────────────────────────
     backend = InferenceHubBackend(config.inference)
 
-    # ── 3. Scratchpad (optional) ──────────────────────────────────
-    # The scratchpad is a per-process Markdown file the agent uses for
-    # working notes.  Only created when the coding agent is enabled;
-    # otherwise it's overkill (service-only agents have no long-running
-    # tasks that need working memory).
-    scratchpad: Scratchpad | None = None
-    if config.coding.enabled:
-        scratchpad_path = str(Path(config.coding.scratchpad_path).expanduser())
-        scratchpad = Scratchpad(scratchpad_path)
-        logger.info("Scratchpad initialised", extra={"path": scratchpad_path})
-
-    # ── 4. Skill loader (optional) ────────────────────────────────
+    # ── 3. Skill loader (optional) ────────────────────────────────
     # Scans the skills directory at startup for SKILL.md files.  The
     # loader itself is harmless when the directory is empty — only the
     # subsequent register_skill_tool call is skipped.
@@ -98,45 +75,10 @@ async def main() -> None:
             extra={"skills_dir": skills_dir, "count": len(skill_loader.skills)},
         )
 
-    # ── 5. Tool registry ──────────────────────────────────────────
-    # Populate a concrete ToolRegistry first (mypy needs the concrete
-    # type for the register_* calls), then narrow to ToolRegistry |
-    # None — the orchestrator treats None as "no tools, single-shot
-    # inference only."
-    registry = ToolRegistry()
-
-    # Service tools (Jira, GitLab, etc.) — external APIs.  Each checks
-    # its own credentials via the registered tool's check_fn.
-    if config.jira.enabled:
-        register_jira_tools(registry, config.jira)
-    if config.gitlab.enabled:
-        register_gitlab_tools(registry, config.gitlab)
-    if config.gerrit.enabled:
-        register_gerrit_tools(registry, config.gerrit)
-    if config.confluence.enabled:
-        register_confluence_tools(registry, config.confluence)
-    if config.slack_search.enabled:
-        register_slack_search_tools(registry, config.slack_search)
-    if config.web_search.enabled:
-        register_web_search_tools(registry, config.web_search)
-
-    # Coding agent tools (file/search/bash/git/scratchpad) — these
-    # operate on the workspace filesystem.  Default OFF; must be
-    # explicitly opted in via CODING_AGENT_ENABLED=true.
-    if config.coding.enabled:
-        workspace_root = str(Path(config.coding.workspace_root).expanduser())
-        Path(workspace_root).mkdir(parents=True, exist_ok=True)
-        register_file_tools(registry, workspace_root)
-        register_search_tools(registry, workspace_root)
-        register_bash_tool(registry, workspace_root)
-        register_git_tools(registry, workspace_root)
-        if scratchpad is not None:
-            register_scratchpad_tools(registry, scratchpad)
-        logger.info("Coding agent tools registered", extra={"workspace": workspace_root})
-
-    # Skill tool — registers only when skills were actually discovered.
-    if skill_loader is not None:
-        register_skill_tool(registry, skill_loader)
+    # ── 4. Tool registry ──────────────────────────────────────────
+    # Single-call factory builds the process-wide registry from config.
+    # See ``tools/tool_registry_factory.py`` for the composition logic.
+    registry = build_full_tool_registry(config, skill_loader=skill_loader)
 
     tools: ToolRegistry | None
     if registry.names:
@@ -148,7 +90,7 @@ async def main() -> None:
     else:
         tools = None
 
-    # ── 6. Audit DB ───────────────────────────────────────────────
+    # ── 5. Audit DB ───────────────────────────────────────────────
     # SQLite database for tool-call logging.  The background writer
     # batches inserts off the hot path so audit never blocks routing.
     audit: AuditDB | None = None
@@ -159,7 +101,7 @@ async def main() -> None:
         await audit.start_background_writer()
         logger.info("Audit DB opened", extra={"path": audit_path})
 
-    # ── 7. Orchestrator + connector ───────────────────────────────
+    # ── 6. Orchestrator + connector ───────────────────────────────
     # The orchestrator owns the agent loop; the connector bridges
     # Slack events to orchestrator.handle().
     orchestrator = Orchestrator(
@@ -168,7 +110,6 @@ async def main() -> None:
         approval=WriteApproval(),
         tools=tools,
         audit=audit,
-        scratchpad=scratchpad,
     )
     connector = SlackConnector(
         handler=orchestrator.handle,
@@ -176,7 +117,7 @@ async def main() -> None:
         app_token=config.slack.app_token,
     )
 
-    # ── 8. Signal handling ────────────────────────────────────────
+    # ── 7. Signal handling ────────────────────────────────────────
     # First SIGINT/SIGTERM triggers graceful shutdown; a second one
     # forces immediate exit (useful when teardown hangs).
     shutdown_event = asyncio.Event()
@@ -195,7 +136,7 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    # ── 9. Run until shutdown ─────────────────────────────────────
+    # ── 8. Run until shutdown ─────────────────────────────────────
     try:
         await connector.start()
         logger.info("NemoClaw is running. Press Ctrl+C to stop.")

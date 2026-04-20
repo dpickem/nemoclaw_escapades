@@ -12,7 +12,7 @@ By unifying both in one class, every agent (orchestrator, coding agent,
 sub-agents) gets layered prompts and history management from the same
 source.
 
-**Five-layer system prompt:**
+**Four-layer system prompt:**
 
 +-------+-------------------+---------+
 | Layer | Content           | Type    |
@@ -22,7 +22,6 @@ source.
 |       | CACHE BOUNDARY    |         |
 | 3     | Runtime metadata  | Dynamic |
 | 4     | Channel hint      | Dynamic |
-| 5     | Scratchpad        | Dynamic |
 +-------+-------------------+---------+
 
 (* Task context is static per task but changes between tasks.)
@@ -36,6 +35,34 @@ configurable maximum to prevent unbounded growth and is lost on restart
 *without* mutating history.  ``commit_turn`` persists the user +
 assistant pair only after a successful model round-trip, so failed
 requests never pollute the conversation.
+
+Scope — what this module does NOT handle
+-----------------------------------------
+
+This class knows about exactly two message roles: ``system`` (which it
+builds itself from the four layers above) and the ``user`` / ``assistant``
+pairs it stores in ``_thread_history``.  It does **not** handle:
+
+- **Tool calls and tool results.** Those live in the ``AgentLoop``'s
+  per-run ``working_messages`` list, which exists only for the duration
+  of a single ``run()`` invocation.  See ``agent/loop.py`` —
+  ``_build_assistant_tool_message`` produces the ``assistant`` message
+  that carries ``tool_calls``, and tool results are ``{"role": "tool",
+  "tool_call_id": ..., "content": ...}`` messages appended as each tool
+  executes.
+- **Compaction / truncation of tool outputs.** Handled by
+  ``ContextCompactor.truncate_tool_results`` in ``agent/compaction.py``,
+  which operates on ``working_messages`` before each inference call.
+- **Persisting tool-call round-trips to history.** Intentionally not
+  done.  ``commit_turn`` only stores the user's text and the assistant's
+  *final* text content for a turn — the intermediate ``tool_calls`` /
+  ``tool`` messages are dropped.  Otherwise a single ``read_file`` on a
+  large file would dominate every subsequent prompt in that thread.
+
+In short: this builder produces ``[system, …history…, user]``.  The
+``AgentLoop`` extends that list with ``assistant``/``tool`` round-trips
+during execution and hands only the final ``assistant`` text back to
+``commit_turn`` for storage.
 """
 
 from __future__ import annotations
@@ -80,12 +107,11 @@ _DEFAULT_MAX_THREAD_HISTORY: int = 50
 
 
 class LayeredPromptBuilder:
-    """Five-layer system prompt builder with per-thread conversation history.
+    """Four-layer system prompt builder with per-thread conversation history.
 
     Layers 1-2 (identity + task context) are set at construction
-    time and don't change per turn.  Layers 3-5 (runtime metadata,
-    channel hint, scratchpad) are assembled dynamically on each
-    ``build()`` call.
+    time and don't change per turn.  Layers 3-4 (runtime metadata,
+    channel hint) are assembled dynamically on each ``build()`` call.
 
     Thread history is stored in memory, keyed by an opaque thread key
     (typically ``thread_ts``).  History is capped at
@@ -135,10 +161,9 @@ class LayeredPromptBuilder:
         self,
         agent_id: str = "",
         source_type: str = SourceType.USER,
-        scratchpad: str = "",
         tools_summary: str = "",
     ) -> str:
-        """Assemble the full system prompt from all five layers.
+        """Assemble the full system prompt from all four layers.
 
         Args:
             agent_id: Unique identifier for this agent instance
@@ -148,7 +173,6 @@ class LayeredPromptBuilder:
                 ``"teams"``, ``"cli"``).  ``CRON`` and ``AGENT`` produce
                 dedicated hint text; everything else renders as
                 ``"responding to a user via {source_type}"``.
-            scratchpad: Current scratchpad contents (may be empty).
             tools_summary: Brief summary of available tools (may be empty).
 
         Returns:
@@ -173,10 +197,6 @@ class LayeredPromptBuilder:
 
         # Layer 4 — Channel hint (dynamic)
         layers.append(self._channel_hint(source_type))
-
-        # Layer 5 — Scratchpad (dynamic)
-        if scratchpad.strip():
-            layers.append(f"<scratchpad>\n{scratchpad}\n</scratchpad>")
 
         return "\n\n".join(layers)
 
@@ -234,7 +254,6 @@ class LayeredPromptBuilder:
         *,
         agent_id: str = "",
         source_type: str = SourceType.USER,
-        scratchpad: str = "",
         tools_summary: str = "",
     ) -> list[dict[str, str]]:
         """Assemble the full message list for an inference call.
@@ -253,8 +272,6 @@ class LayeredPromptBuilder:
                 or the thread key.
             source_type: Forwarded to ``build()`` for the channel-hint
                 layer.
-            scratchpad: Forwarded to ``build()`` for the scratchpad
-                layer.  Passing an empty string omits that layer.
             tools_summary: Forwarded to ``build()`` for the
                 runtime-metadata layer.
 
@@ -266,7 +283,6 @@ class LayeredPromptBuilder:
         system_prompt = self.build(
             agent_id=agent_id,
             source_type=source_type,
-            scratchpad=scratchpad,
             tools_summary=tools_summary,
         )
         hist = self.history_with_user_message(thread_key, user_text)
@@ -285,10 +301,22 @@ class LayeredPromptBuilder:
         appends the assistant reply, and replaces the stored history for
         *thread_key*.
 
+        **What is (and isn't) persisted.**  Only the user's text and the
+        assistant's *final* text content survive into ``_thread_history``.
+        Intermediate tool-call round-trips — the ``assistant`` message with
+        ``tool_calls`` and the matching ``tool``-role result messages —
+        live on the ``AgentLoop``'s ephemeral ``working_messages`` list and
+        are deliberately dropped here.  Re-injecting a 10 KB ``read_file``
+        result into every subsequent turn would blow the context window for
+        no gain: the model has already consumed that result and produced a
+        final answer that reflects it.
+
         Args:
             thread_key: Conversation identifier.
             user_text: The user message from this turn.
             assistant_content: The model's response text for this turn.
+                This is ``AgentLoopResult.content`` — the terminal
+                text-only reply, *not* the tool-use round-trips.
         """
         hist = self.history_with_user_message(thread_key, user_text)
         hist.append({"role": MessageRole.ASSISTANT, "content": assistant_content})

@@ -198,12 +198,12 @@ archaeology.
 request payload (`request_payload` column) when `AUDIT_PERSIST_PAYLOADS` is
 enabled (see [Inference Call Auditing §6](inference_call_auditing_design.md#6--prompt-and-completion-storage)).
 This means the exact message array the model saw — system prompt, thread
-history, tool results, scratchpad injections — is recorded for every round.
+history, tool results — is recorded for every round.
 
 What remains uncaptured is **structured metadata about prompt composition**:
 which system prompt version was used, how many history messages were included
-before the cap, whether the scratchpad was injected, which context files were
-attached.  This is derivable from the stored `request_payload` by parsing the
+before the cap, which context files were attached.  This is derivable from the
+stored `request_payload` by parsing the
 message array, but a first-class decomposition would make analysis easier.
 
 **Proposed capture (future):** Additional columns or a JSON metadata field on
@@ -213,7 +213,6 @@ message array, but a first-class decomposition would make analysis easier.
 |-------|-------------|
 | `system_prompt_hash` | SHA-256 of the system prompt (for version tracking / dedup) |
 | `history_message_count` | Number of conversation history messages included |
-| `scratchpad_injected` | Whether the agent scratchpad was in the prompt |
 | `context_file_count` | Number of context files attached |
 
 **Priority:** Low.  The raw payload covers training needs.  Structured

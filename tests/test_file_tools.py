@@ -198,17 +198,6 @@ class TestCodingToolRegistry:
         assert "git_diff" in names
         assert "git_commit" in names
         assert "git_log" in names
-        # No scratchpad tools when scratchpad is None
-        assert "scratchpad_read" not in names
-
-    def test_factory_with_scratchpad(self, workspace: Path) -> None:
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
-
-        sp = Scratchpad(str(workspace / ".scratchpad.md"))
-        reg = create_coding_tool_registry(str(workspace), scratchpad=sp)
-        assert "scratchpad_read" in reg.names
-        assert "scratchpad_write" in reg.names
-        assert "scratchpad_append" in reg.names
 
 
 # ── Output truncation ─────────────────────────────────────────────────

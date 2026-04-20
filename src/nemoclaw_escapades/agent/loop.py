@@ -8,6 +8,47 @@ handling) lives in the layers above.
 Both the orchestrator and future sub-agents (coding, review) share
 this loop — they differ only in which tools, approval gate, and audit
 backend they inject.
+
+The two-list message model
+---------------------------
+
+NemoClaw uses **two separate message lists** that should not be
+confused:
+
+1. ``LayeredPromptBuilder._thread_history`` — long-lived per-thread
+   state, persisted across requests.  Contains only ``user`` and
+   ``assistant`` role messages (the final assistant text per turn).
+   Owned by ``agent/prompt_builder.py``.
+2. ``AgentLoop``'s ``working_messages`` — ephemeral, local to a single
+   ``run()`` call.  Seeded with what the prompt builder produced
+   (``[system, …history…, user]``), it then grows as tool calls execute.
+
+This module owns #2.  On every round where the model returns
+``tool_calls``:
+
+- ``_build_assistant_tool_message`` converts the response into an
+  ``assistant`` message carrying the requested ``tool_calls`` and
+  appends it to ``working_messages``.
+- ``execute_tool_calls`` runs the tools (concurrent for
+  ``is_concurrency_safe=True``, sequential for the rest) and emits one
+  ``{"role": "tool", "tool_call_id": ..., "content": ...}`` message per
+  result, appended to ``working_messages`` so the next inference call
+  sees them.
+
+Tool results are matched back to their requesting ``tool_call`` via the
+``tool_call_id`` field — this is the OpenAI / Anthropic tool-calling
+protocol.  Before each inference call, ``ContextCompactor`` (see
+``agent/compaction.py``) micro-compacts oversized ``tool``-role messages
+so a giant ``read_file`` doesn't blow the context window within the
+current run.
+
+When the loop terminates (model returns text with no ``tool_calls``),
+``run()`` returns ``AgentLoopResult(content=..., working_messages=...)``.
+The orchestrator reads ``result.content`` (the final assistant text) and
+calls ``prompt.commit_turn(thread_key, user_text, result.content)``.  The
+tool-call round-trips in ``working_messages`` are **intentionally not
+written back to thread history** — otherwise every subsequent turn in
+that thread would drag along every previous turn's tool outputs.
 """
 
 from __future__ import annotations
@@ -18,7 +59,6 @@ from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval
 from nemoclaw_escapades.agent.compaction import ContextCompactor
-from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import (
     AgentLoopResult,
     ToolEndCallback,
@@ -93,7 +133,6 @@ class AgentLoop:
         config: AgentLoopConfig,
         audit: AuditDB | None = None,
         approval: ApprovalGate | None = None,
-        scratchpad: Scratchpad | None = None,
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,
     ) -> None:
@@ -110,10 +149,6 @@ class AgentLoop:
             approval: Gate consulted before executing write tools.
                 Defaults to ``AutoApproval`` (allow everything).
                 Inject ``WriteApproval`` for interactive approval.
-            scratchpad: Optional working-memory scratchpad.  When
-                provided, its contents are injected into the system
-                prompt on every inference round and included in the
-                ``AgentLoopResult``.
             on_tool_start: Instance-level default callback invoked
                 before each tool execution.  Per-request callbacks
                 passed to ``run()`` take precedence.
@@ -125,7 +160,6 @@ class AgentLoop:
         self._config = config
         self._audit = audit
         self._approval = approval or AutoApproval()
-        self._scratchpad = scratchpad
         self._on_tool_start = on_tool_start
         self._on_tool_end = on_tool_end
         self._compactor = ContextCompactor(backend, config)
@@ -145,6 +179,17 @@ class AgentLoop:
         until the model produces a text response or
         ``config.max_tool_rounds`` is reached.
 
+        The caller provides the prompt-builder-produced message list
+        (``[system, …history…, user]``).  This method copies that list
+        into a local ``working_messages`` and appends
+        ``assistant``-with-``tool_calls`` and ``tool``-role messages to
+        it as the loop progresses.  The caller's original list is never
+        mutated.  The returned ``working_messages`` is the ephemeral
+        per-run log — the caller is expected to take
+        ``result.content`` (the final text-only reply) and hand *only
+        that* to ``LayeredPromptBuilder.commit_turn`` for persistence.
+        See the module docstring for the rationale.
+
         Args:
             messages: Initial message list (system + history + user).
             request_id: Correlation ID for structured logging.
@@ -157,7 +202,11 @@ class AgentLoop:
 
         Returns:
             An ``AgentLoopResult`` with the final text, round/tool
-            counters, and the full working message list.
+            counters, and the full working message list (including every
+            ``assistant``-with-``tool_calls`` and ``tool``-role message
+            that was appended during the run — useful for debugging and
+            approval-resume flows, *not* for writing back to thread
+            history).
 
         Raises:
             WriteApprovalError: When a write tool is blocked by the
@@ -187,14 +236,8 @@ class AgentLoop:
             if self._compactor.should_compact(working_messages):
                 working_messages = await self._compactor.compact(working_messages, request_id)
 
-            # Inject the scratchpad into the system message so the model
-            # always sees its latest notes.  We modify a copy of the
-            # first message (not the original) to avoid accumulating
-            # stale scratchpad snapshots across rounds.
-            call_messages = self._inject_scratchpad(working_messages)
-
             inference_request = InferenceRequest(
-                messages=call_messages,
+                messages=working_messages,
                 model=self._config.model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
@@ -235,7 +278,6 @@ class AgentLoop:
                     tool_calls_made=total_tool_calls,
                     rounds=round_num + 1,
                     hit_safety_limit=False,
-                    scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
                     working_messages=working_messages,
                 )
 
@@ -296,7 +338,6 @@ class AgentLoop:
             tool_calls_made=total_tool_calls,
             rounds=self._config.max_tool_rounds,
             hit_safety_limit=True,
-            scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
             working_messages=working_messages,
         )
 
@@ -377,9 +418,44 @@ class AgentLoop:
             await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
             results[i] = await self._execute_one(tool_calls[i], request_id, thread_ts)
 
-        # None should remain at this point — every slot was filled.  The
-        # cast is safe because both branches above populate every index.
-        return [r for r in results if r is not None]
+        # Defensive: every slot should be populated at this point
+        # (``_execute_one`` never raises — errors return an error-payload
+        # Message).  But if a slot somehow stayed ``None`` we MUST NOT
+        # drop it: the OpenAI tool-call protocol requires exactly one
+        # ``tool``-role message per assistant ``tool_call``, keyed by
+        # ``tool_call_id``.  A dropped slot would leave the next
+        # inference call with an unmatched tool_call and the backend
+        # would reject the request.  Substitute a synthetic error so
+        # the output list always has the same length as the input.
+        return [
+            r if r is not None else self._synthesize_missing_tool_result(tc)
+            for tc, r in zip(tool_calls, results)
+        ]
+
+    @staticmethod
+    def _synthesize_missing_tool_result(tc: ToolCall) -> Message:
+        """Build a placeholder tool-result message for a slot that was never filled.
+
+        Should never be reached in practice — ``_execute_one`` handles
+        every exception path.  Acts as belt-and-suspenders so a logic
+        bug in partitioning or dispatch can't break the invariant
+        "one tool-result per tool-call" that the OpenAI protocol
+        requires.
+
+        Args:
+            tc: The tool call whose slot was left empty.
+
+        Returns:
+            A tool-role message carrying a JSON error payload and the
+            correct ``tool_call_id``.
+        """
+        payload = json.dumps(
+            {
+                "error": "Internal error: tool dispatch produced no result",
+                "tool": tc.name,
+            }
+        )
+        return {"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": payload}
 
     async def _notify_tool_start(
         self,
@@ -501,35 +577,6 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _inject_scratchpad(self, messages: list[Message]) -> list[Message]:
-        """Return a copy of *messages* with scratchpad injected into the system prompt.
-
-        If no scratchpad is configured or it's empty, returns the
-        original list unchanged (no copy).  Otherwise, the system
-        message's content is extended with a ``<scratchpad>`` block.
-
-        Args:
-            messages: The working message list (not modified in-place).
-
-        Returns:
-            A message list suitable for the inference request.
-        """
-        if not self._scratchpad:
-            return messages
-
-        block = self._scratchpad.context_block()
-        if not block:
-            return messages
-
-        # Copy only the system message; the rest are shared references.
-        result: list[Message] = list(messages)
-        if result and result[0].get("role") == MessageRole.SYSTEM:
-            system = dict(result[0])
-            system["content"] = str(system.get("content", "")) + "\n\n" + block
-            result[0] = system
-
-        return result
 
     @staticmethod
     def _build_assistant_tool_message(result: InferenceResponse) -> Message:

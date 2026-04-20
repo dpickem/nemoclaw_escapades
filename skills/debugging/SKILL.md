@@ -24,7 +24,8 @@ Before touching any code, make sure you understand:
 - What are the **minimum reproduction steps**?  (If the user hasn't
   given you these, ask — don't guess.)
 
-Write this down in the scratchpad under a `## Symptom` section.
+Write this down in your notes file (see the `scratchpad` skill) under
+a `## Symptom` section.
 
 ### 2. Gather evidence
 
@@ -37,12 +38,12 @@ hypotheses:
 - `git_log` / `git_diff` — identify recent changes that could have
   introduced the regression (`git log --since=...`, `git blame`).
 
-Record every non-trivial observation in the scratchpad under
+Record every non-trivial observation in your notes under
 `## Evidence`.
 
 ### 3. Form and test hypotheses
 
-List the top 2–3 candidate causes in the scratchpad under
+List the top 2–3 candidate causes in your notes under
 `## Hypotheses`.  For each, note how you'll **falsify** it (not just
 confirm it — confirmation bias is the debugger's nemesis).
 

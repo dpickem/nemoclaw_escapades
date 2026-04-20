@@ -63,8 +63,6 @@ class AgentLoopResult:
         rounds: Number of inference calls made.
         hit_safety_limit: ``True`` if ``max_tool_rounds`` was reached
             without the model producing a text-only response.
-        scratchpad_contents: Snapshot of the scratchpad after the run
-            (``None`` until scratchpad support is added in Phase 2).
         working_messages: Full conversation including tool results,
             useful for debugging and approval-resume flows.
     """
@@ -73,5 +71,4 @@ class AgentLoopResult:
     tool_calls_made: int
     rounds: int
     hit_safety_limit: bool
-    scratchpad_contents: str | None = None
     working_messages: list[Message] = field(default_factory=list)

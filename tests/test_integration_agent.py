@@ -5,7 +5,7 @@ and require a real NMB broker).  They exercise the full agent stack
 against a mock inference backend:
 
 - orchestrator + AgentLoop end-to-end (tool registry with real coding
-  tools, a real workspace on disk, real scratchpad);
+  tools, a real workspace on disk);
 - long-conversation compaction (50+ messages trigger full compaction);
 - skill-guided task (the skill tool loads real SKILL.md content).
 
@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 
 from nemoclaw_escapades.agent.approval import AutoApproval
-from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.config import OrchestratorConfig
 from nemoclaw_escapades.models.types import (
@@ -136,18 +135,16 @@ class TestOrchestratorAgentLoopE2E:
         target = workspace / "hello.py"
         target.write_text("def hello():\n    return 'world'\n")
 
-        # Real scratchpad on disk.
-        scratchpad = Scratchpad(str(tmp_path / "scratchpad.md"))
+        tools = create_coding_tool_registry(str(workspace))
 
-        # Real coding tool registry — file/search/bash/git/scratchpad.
-        tools = create_coding_tool_registry(str(workspace), scratchpad=scratchpad)
-
-        # Scripted model: read the file, write to the scratchpad, then respond.
+        # Scripted model: read the file, write some notes, then respond.
+        # The notes file stands in for what used to be the scratchpad —
+        # the agent stores intermediate analysis via ordinary file tools.
         backend = ScriptedBackend()
         backend.enqueue_tool_call("read_file", {"path": "hello.py"}, "tc-1")
         backend.enqueue_tool_call(
-            "scratchpad_write",
-            {"content": "## Plan\nRead hello.py and summarise it."},
+            "write_file",
+            {"path": "notes.md", "content": "## Plan\nRead hello.py and summarise it."},
             "tc-2",
         )
         backend.enqueue_text("The file defines `hello()` which returns `'world'`.")
@@ -157,7 +154,6 @@ class TestOrchestratorAgentLoopE2E:
             _orchestrator_config(),
             approval=AutoApproval(),
             tools=tools,
-            scratchpad=scratchpad,
         )
 
         response = await orch.handle(_slack_request("What's in hello.py?"))
@@ -175,90 +171,8 @@ class TestOrchestratorAgentLoopE2E:
         tool_results = [m for m in final_messages if m.get("role") == MessageRole.TOOL]
         assert len(tool_results) >= 2
 
-    async def test_scratchpad_contents_returned_in_result(self, tmp_path: Path) -> None:
-        """The scratchpad's contents end up in the final response path."""
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        scratchpad = Scratchpad(str(tmp_path / "scratchpad.md"))
-        tools = create_coding_tool_registry(str(workspace), scratchpad=scratchpad)
-
-        backend = ScriptedBackend()
-        backend.enqueue_tool_call(
-            "scratchpad_write",
-            {"content": "## Finding\nIt's the missing semicolon."},
-            "tc-1",
-        )
-        backend.enqueue_text("Investigation complete.")
-
-        orch = Orchestrator(
-            backend,
-            _orchestrator_config(),
-            approval=AutoApproval(),
-            tools=tools,
-            scratchpad=scratchpad,
-        )
-
-        await orch.handle(_slack_request("Debug the build failure."))
-
-        assert "## Finding" in scratchpad.read()
-        assert "missing semicolon" in scratchpad.read()
-
-    async def test_scratchpad_injected_exactly_once_per_round(self, tmp_path: Path) -> None:
-        """Scratchpad must appear exactly once per inference round — not twice.
-
-        Regression: before the fix, the orchestrator baked the scratchpad
-        into the system message (Layer 5) AND ``AgentLoop._inject_scratchpad``
-        appended another ``<scratchpad>`` block each round.  Besides
-        duplication, the baked copy was never updated, so after a
-        ``scratchpad_write`` the model saw stale + fresh content side by
-        side.
-        """
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        scratchpad = Scratchpad(str(tmp_path / "scratchpad.md"))
-        # Seed the scratchpad so it's non-empty on the very first round.
-        scratchpad.write("## Initial\nPre-existing notes from a prior task.")
-        tools = create_coding_tool_registry(str(workspace), scratchpad=scratchpad)
-
-        # Three rounds: read_file → scratchpad_write → final text.  This
-        # covers both "no mutation this round" (round 1) and "mutation
-        # last round" (rounds 2-3) paths.
-        (workspace / "x.py").write_text("print('hi')")
-        backend = ScriptedBackend()
-        backend.enqueue_tool_call("read_file", {"path": "x.py"}, "tc-1")
-        backend.enqueue_tool_call(
-            "scratchpad_write",
-            {"content": "## Updated\nRead x.py; it prints hi."},
-            "tc-2",
-        )
-        backend.enqueue_text("Done.")
-
-        orch = Orchestrator(
-            backend,
-            _orchestrator_config(),
-            approval=AutoApproval(),
-            tools=tools,
-            scratchpad=scratchpad,
-        )
-
-        await orch.handle(_slack_request("Check x.py."))
-
-        # Every inference call must see exactly ONE <scratchpad> block.
-        for i, call in enumerate(backend.calls):
-            system_msg = next(m for m in call.messages if m["role"] == MessageRole.SYSTEM)
-            count = system_msg["content"].count("<scratchpad>")
-            assert count == 1, (
-                f"Round {i}: system message contains {count} <scratchpad> blocks, "
-                f"expected exactly 1"
-            )
-
-        # Round 3 (after scratchpad_write) must see the POST-write content,
-        # not the pre-existing notes.
-        final_system = next(
-            m for m in backend.calls[-1].messages if m["role"] == MessageRole.SYSTEM
-        )
-        assert "## Updated" in final_system["content"]
-        assert "## Initial" not in final_system["content"]
+        # The notes file really hit disk — not just a claim in the assistant text.
+        assert (workspace / "notes.md").read_text().startswith("## Plan")
 
     async def test_source_type_reaches_system_prompt(self, tmp_path: Path) -> None:
         """``NormalizedRequest.source`` flows through to the channel-hint layer."""

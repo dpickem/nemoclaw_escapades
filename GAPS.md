@@ -32,7 +32,7 @@
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| `@tool` decorator with auto-schema | BYOO `tools/base.py` | M2a | **Done** | Decorator generates JSON Schema from type hints + docstrings; all `ToolSpec` metadata supported as kwargs. Implemented in `tools/registry.py`. All coding tools (files, search, bash, git, scratchpad) migrated. |
+| `@tool` decorator with auto-schema | BYOO `tools/base.py` | M2a | **Done** | Decorator generates JSON Schema from type hints + docstrings; all `ToolSpec` metadata supported as kwargs. Implemented in `tools/registry.py`. All coding tools (files, search, bash, git) migrated. |
 | Consistent `@tool` usage across all tools | BYOO `tools/base.py` | M2b+ | **Planned** | Enterprise tools (Jira, GitLab, Gerrit, Confluence, Slack) still use the verbose `ToolSpec(...)` constructor with hand-written `input_schema` dicts. Migrate to `@tool` decorator for single source of truth — description, parameters, and schema all derived from the function's docstring and type annotations. |
 | Concurrent tool execution | BYOO §3.2, Claude Code, Hermes | M2a P1 | **Designed** | Default to concurrent via `asyncio.gather`; `is_concurrency_safe=False` flag for write tools that mutate shared state. |
 | Streaming tool execution | Claude Code `query()` async generator | M6+ | **Deferred** | Tools execute *during* the model's streaming response, not after. Single biggest latency improvement available. Requires refactoring `AgentLoop` to async generator pattern. |
@@ -109,7 +109,7 @@
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
 | Three-layer memory | Hermes, design.md §M5 | M5 | **Planned** | Working memory (in-session scratchpad), user memory (Honcho for modeling and personalization), knowledge memory (SecondBrain for durable knowledge capture and retrieval). |
-| File-based memory as prototyping path | BYOO §15 step 17 | M2a | **Planned** | Tutorial's file-based memory (specialized agent + filesystem) validates that memory can be prototyped simply before the full Honcho + SecondBrain integration in M5. M2a's scratchpad is the first step. |
+| File-based working memory via `scratchpad` skill | BYOO §15 step 17; Claude Code `CLAW.md` convention | M2a | **Done** | Agents manage their own working-memory file using ordinary `read_file`/`write_file`/`edit_file` tools. The `scratchpad` skill (`skills/scratchpad/SKILL.md`) documents the naming convention and section structure. No dedicated class, no dedicated tools, no prompt-layer injection — the agent loads the skill when it decides notes are warranted. |
 | Passive memory extraction | Claude Code `extractMemories` | M5 | **Planned** | Automatically extract key facts (user preferences, project conventions, recurring patterns) from every conversation without explicit user action. |
 | Team memory sync | Claude Code `teamMemorySync/` | M5+ | **Planned** | Shared memory across agent teams. Relevant when multiple sub-agents collaborate on related tasks. |
 

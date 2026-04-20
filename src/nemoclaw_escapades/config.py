@@ -156,19 +156,24 @@ DEFAULT_WEB_SEARCH_LIMIT: int = 5
 
 # ── Coding agent defaults ────────────────────────────────────────────
 
-# Default workspace root used when the coding agent is enabled.  Inside
-# the OpenShell sandbox this is a dedicated PVC; locally it's a folder
-# under the user's home.
+# Default workspace root (local development).  Inside the OpenShell
+# sandbox, ``load_config`` picks ``_SANDBOX_CODING_WORKSPACE_ROOT``
+# instead — a writable path on the sandbox PVC.
 DEFAULT_CODING_WORKSPACE_ROOT: str = "~/.nemoclaw/workspace"
-# Default location for the agent's per-task scratchpad Markdown file.
-DEFAULT_SCRATCHPAD_PATH: str = "~/.nemoclaw/scratchpad.md"
+# Path used inside the OpenShell sandbox.  /sandbox is the PVC-backed
+# writable mount (see Makefile's AUDIT_DB_SANDBOX pattern).
+_SANDBOX_CODING_WORKSPACE_ROOT: str = "/sandbox/workspace"
 
 # ── Skills defaults ──────────────────────────────────────────────────
 
-# Directory that ``SkillLoader`` scans for ``SKILL.md`` files.  Relative
-# paths resolve against the process CWD; shipped starter skills live in
-# the repo's top-level ``skills/`` folder.
+# Local-development default for the ``SkillLoader`` scan root.
+# Resolves relative to the process CWD — works out of the box when the
+# orchestrator is launched from the repo root.
 DEFAULT_SKILLS_DIR: str = "skills"
+# Absolute path used inside the OpenShell sandbox.  The Dockerfile
+# copies ``skills/`` into ``/app/skills`` so the packaged starter
+# skills are available at runtime without relying on CWD.
+_SANDBOX_SKILLS_DIR: str = "/app/skills"
 
 # ── Misc ─────────────────────────────────────────────────────────────
 
@@ -391,24 +396,27 @@ class WebSearchConfig:
 
 @dataclass
 class CodingAgentConfig:
-    """Configuration for the coding-agent tool suite and scratchpad.
+    """Configuration for the coding-agent tool suite.
 
     When ``enabled`` is true, ``main`` registers the workspace-rooted
-    file, search, bash, git, and scratchpad tools into the orchestrator's
-    ``ToolRegistry``.  The scratchpad is a per-process Markdown file —
-    persistent cross-session memory is deferred to M5.
+    file, search, bash, and git tools into the orchestrator's
+    ``ToolRegistry``.  Any working-memory / scratchpad needs are
+    handled by the agent itself via ordinary file tools (see the
+    ``scratchpad`` skill for the convention).
 
     Attributes:
-        enabled: Whether the coding tools + scratchpad are wired in.
+        enabled: Whether the coding tools are wired in.
         workspace_root: Absolute path to the directory that file/search/
             bash/git tools operate on.  Path traversal outside this
             directory is rejected by the file tools.
-        scratchpad_path: Filesystem path for the agent's scratchpad.
+        git_clone_allowed_hosts: Comma-separated list of host names that
+            ``git_clone`` will accept.  Empty disables ``git_clone``
+            entirely (fail-closed for security).
     """
 
     enabled: bool = False
     workspace_root: str = DEFAULT_CODING_WORKSPACE_ROOT
-    scratchpad_path: str = DEFAULT_SCRATCHPAD_PATH
+    git_clone_allowed_hosts: str = ""
 
 
 @dataclass
@@ -468,7 +476,7 @@ class AppConfig:
         confluence: Confluence REST integration settings.
         slack_search: Slack user-token search/history settings.
         web_search: Web search and URL fetch settings.
-        coding: Coding-agent tool suite + scratchpad settings.
+        coding: Coding-agent tool suite settings.
         skills: ``SkillLoader`` + ``skill`` tool settings.
     """
 
@@ -607,12 +615,25 @@ def load_config() -> AppConfig:
             # Default OFF — the coding tools mutate the filesystem and
             # run shell commands, so they must be explicitly opted in.
             enabled=os.environ.get("CODING_AGENT_ENABLED", "false").lower() in _TRUTHY_VALUES,
-            workspace_root=os.environ.get("CODING_WORKSPACE_ROOT", DEFAULT_CODING_WORKSPACE_ROOT),
-            scratchpad_path=os.environ.get("SCRATCHPAD_PATH", DEFAULT_SCRATCHPAD_PATH),
+            # In sandbox: writable paths on the /sandbox PVC.  Locally:
+            # home-directory folders that respect HOME.
+            workspace_root=os.environ.get(
+                "CODING_WORKSPACE_ROOT",
+                _SANDBOX_CODING_WORKSPACE_ROOT if in_sandbox else DEFAULT_CODING_WORKSPACE_ROOT,
+            ),
+            # Fail-closed allowlist for git_clone target hosts.  Empty
+            # means the tool refuses to clone anything.
+            git_clone_allowed_hosts=os.environ.get("GIT_CLONE_ALLOWED_HOSTS", ""),
         ),
         skills=SkillsConfig(
             enabled=os.environ.get("SKILLS_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            skills_dir=os.environ.get("SKILLS_DIR", DEFAULT_SKILLS_DIR),
+            # In sandbox: the Dockerfile copies ``skills/`` into
+            # ``/app/skills`` so the packaged starter skills are
+            # available regardless of CWD.
+            skills_dir=os.environ.get(
+                "SKILLS_DIR",
+                _SANDBOX_SKILLS_DIR if in_sandbox else DEFAULT_SKILLS_DIR,
+            ),
         ),
     )
 

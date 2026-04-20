@@ -23,6 +23,27 @@ creates an ``AgentLoop`` and delegates the multi-turn inference + tool
 execution cycle to it.  The ``AgentLoop`` is stateless per call — all
 connector concerns (history, approval UI, error responses) remain here.
 
+**Two-list message flow.**  The orchestrator is where NemoClaw's
+permanent and ephemeral message lists meet:
+
+1. ``LayeredPromptBuilder.messages_for_inference`` returns
+   ``[system, …capped history…, user]``.  This is the *input* to the
+   agent loop; history is stored in the prompt builder itself, not here.
+2. That list is passed to ``AgentLoop.run()``, which copies it into its
+   own per-run ``working_messages`` and extends it with
+   ``assistant``-with-``tool_calls`` and ``tool``-role messages as it
+   executes the tool-use cycle.  The orchestrator never sees these
+   intermediate messages while the loop runs.
+3. On return, the orchestrator reads ``result.content`` (the model's
+   final text-only reply) and calls
+   ``self._prompt.commit_turn(thread_key, request.text, result.content)``
+   to persist the user + final-assistant pair to thread history.  The
+   tool-call round-trips in ``result.working_messages`` are *not*
+   written back — otherwise a ``read_file`` on a large file would
+   dominate every subsequent prompt in that thread.  Those round-trips
+   survive only in the audit DB (per-tool-call records) and in the
+   ``inference_calls`` table (full request payload per round).
+
 **Approval gate** — Write tool calls are gated before execution.  The
 ``AgentLoop`` raises ``WriteApprovalError`` which the orchestrator
 catches, saves the conversation state, and presents Approve / Deny
@@ -36,7 +57,6 @@ from typing import TYPE_CHECKING, Any
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
 from nemoclaw_escapades.agent.loop import AgentLoop, WriteApprovalError
 from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder
-from nemoclaw_escapades.agent.scratchpad import Scratchpad
 from nemoclaw_escapades.agent.types import ToolStartCallback
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import AgentLoopConfig, OrchestratorConfig, load_system_prompt
@@ -104,7 +124,6 @@ class Orchestrator:
         approval: ApprovalGate | None = None,
         tools: ToolRegistry | None = None,
         audit: AuditDB | None = None,
-        scratchpad: Scratchpad | None = None,
         agent_id: str = "",
     ) -> None:
         """Initialise the orchestrator.
@@ -121,10 +140,6 @@ class Orchestrator:
                 tool calling.
             audit: Optional audit database.  When provided, every tool
                 invocation is logged (service, args, latency, success).
-            scratchpad: Optional scratchpad.  When provided, its contents
-                are injected into the system prompt and returned in
-                ``AgentLoopResult``; the scratchpad tools are expected
-                to already be registered in *tools*.
             agent_id: Identifier surfaced in the runtime-metadata prompt
                 layer (useful for multi-agent traceability once M2b
                 lands).  Empty string omits the line.
@@ -137,7 +152,6 @@ class Orchestrator:
         self._approval = approval or WriteApproval()
         self._tools = tools
         self._audit = audit
-        self._scratchpad = scratchpad
         self._agent_id = agent_id
         # LayeredPromptBuilder owns per-thread conversation histories,
         # the 5-layer system prompt (identity, task context, cache
@@ -176,7 +190,6 @@ class Orchestrator:
                 # response-level check and the loop's tool-level check
                 # use the same policy.
                 approval=self._approval,
-                scratchpad=scratchpad,
             )
 
     async def handle(
@@ -242,16 +255,6 @@ class Orchestrator:
             # Build the full message list: system prompt + per-thread
             # conversation history + the new user message.  History is
             # capped at max_thread_history to bound context window usage.
-            #
-            # Note: scratchpad is deliberately NOT passed here.  The
-            # AgentLoop owns scratchpad injection — it re-reads on every
-            # round so ``scratchpad_write`` tool calls show up in the
-            # next inference immediately.  Baking the scratchpad into the
-            # system message here would cause two problems: (1) it would
-            # appear twice in the prompt (once baked, once injected by
-            # AgentLoop); (2) the baked copy goes stale after any
-            # ``scratchpad_write`` because it lives in ``working_messages``
-            # for the rest of the run.
             messages = self._prompt.messages_for_inference(
                 thread_key,
                 request.text,
@@ -317,6 +320,11 @@ class Orchestrator:
             # Only commit after a successful round — failed inference or
             # approval-blocked writes must not pollute the thread history,
             # otherwise the model would see phantom turns on the next request.
+            #
+            # Only the final text ``content`` is persisted — the
+            # tool-call round-trips in ``result.working_messages`` (when
+            # the AgentLoop path ran) are deliberately dropped.  See
+            # this module's docstring "Two-list message flow" for why.
             self._prompt.commit_turn(thread_key, request.text, content)
 
             logger.info(

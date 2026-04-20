@@ -27,8 +27,9 @@ If a refactor reveals a bug, raise it separately — don't silently
      many files.
    - Stale abstractions (layer of indirection that no longer earns
      its keep).
-3. **State the goal.**  Write it in the scratchpad: "Extract the X
-   logic from Y into a standalone Z so that W can reuse it."
+3. **State the goal.**  Write it down (see the `scratchpad` skill):
+   "Extract the X logic from Y into a standalone Z so that W can
+   reuse it."
 
 ## While refactoring
 
