@@ -64,9 +64,7 @@ class TestBashHandler:
         assert "Exit code: 1" in result
 
     async def test_timeout(self, registry: ToolRegistry) -> None:
-        result = await registry.execute(
-            "bash", json.dumps({"command": "sleep 10", "timeout": 1})
-        )
+        result = await registry.execute("bash", json.dumps({"command": "sleep 10", "timeout": 1}))
         assert "timed out" in result
 
     async def test_cwd_is_workspace(self, registry: ToolRegistry, workspace: Path) -> None:

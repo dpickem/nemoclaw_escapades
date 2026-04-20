@@ -29,7 +29,11 @@ def _make_bash(workspace_root: str) -> ToolSpec:
 
     @tool(
         "bash",
-        "Execute a shell command in the workspace. Use for running tests, installing dependencies, build tools, etc. Commands run in the workspace root with a configurable timeout (default: 120s).",
+        (
+            "Execute a shell command in the workspace. Use for running tests, "
+            "installing dependencies, build tools, etc. Commands run in the "
+            "workspace root with a configurable timeout (default: 120s)."
+        ),
         {
             "type": "object",
             "properties": {
@@ -45,6 +49,7 @@ def _make_bash(workspace_root: str) -> ToolSpec:
         display_name="Running command",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def bash(command: str, timeout: int = _DEFAULT_TIMEOUT_S) -> str:
         """Run *command* via ``asyncio.create_subprocess_shell`` and return its output.
@@ -65,8 +70,8 @@ def _make_bash(workspace_root: str) -> ToolSpec:
                 cwd=workspace_root,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()  # type: ignore[union-attr]
+        except TimeoutError:
+            proc.kill()
             return f"Error: command timed out after {timeout}s\nCommand: {command}"
         except OSError as exc:
             return f"Error: failed to execute command: {exc}"

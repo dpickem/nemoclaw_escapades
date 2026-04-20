@@ -341,9 +341,7 @@ def _make_confluence_get_page_children(client: ConfluenceClient) -> ToolSpec:
         display_name="Listing child pages",
         toolset=_TOOLSET,
     )
-    async def confluence_get_page_children(
-        page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT
-    ) -> str:
+    async def confluence_get_page_children(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """List child pages of a Confluence page."""
         return _format(await client.get_page_children(page_id, limit=limit))
 
@@ -371,9 +369,7 @@ def _make_confluence_get_comments(client: ConfluenceClient) -> ToolSpec:
         display_name="Getting page comments",
         toolset=_TOOLSET,
     )
-    async def confluence_get_comments(
-        page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT
-    ) -> str:
+    async def confluence_get_comments(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Get comments on a Confluence page."""
         return _format(await client.get_comments(page_id, limit=limit))
 

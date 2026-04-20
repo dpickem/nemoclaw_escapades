@@ -306,9 +306,7 @@ def _make_slack_get_thread_replies(client: SlackSearchClient) -> ToolSpec:
         channel_id: str, thread_ts: str, limit: int = _DEFAULT_HISTORY_LIMIT
     ) -> str:
         """Get replies in a Slack thread."""
-        return _format(
-            await client.get_thread_replies(channel_id, thread_ts, limit=limit)
-        )
+        return _format(await client.get_thread_replies(channel_id, thread_ts, limit=limit))
 
     return slack_get_thread_replies
 
@@ -341,10 +339,7 @@ def _make_slack_send_message(client: SlackSearchClient) -> ToolSpec:
 
     @tool(
         "slack_send_message",
-        (
-            "Send a message to a Slack channel or thread using the user token. "
-            "Requires approval."
-        ),
+        ("Send a message to a Slack channel or thread using the user token. Requires approval."),
         {
             "type": "object",
             "properties": {
@@ -358,13 +353,9 @@ def _make_slack_send_message(client: SlackSearchClient) -> ToolSpec:
         toolset=_TOOLSET,
         is_read_only=False,
     )
-    async def slack_send_message(
-        channel_id: str, text: str, thread_ts: str = ""
-    ) -> str:
+    async def slack_send_message(channel_id: str, text: str, thread_ts: str = "") -> str:
         """Send a message to a Slack channel or thread."""
-        return _format(
-            await client.send_message(channel_id, text, thread_ts=thread_ts)
-        )
+        return _format(await client.send_message(channel_id, text, thread_ts=thread_ts))
 
     return slack_send_message
 

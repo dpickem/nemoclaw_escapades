@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from nemoclaw_escapades.config import SlackSearchConfig
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.slack_search import (

@@ -12,7 +12,6 @@ from nemoclaw_escapades.tools.web_search import (
     register_web_search_tools,
 )
 
-
 _TEST_CONFIG = WebSearchConfig(api_key="test-brave-api-key")
 
 

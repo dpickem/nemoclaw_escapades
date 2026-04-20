@@ -829,9 +829,7 @@ def _make_gitlab_list_merge_requests(client: GitLabClient) -> ToolSpec:
         project_id: str, state: str = "opened", limit: int = _DEFAULT_PER_PAGE
     ) -> str:
         """List merge requests for a GitLab project."""
-        return _format(
-            await client.list_merge_requests(project_id, state=state, limit=limit)
-        )
+        return _format(await client.list_merge_requests(project_id, state=state, limit=limit))
 
     return gitlab_list_merge_requests
 
@@ -1045,9 +1043,7 @@ def _make_gitlab_list_mr_notes(client: GitLabClient) -> ToolSpec:
         project_id: str, mr_iid: int, sort: str = "asc", limit: int = _DEFAULT_PER_PAGE
     ) -> str:
         """List notes (comments) on a merge request."""
-        return _format(
-            await client.list_mr_notes(project_id, mr_iid, sort=sort, limit=limit)
-        )
+        return _format(await client.list_mr_notes(project_id, mr_iid, sort=sort, limit=limit))
 
     return gitlab_list_mr_notes
 
@@ -1133,9 +1129,7 @@ def _make_gitlab_list_branches(client: GitLabClient) -> ToolSpec:
         project_id: str, search: str = "", limit: int = _DEFAULT_PER_PAGE
     ) -> str:
         """List repository branches, optionally filtered by name."""
-        return _format(
-            await client.list_branches(project_id, search=search, limit=limit)
-        )
+        return _format(await client.list_branches(project_id, search=search, limit=limit))
 
     return gitlab_list_branches
 
@@ -1295,13 +1289,9 @@ def _make_gitlab_update_mr_note(client: GitLabClient) -> ToolSpec:
         toolset=_TOOLSET,
         is_read_only=False,
     )
-    async def gitlab_update_mr_note(
-        project_id: str, mr_iid: int, note_id: int, body: str
-    ) -> str:
+    async def gitlab_update_mr_note(project_id: str, mr_iid: int, note_id: int, body: str) -> str:
         """Edit an existing note on a merge request."""
-        return _format(
-            await client.update_merge_request_note(project_id, mr_iid, note_id, body)
-        )
+        return _format(await client.update_merge_request_note(project_id, mr_iid, note_id, body))
 
     return gitlab_update_mr_note
 
@@ -1336,9 +1326,7 @@ def _make_gitlab_reply_to_discussion(client: GitLabClient) -> ToolSpec:
         project_id: str, mr_iid: int, discussion_id: str, body: str
     ) -> str:
         """Reply to an existing discussion thread on a merge request."""
-        return _format(
-            await client.reply_to_discussion(project_id, mr_iid, discussion_id, body)
-        )
+        return _format(await client.reply_to_discussion(project_id, mr_iid, discussion_id, body))
 
     return gitlab_reply_to_discussion
 
@@ -1377,9 +1365,7 @@ def _make_gitlab_resolve_discussion(client: GitLabClient) -> ToolSpec:
         project_id: str, mr_iid: int, discussion_id: str, resolved: bool = True
     ) -> str:
         """Resolve or unresolve a discussion thread on a merge request."""
-        return _format(
-            await client.resolve_discussion(project_id, mr_iid, discussion_id, resolved)
-        )
+        return _format(await client.resolve_discussion(project_id, mr_iid, discussion_id, resolved))
 
     return gitlab_resolve_discussion
 
@@ -1495,9 +1481,7 @@ def _make_gitlab_rebase_mr(client: GitLabClient) -> ToolSpec:
 
     @tool(
         "gitlab_rebase_mr",
-        (
-            "Rebase a merge request's source branch onto the target branch. Requires approval."
-        ),
+        ("Rebase a merge request's source branch onto the target branch. Requires approval."),
         {
             "type": "object",
             "properties": {

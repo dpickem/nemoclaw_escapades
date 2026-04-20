@@ -106,7 +106,10 @@ def _make_read_file(workspace_root: str) -> ToolSpec:
 
     @tool(
         "read_file",
-        "Read a text file from the workspace. Returns numbered lines. Use offset/limit for large files.",
+        (
+            "Read a text file from the workspace. Returns numbered lines. "
+            "Use offset/limit for large files."
+        ),
         {
             "type": "object",
             "properties": {
@@ -178,6 +181,7 @@ def _make_write_file(workspace_root: str) -> ToolSpec:
         display_name="Writing file",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def write_file(path: str, content: str) -> str:
         """Create or overwrite a file at *path* with *content*.
@@ -208,7 +212,11 @@ def _make_edit_file(workspace_root: str) -> ToolSpec:
 
     @tool(
         "edit_file",
-        "Apply a targeted edit to a file via old/new string replacement. The old_string must occur exactly once. Preferred over write_file for surgical changes.",
+        (
+            "Apply a targeted edit to a file via old/new string replacement. "
+            "The old_string must occur exactly once. "
+            "Preferred over write_file for surgical changes."
+        ),
         {
             "type": "object",
             "properties": {
@@ -224,6 +232,7 @@ def _make_edit_file(workspace_root: str) -> ToolSpec:
         display_name="Editing file",
         toolset=_TOOLSET,
         is_read_only=False,
+        is_concurrency_safe=False,
     )
     async def edit_file(path: str, old_string: str, new_string: str) -> str:
         """Replace a unique occurrence of *old_string* with *new_string* in a file.

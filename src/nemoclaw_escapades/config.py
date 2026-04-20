@@ -33,6 +33,58 @@ DEFAULT_MAX_TOOL_ROUNDS: int = 10
 # How many times to re-prompt when finish_reason="length" truncates output.
 DEFAULT_MAX_CONTINUATION_RETRIES: int = 2
 
+# ── Context compaction defaults ───────────────────────────────────────
+
+# Micro-compaction: tool results exceeding this char count are truncated
+# in-place before inference (no API call, zero cost).
+DEFAULT_MICRO_COMPACTION_CHARS: int = 10_000
+# Full compaction triggers when total message chars exceed this threshold.
+# Approximates ~80% of a 128K-token context window at ~4 chars/token.
+DEFAULT_COMPACTION_THRESHOLD_CHARS: int = 400_000
+# Fraction of oldest messages to summarize during full compaction.
+DEFAULT_COMPACTION_COMPRESS_RATIO: float = 0.5
+# Minimum number of messages to keep verbatim (most recent) after compaction.
+DEFAULT_COMPACTION_MIN_KEEP: int = 4
+# Model used for the compaction summary call (same as main model by default).
+DEFAULT_COMPACTION_MODEL: str = ""
+
+
+@dataclass
+class AgentLoopConfig:
+    """Configuration for a single ``AgentLoop`` instance.
+
+    Attributes:
+        model: Model identifier forwarded to the inference backend.
+        temperature: Sampling temperature for chat completions.
+        max_tokens: Maximum tokens per completion response.
+        max_tool_rounds: Safety limit — maximum inference calls per
+            ``run()`` invocation before returning a partial answer.
+        max_continuation_retries: How many times to re-prompt the model
+            when ``finish_reason="length"`` truncates the output.
+        micro_compaction_chars: Tool results exceeding this char count
+            are truncated in-place before inference (zero-cost).
+        compaction_threshold_chars: Total message chars that trigger
+            full compaction (LLM summary + session roll).
+        compaction_compress_ratio: Fraction of oldest messages to
+            summarize during full compaction.
+        compaction_min_keep: Minimum messages to keep verbatim after
+            full compaction (always the most recent).
+        compaction_model: Model for the summary call.  Empty string
+            means use the same model as ``model``.
+    """
+
+    model: str = DEFAULT_INFERENCE_MODEL
+    temperature: float = DEFAULT_TEMPERATURE
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
+    max_continuation_retries: int = DEFAULT_MAX_CONTINUATION_RETRIES
+    micro_compaction_chars: int = DEFAULT_MICRO_COMPACTION_CHARS
+    compaction_threshold_chars: int = DEFAULT_COMPACTION_THRESHOLD_CHARS
+    compaction_compress_ratio: float = DEFAULT_COMPACTION_COMPRESS_RATIO
+    compaction_min_keep: int = DEFAULT_COMPACTION_MIN_KEEP
+    compaction_model: str = DEFAULT_COMPACTION_MODEL
+
+
 # ── NMB broker defaults ───────────────────────────────────────────────
 
 DEFAULT_NMB_HOST: str = "0.0.0.0"
@@ -101,6 +153,27 @@ DEFAULT_CONFLUENCE_URL: str = "https://nvidia.atlassian.net/wiki"
 
 DEFAULT_WEB_SEARCH_API: str = "brave"
 DEFAULT_WEB_SEARCH_LIMIT: int = 5
+
+# ── Coding agent defaults ────────────────────────────────────────────
+
+# Default workspace root (local development).  Inside the OpenShell
+# sandbox, ``load_config`` picks ``_SANDBOX_CODING_WORKSPACE_ROOT``
+# instead — a writable path on the sandbox PVC.
+DEFAULT_CODING_WORKSPACE_ROOT: str = "~/.nemoclaw/workspace"
+# Path used inside the OpenShell sandbox.  /sandbox is the PVC-backed
+# writable mount (see Makefile's AUDIT_DB_SANDBOX pattern).
+_SANDBOX_CODING_WORKSPACE_ROOT: str = "/sandbox/workspace"
+
+# ── Skills defaults ──────────────────────────────────────────────────
+
+# Local-development default for the ``SkillLoader`` scan root.
+# Resolves relative to the process CWD — works out of the box when the
+# orchestrator is launched from the repo root.
+DEFAULT_SKILLS_DIR: str = "skills"
+# Absolute path used inside the OpenShell sandbox.  The Dockerfile
+# copies ``skills/`` into ``/app/skills`` so the packaged starter
+# skills are available at runtime without relying on CWD.
+_SANDBOX_SKILLS_DIR: str = "/app/skills"
 
 # ── Misc ─────────────────────────────────────────────────────────────
 
@@ -322,6 +395,48 @@ class WebSearchConfig:
 
 
 @dataclass
+class CodingAgentConfig:
+    """Configuration for the coding-agent tool suite.
+
+    When ``enabled`` is true, ``main`` registers the workspace-rooted
+    file, search, bash, and git tools into the orchestrator's
+    ``ToolRegistry``.  Any working-memory / scratchpad needs are
+    handled by the agent itself via ordinary file tools (see the
+    ``scratchpad`` skill for the convention).
+
+    Attributes:
+        enabled: Whether the coding tools are wired in.
+        workspace_root: Absolute path to the directory that file/search/
+            bash/git tools operate on.  Path traversal outside this
+            directory is rejected by the file tools.
+        git_clone_allowed_hosts: Comma-separated list of host names that
+            ``git_clone`` will accept.  Empty disables ``git_clone``
+            entirely (fail-closed for security).
+    """
+
+    enabled: bool = False
+    workspace_root: str = DEFAULT_CODING_WORKSPACE_ROOT
+    git_clone_allowed_hosts: str = ""
+
+
+@dataclass
+class SkillsConfig:
+    """Configuration for the ``SkillLoader`` and ``skill`` tool.
+
+    When ``enabled`` is true (and ``skills_dir`` contains at least one
+    ``SKILL.md`` file), the ``skill`` tool is registered with a dynamic
+    enum of discovered skill IDs.
+
+    Attributes:
+        enabled: Whether skill loading is wired in.
+        skills_dir: Directory tree scanned for ``SKILL.md`` files.
+    """
+
+    enabled: bool = True
+    skills_dir: str = DEFAULT_SKILLS_DIR
+
+
+@dataclass
 class AuditConfig:
     """Configuration for the SQLite audit database.
 
@@ -361,6 +476,8 @@ class AppConfig:
         confluence: Confluence REST integration settings.
         slack_search: Slack user-token search/history settings.
         web_search: Web search and URL fetch settings.
+        coding: Coding-agent tool suite settings.
+        skills: ``SkillLoader`` + ``skill`` tool settings.
     """
 
     slack: SlackConfig = field(default_factory=SlackConfig)
@@ -374,6 +491,8 @@ class AppConfig:
     confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
     slack_search: SlackSearchConfig = field(default_factory=SlackSearchConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    coding: CodingAgentConfig = field(default_factory=CodingAgentConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
 
 
 def load_config() -> AppConfig:
@@ -490,6 +609,30 @@ def load_config() -> AppConfig:
             jina_api_key=os.environ.get("JINA_API_KEY", ""),
             default_limit=int(
                 os.environ.get("WEB_SEARCH_DEFAULT_LIMIT", str(DEFAULT_WEB_SEARCH_LIMIT))
+            ),
+        ),
+        coding=CodingAgentConfig(
+            # Default OFF — the coding tools mutate the filesystem and
+            # run shell commands, so they must be explicitly opted in.
+            enabled=os.environ.get("CODING_AGENT_ENABLED", "false").lower() in _TRUTHY_VALUES,
+            # In sandbox: writable paths on the /sandbox PVC.  Locally:
+            # home-directory folders that respect HOME.
+            workspace_root=os.environ.get(
+                "CODING_WORKSPACE_ROOT",
+                _SANDBOX_CODING_WORKSPACE_ROOT if in_sandbox else DEFAULT_CODING_WORKSPACE_ROOT,
+            ),
+            # Fail-closed allowlist for git_clone target hosts.  Empty
+            # means the tool refuses to clone anything.
+            git_clone_allowed_hosts=os.environ.get("GIT_CLONE_ALLOWED_HOSTS", ""),
+        ),
+        skills=SkillsConfig(
+            enabled=os.environ.get("SKILLS_ENABLED", "true").lower() in _TRUTHY_VALUES,
+            # In sandbox: the Dockerfile copies ``skills/`` into
+            # ``/app/skills`` so the packaged starter skills are
+            # available regardless of CWD.
+            skills_dir=os.environ.get(
+                "SKILLS_DIR",
+                _SANDBOX_SKILLS_DIR if in_sandbox else DEFAULT_SKILLS_DIR,
             ),
         ),
     )

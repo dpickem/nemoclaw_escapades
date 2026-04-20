@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 from nemoclaw_escapades.tools.files import _safe_resolve, register_file_tools
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.search import register_search_tools
-
+from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 
 # ── Path safety tests ─────────────────────────────────────────────────
 
@@ -84,9 +83,7 @@ class TestReadFile:
         assert "Error" in result
 
     async def test_read_nested_file(self, registry: ToolRegistry) -> None:
-        result = await registry.execute(
-            "read_file", json.dumps({"path": "subdir/nested.py"})
-        )
+        result = await registry.execute("read_file", json.dumps({"path": "subdir/nested.py"}))
         assert "print" in result
 
 
@@ -98,9 +95,7 @@ class TestWriteFile:
         assert "Wrote" in result
         assert (workspace / "new.txt").read_text() == "hello world"
 
-    async def test_write_creates_parent_dirs(
-        self, registry: ToolRegistry, workspace: Path
-    ) -> None:
+    async def test_write_creates_parent_dirs(self, registry: ToolRegistry, workspace: Path) -> None:
         await registry.execute(
             "write_file",
             json.dumps({"path": "deep/nested/file.txt", "content": "deep"}),
@@ -128,17 +123,17 @@ class TestEditFile:
     async def test_edit_missing_string(self, registry: ToolRegistry) -> None:
         result = await registry.execute(
             "edit_file",
-            json.dumps({
-                "path": "hello.txt",
-                "old_string": "not in file",
-                "new_string": "x",
-            }),
+            json.dumps(
+                {
+                    "path": "hello.txt",
+                    "old_string": "not in file",
+                    "new_string": "x",
+                }
+            ),
         )
         assert "not found" in result
 
-    async def test_edit_ambiguous_string(
-        self, registry: ToolRegistry, workspace: Path
-    ) -> None:
+    async def test_edit_ambiguous_string(self, registry: ToolRegistry, workspace: Path) -> None:
         (workspace / "dup.txt").write_text("aaa\naaa\n")
         result = await registry.execute(
             "edit_file",
@@ -172,9 +167,7 @@ class TestGrep:
         assert "No matches" in result
 
     async def test_grep_with_include(self, registry: ToolRegistry) -> None:
-        result = await registry.execute(
-            "grep", json.dumps({"pattern": "print", "include": "*.py"})
-        )
+        result = await registry.execute("grep", json.dumps({"pattern": "print", "include": "*.py"}))
         assert "nested.py" in result
 
 
@@ -205,14 +198,50 @@ class TestCodingToolRegistry:
         assert "git_diff" in names
         assert "git_commit" in names
         assert "git_log" in names
-        # No scratchpad tools when scratchpad is None
-        assert "scratchpad_read" not in names
 
-    def test_factory_with_scratchpad(self, workspace: Path) -> None:
-        from nemoclaw_escapades.agent.scratchpad import Scratchpad
 
-        sp = Scratchpad(str(workspace / ".scratchpad.md"))
-        reg = create_coding_tool_registry(str(workspace), scratchpad=sp)
-        assert "scratchpad_read" in reg.names
-        assert "scratchpad_write" in reg.names
-        assert "scratchpad_append" in reg.names
+# ── Output truncation ─────────────────────────────────────────────────
+
+
+class TestOutputTruncation:
+    """Large file reads and grep results are truncated to bounded size."""
+
+    async def test_read_file_truncates_large_output(self, tmp_path: Path) -> None:
+        """Reading a large file returns output capped at the registry limit."""
+        # Generate a file comfortably larger than both _DEFAULT_READ_CHAR_LIMIT
+        # (32K) and the registry's default max_result_chars (8K).
+        big = tmp_path / "big.txt"
+        big.write_text("\n".join(f"line content {i}" for i in range(5000)))
+
+        reg = ToolRegistry()
+        register_file_tools(reg, str(tmp_path))
+        # Raise the line limit so read_file actually produces a huge body
+        # that's then trimmed by the registry's max_result_chars cap.
+        result = await reg.execute("read_file", json.dumps({"path": "big.txt", "limit": 5000}))
+        assert "truncated" in result.lower()
+        # Registry default max_result_chars = 8000; allow some slack for the
+        # truncation notice appended by the registry (~50 chars).
+        assert len(result) <= 8100
+
+    async def test_grep_truncates_many_matches(self, tmp_path: Path) -> None:
+        """Grep output over the cap gets a truncation marker."""
+        for i in range(200):
+            (tmp_path / f"file_{i:03d}.txt").write_text(
+                "\n".join(f"hit {i} line {j}" for j in range(50))
+            )
+
+        reg = ToolRegistry()
+        register_search_tools(reg, str(tmp_path))
+        result = await reg.execute("grep", json.dumps({"pattern": "hit"}))
+        assert "truncated" in result.lower()
+        assert len(result) <= 8100
+
+    async def test_small_read_not_truncated(self, tmp_path: Path) -> None:
+        """Small files pass through without a truncation marker."""
+        small = tmp_path / "small.txt"
+        small.write_text("just three\nshort\nlines\n")
+
+        reg = ToolRegistry()
+        register_file_tools(reg, str(tmp_path))
+        result = await reg.execute("read_file", json.dumps({"path": "small.txt"}))
+        assert "truncated" not in result.lower()

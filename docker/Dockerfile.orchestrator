@@ -40,11 +40,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 curl \
 COPY --from=builder /usr/local/lib/python3.13/site-packages/ /usr/local/lib/python3.13/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
-# Application code (read-only at runtime per policy)
+# Application code (read-only at runtime per policy).  ``skills/``
+# ships with the image so ``SkillLoader`` finds the starter skills at
+# ``/app/skills`` without depending on CWD.  The config's SKILLS_DIR
+# default is sandbox-aware (see ``_SANDBOX_SKILLS_DIR`` in config.py).
 COPY --chown=root:root src/ ./src/
 COPY --chown=root:root prompts/ ./prompts/
 COPY --chown=root:root scripts/ ./scripts/
-RUN chmod -R a+rX,a-w src/
+COPY --chown=root:root skills/ ./skills/
+RUN chmod -R a+rX,a-w src/ skills/
 
 # Writable directories (per policy)
 RUN mkdir -p /app/logs && chown sandbox:sandbox /app/logs

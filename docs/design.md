@@ -31,9 +31,11 @@
 ### Companion Design Documents
 
 - **[M2a Design — Reusable Agent Loop](design_m2a.md)** — `AgentLoop`
-  extraction, coding file tools, scratchpad, two-tier context compaction
-  (promoted from M3), basic `SKILL.md` loading (promoted from M6), layered
-  prompt builder with cache boundary.
+  extraction, coding file tools, two-tier context compaction (promoted
+  from M3), basic `SKILL.md` loading (promoted from M6), layered prompt
+  builder with cache boundary.  Agents manage working memory via the
+  `scratchpad` skill — a convention for using the ordinary file tools
+  against a well-known notes file (no dedicated class or tools).
 - **[M2b Design — Multi-Agent Orchestration](design_m2b.md)** — sub-agent
   delegation via NMB, sandbox lifecycle, work collection and finalization,
   per-agent concurrency caps, at-least-once delivery, in-process dispatch,
@@ -272,7 +274,9 @@ coding tools, and add context management. This is a **single-agent milestone**
   `is_concurrency_safe` flag for write tools.
 - File tool suite: `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
   `list_directory`, `bash`, `git_diff`, `git_commit`, `git_log`.
-- Agent scratchpad with context injection and snapshot return.
+- `scratchpad` skill: a convention for using the file tools above to
+  maintain a structured notes file as working memory (no dedicated
+  class or tools required).
 - Two-tier context compaction: micro-compaction (tool result truncation, no
   API call) and full compaction (LLM summary + session roll). *(Promoted from
   M3 — the BYOO tutorial builds compaction at step 04, before even the event

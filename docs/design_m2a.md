@@ -16,7 +16,7 @@
 2. [Goals and Non-Goals](#2--goals-and-non-goals)
 3. [The Reusable Agent Loop](#3--the-reusable-agent-loop)
 4. [Coding Agent File Tools](#4--coding-agent-file-tools)
-5. [Agent Scratchpad](#5--agent-scratchpad)
+5. [Agent Working Memory (Scratchpad Skill)](#5--agent-working-memory-scratchpad-skill)
 6. [Context Compaction](#6--context-compaction)
 7. [Basic Skill Loading](#7--basic-skill-loading)
 8. [Layered Prompt Builder](#8--layered-prompt-builder)
@@ -71,8 +71,9 @@ conversations via compaction, and load task-specific skills.
 3. Equip the agent with a concrete **file tool suite**: `read_file`,
    `write_file`, `edit_file`, `grep`, `glob`, `list_directory`, `bash`,
    `git_diff`, `git_commit`, `git_log`.
-4. Implement the **scratchpad** mechanism for working notes with context
-   injection and snapshot return.
+4. Ship a **scratchpad skill** that teaches the agent to maintain working
+   notes in a plain Markdown file using the ordinary file tools — no
+   dedicated scratchpad class or tools required.
 5. Implement **two-tier context compaction**: micro-compaction (tool result
    truncation, no API call) and full compaction (LLM summary + session roll).
 6. Implement **basic `SKILL.md` loading** via a `skill` tool that injects skill
@@ -112,7 +113,6 @@ class AgentLoop:
         tools: ToolRegistry,
         config: AgentLoopConfig,
         audit: AuditDB | None = None,
-        scratchpad: Scratchpad | None = None,
         approval: ApprovalGate | None = None,
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,
@@ -147,7 +147,6 @@ class AgentLoopResult:
     tool_calls_made: int
     rounds: int
     hit_safety_limit: bool
-    scratchpad_contents: str | None
     working_messages: list[Message]
 ```
 
@@ -170,10 +169,10 @@ Validated by the BYOO tutorial, which runs all tool calls via `asyncio.gather`
 from step 01 with no reported issues.
 
 **Concurrency-safe tools** (read-only or idempotent): `read_file`, `grep`,
-`glob`, `list_directory`, `scratchpad_read`, `git_diff`, `git_log`.
+`glob`, `list_directory`, `git_diff`, `git_log`.
 
 **Not concurrency-safe** (mutate workspace state): `write_file`, `edit_file`,
-`bash`, `git_commit`, `scratchpad_write`, `scratchpad_append`.
+`bash`, `git_commit`.
 
 ### 3.3 Loop Internals
 
@@ -187,9 +186,8 @@ orchestrator loop:
 5. Approval gate — checks write tools before execution (if configured).
 6. Tool execution — concurrent by default (see §3.2).
 7. Audit logging — every tool invocation recorded via `audit.log_tool_call()`.
-8. Scratchpad auto-update — after each round, contents injected into context.
-9. Truncation handling — `finish_reason=length` triggers continuation retry.
-10. Safety limit — returns partial answer after `max_tool_rounds`.
+8. Truncation handling — `finish_reason=length` triggers continuation retry.
+9. Safety limit — returns partial answer after `max_tool_rounds`.
 
 ### 3.4 Three-Layer Agent Architecture
 
@@ -282,30 +280,33 @@ def create_coding_tool_registry(workspace_root: str) -> ToolRegistry:
 
 ---
 
-## 5  Agent Scratchpad
+## 5  Agent Working Memory (Scratchpad Skill)
 
-*Full specification: [original §8](design_m2.md#8--agent-scratchpad)*
+Earlier drafts of M2a introduced a dedicated `Scratchpad` class, three
+purpose-built tools (`scratchpad_read` / `_write` / `_append`), per-thread
+`set_path()` retargeting, and auto-injection of a `<scratchpad>` block into
+the system prompt.  During implementation it became clear that this was ~550
+LoC doing what a file + a convention can do.  **Removed** — see the
+[scratchpad skill](../skills/scratchpad/SKILL.md) for what replaced it.
 
-The scratchpad is a Markdown file on the workspace filesystem. It serves as the
-agent's working memory for the current task — observations, plans, open
-questions, decisions.
+The agent now manages working memory using the ordinary file tools
+(`read_file`, `write_file`, `edit_file`) against a well-known filename in its
+workspace (`notes.md` by default, or a task-specific name to avoid
+collisions).  The `scratchpad` skill documents the convention: when to open
+one, what sections to use (`## Goal`, `## Plan`, `## Evidence`,
+`## Hypotheses`, `## Decisions`, `## Open questions`), when to skip it.
 
-```python
-@dataclass
-class Scratchpad:
-    path: str
-    max_size: int = 32_768  # 32 KB cap
+Rationale:
 
-    def read(self) -> str: ...
-    def write(self, content: str) -> str: ...
-    def append(self, section: str, content: str) -> str: ...
-    def snapshot(self) -> str: ...
-```
-
-Three tools (`scratchpad_read`, `scratchpad_write`, `scratchpad_append`) are
-registered automatically when a `Scratchpad` is provided to the `AgentLoop`.
-Contents are injected into the system prompt as a `<scratchpad>` block on every
-inference round.
+- **Concurrency safety** comes for free — no shared mutable object, no
+  contextvar dance.  Two concurrent Slack threads each own their own files.
+- **Composability** — every other tool that works with files
+  (`grep`, `list_directory`, version control) works with the notes file too.
+- **Transparency** — the agent's working memory is inspectable on disk
+  during and after the task; nothing is hidden behind a custom abstraction.
+- **Alignment** with Claude Code's `CLAW.md` convention and BYOO's
+  file-based memory guidance, both of which explicitly eschew a dedicated
+  scratchpad primitive.
 
 ---
 
@@ -461,9 +462,9 @@ M2a implements only **reading and loading** skills. The following are deferred:
 
 *Validated by BYOO tutorial step 13 (deep dive §10).*
 
-### 8.1 Five-Layer System Prompt
+### 8.1 Four-Layer System Prompt
 
-The `PromptBuilder` constructs the system prompt from five layers:
+The `PromptBuilder` constructs the system prompt from four layers:
 
 | Layer | Content | Static/Dynamic |
 |-------|---------|----------------|
@@ -471,26 +472,23 @@ The `PromptBuilder` constructs the system prompt from five layers:
 | 2. Task context | Skill content, workspace description, task instructions | Dynamic |
 | 3. Runtime metadata | Agent ID, timestamp, available tools summary | Dynamic |
 | 4. Channel hint | Whether responding to user, parent agent, or cron | Dynamic |
-| 5. Scratchpad | Current scratchpad contents (if enabled) | Dynamic |
 
 ### 8.2 Cache Boundary
 
 The system prompt is split at a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker. Content
 before the boundary (layers 1–2 for stable tasks) is cached by the provider;
-content after (layers 3–5) changes per turn. This reduces cost by ~90% on
+content after (layers 3–4) changes per turn. This reduces cost by ~90% on
 subsequent turns via provider prompt caching.
 
 ```python
 class PromptBuilder:
-    def build(self, agent_id: str, source_type: str, scratchpad: str = "") -> str:
+    def build(self, agent_id: str, source_type: str) -> str:
         layers = []
         layers.append(self._identity)
         layers.append(self._task_context)
         layers.append("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__")
         layers.append(self._runtime_metadata(agent_id))
         layers.append(self._channel_hint(source_type))
-        if scratchpad:
-            layers.append(f"<scratchpad>\n{scratchpad}\n</scratchpad>")
         return "\n\n".join(layers)
 ```
 
@@ -511,52 +509,81 @@ def _channel_hint(self, source_type: str) -> str:
 
 ## 9  Implementation Plan
 
-### Phase 1 — `AgentLoop` extraction + concurrent tool execution
+### Phase 1 — `AgentLoop` extraction + concurrent tool execution ✅
 
-| Task | Files |
-|------|-------|
-| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `agent/types.py` |
-| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py` |
-| Implement concurrent tool execution: partition by `is_concurrency_safe`, `asyncio.gather` for safe, sequential for unsafe | `agent/loop.py` |
-| Refactor `Orchestrator` to use `AgentLoop` internally | `orchestrator/orchestrator.py` |
-| Unit tests for `AgentLoop` (mock backend + tools) | `tests/test_agent_loop.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Create `ToolSpec` dataclass with `is_concurrency_safe` flag (default `True`) | `tools/registry.py` | ✅ Done |
+| Create `AgentLoop` class with `AgentLoopConfig` and `AgentLoopResult` | `agent/loop.py`, `agent/types.py` | ✅ Done |
+| Implement concurrent tool execution: partition by `is_concurrency_safe`, `asyncio.gather` for safe, sequential for unsafe | `agent/loop.py` | ✅ Done |
+| Refactor `Orchestrator` to use `AgentLoop` internally | `orchestrator/orchestrator.py` | ✅ Done |
+| Unit tests for `AgentLoop` + concurrency (mock backend + tools) | `tests/test_agent_loop.py` | ✅ Done |
 
-**Exit criteria:** Existing orchestrator tests pass with `AgentLoop` under the
+**Exit criteria:** ✅ Existing orchestrator tests pass with `AgentLoop` under the
 hood. Safe tools run concurrently; unsafe tools run sequentially.
 
-### Phase 2 — File tools, scratchpad, and search tools
+### Phase 2 — File tools and search tools ✅
 
-| Task | Files |
-|------|-------|
-| Implement workspace-rooted file tools with `is_concurrency_safe` flags | `tools/files.py` |
-| Implement search tools (`grep`, `glob`) — concurrency-safe | `tools/search.py` |
-| Implement `bash` tool with timeout and output truncation | `tools/bash.py` |
-| Implement git tools (`git_diff`, `git_commit`, `git_log`) | `tools/git.py` |
-| Implement `Scratchpad` class | `agent/scratchpad.py` |
-| Register scratchpad tools; add scratchpad context injection to `AgentLoop` | `tools/scratchpad.py`, `agent/loop.py` |
-| Create `create_coding_tool_registry()` factory | `tools/coding.py` |
-| Unit tests for all file tools and scratchpad | `tests/test_file_tools.py`, `tests/test_scratchpad.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Simplify `@tool` decorator to explicit JSON Schema (BYOO style) | `tools/registry.py` | ✅ Done |
+| Implement workspace-rooted file tools | `tools/files.py` | ✅ Done |
+| Implement search tools (`grep`, `glob`) | `tools/search.py` | ✅ Done |
+| Implement `bash` tool with timeout and output truncation | `tools/bash.py` | ✅ Done |
+| Implement git tools (`git_diff`, `git_commit`, `git_log`) | `tools/git.py` | ✅ Done |
+| Create `create_coding_tool_registry()` factory | `tools/tool_registry_factory.py` | ✅ Done |
+| Implement web search (`web_search`) and URL fetch (`web_fetch`) tools | `tools/web_search.py` | ✅ Done |
+| Standardize orchestrator tools (confluence, gerrit, gitlab, jira, slack_search) | `tools/*.py` | ✅ Done |
+| Unit tests for all tools | `tests/test_*_tools.py` | ✅ Done |
+| Add constant annotation rule to CONTRIBUTING.md | `CONTRIBUTING.md` | ✅ Done |
 
-**Exit criteria:** A `ToolRegistry` with all coding file tools can be created.
-Scratchpad reads/writes work and are included in `AgentLoopResult`.
+**Exit criteria:** ✅ A `ToolRegistry` with all coding file tools can be created.
+Agents manage working memory via the ordinary file tools against a
+well-known notes file (see the `scratchpad` skill — no dedicated class
+or tools). All orchestrator tools use the `@tool` decorator with closures
+(no global state).
 
-### Phase 3 — Context compaction + basic skill loading + prompt builder
+### Phase 3 — Context compaction + basic skill loading + prompt builder ✅
 
-| Task | Files |
-|------|-------|
-| Implement micro-compaction (tool result truncation at configurable char limit) | `agent/compaction.py` |
-| Implement full compaction (LLM summary + session roll with synthetic messages) | `agent/compaction.py` |
-| Integrate compaction into `AgentLoop` (micro on every round, full on threshold) | `agent/loop.py` |
-| Implement `SkillLoader` — scan skills directory, load by name | `agent/skill_loader.py` |
-| Implement `skill` tool with enum of available skill IDs | `tools/skill.py` |
-| Implement layered `PromptBuilder` with cache boundary | `agent/prompt_builder.py` |
-| Implement channel hint layer (user / agent / cron) | `agent/prompt_builder.py` |
-| Unit tests for compaction (truncation, summary, session roll) | `tests/test_compaction.py` |
-| Unit tests for skill loading | `tests/test_skill_loader.py` |
-| Unit tests for prompt builder (layer ordering, cache boundary) | `tests/test_prompt_builder.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Implement micro-compaction (tool result truncation at configurable char limit) | `agent/compaction.py` | ✅ Done |
+| Implement full compaction (LLM summary + session roll with synthetic messages) | `agent/compaction.py` | ✅ Done |
+| Integrate compaction into `AgentLoop` (micro on every round, full on threshold) | `agent/loop.py` | ✅ Done |
+| Add compaction configuration to `AgentLoopConfig` | `agent/types.py`, `config.py` | ✅ Done |
+| Implement `SkillLoader` — scan skills directory, load by name | `agent/skill_loader.py` | ✅ Done |
+| Implement `skill` tool with enum of available skill IDs | `tools/skill.py` | ✅ Done |
+| Implement layered `LayeredPromptBuilder` with cache boundary | `agent/prompt_builder.py` | ✅ Done |
+| Implement channel hint layer (user / agent / cron) | `agent/prompt_builder.py` | ✅ Done |
+| Unit tests for compaction (truncation, summary, session roll) | `tests/test_compaction.py` | ✅ Done |
+| Unit tests for skill loading | `tests/test_skill_loader.py` | ✅ Done |
+| Unit tests for prompt builder (layer ordering, cache boundary) | `tests/test_prompt_builder.py` | ✅ Done |
 
-**Exit criteria:** Long conversations compact without crashing. Skills load
+**Exit criteria:** ✅ Long conversations compact without crashing. Skills load
 via tool. System prompt has cache boundary and channel hint.
+
+### Phase 4 — Runtime wiring, integration tests, starter skills ✅
+
+A closure phase that takes the Phase 1–3 building blocks and makes them
+actually reachable at runtime.  Before this phase, the compaction and
+skill code compiled and passed unit tests but the running orchestrator
+never exercised them.
+
+| Task | Files | Status |
+|------|-------|--------|
+| Add `CodingAgentConfig` + `SkillsConfig` to `AppConfig`; env-var wiring | `config.py` | ✅ Done |
+| Pass `agent_id`, `source_type` through `Orchestrator` into the prompt builder + agent loop | `orchestrator/orchestrator.py`, `agent/prompt_builder.py` | ✅ Done |
+| Wire coding tool registry, `SkillLoader`, and `skill` tool in `main.py` | `main.py` | ✅ Done |
+| Integration test: orchestrator + `AgentLoop` end-to-end (real coding tools, real workspace) | `tests/test_integration_agent.py` | ✅ Done |
+| Integration test: long-conversation compaction (50+ msgs, tool-result truncation in loop) | `tests/test_integration_agent.py` | ✅ Done |
+| Integration test: skill-guided task (agent calls `skill` tool, follows loaded content) | `tests/test_integration_agent.py` | ✅ Done |
+| Ship starter skills (`code-review`, `debugging`, `refactor`, `scratchpad`) | `skills/*/SKILL.md` | ✅ Done |
+
+**Exit criteria:** ✅ A running NemoClaw process with `CODING_AGENT_ENABLED=true`
+has the full coding tool suite and the `skill` tool wired in.  The three
+integration tests from §10.2 pass.  The `skills/` directory ships with
+four starter skills (`code-review`, `debugging`, `refactor`,
+`scratchpad`).
 
 ---
 
@@ -564,32 +591,30 @@ via tool. System prompt has cache boundary and channel hint.
 
 ### 10.1 Unit Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| `AgentLoop` with mock backend and tools | Multi-turn loop, tool execution, safety limit, truncation handling |
-| `AgentLoop` concurrent tool execution | Safe tools run via `asyncio.gather`; unsafe run sequentially; mixed batches respect ordering |
-| `AgentLoop` with scratchpad | Scratchpad context injection, read/write tools, snapshot in result |
-| `AgentLoop` approval gate | Write tool gating (orchestrator mode), pre-approved pass-through (sub-agent mode) |
-| `Scratchpad` class | Read, write, append, size cap, snapshot |
-| `Orchestrator` refactor | All existing tests pass with `AgentLoop` under the hood |
-| File tools path validation | Rejects `..` traversals, absolute paths, paths outside workspace root |
-| File tools output truncation | Large file reads and grep results truncated at configured limits |
-| `edit_file` replacement | Correct old→new string replacement; fails on non-unique matches |
-| `bash` tool timeout | Commands killed after timeout; stderr captured |
-| Micro-compaction | Tool results > 10K chars are truncated; annotation appended |
-| Full compaction | Summary generated; session rolled; newest messages preserved |
-| Compaction threshold | Compaction triggers at configured token threshold; not before |
-| `SkillLoader` | Scans directory; loads by name; returns content |
-| `skill` tool | Returns skill content as tool result; enum matches available skills |
-| `PromptBuilder` layer ordering | Layers in correct order; cache boundary present; channel hint correct |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| `AgentLoop` with mock backend and tools | Multi-turn loop, tool execution, safety limit, truncation handling | ✅ `TestAgentLoopBasic`, `TestSafetyLimit`, `TestContinuationRetries`, `TestToolErrors` |
+| `AgentLoop` concurrent tool execution | Safe tools run via `asyncio.gather`; unsafe run sequentially; mixed batches respect ordering | ✅ `TestConcurrentExecution` (6 tests) |
+| `AgentLoop` approval gate | Write tool gating (orchestrator mode), pre-approved pass-through (sub-agent mode) | ✅ `TestWriteApproval` |
+| `Orchestrator` refactor | All existing tests pass with `AgentLoop` under the hood | ✅ `tests/test_orchestrator.py` (all suites) |
+| File tools path validation | Rejects `..` traversals, absolute paths, paths outside workspace root | ✅ `TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` |
+| File tools output truncation | Large file reads and grep results truncated at configured limits | ✅ `TestOutputTruncation` |
+| `edit_file` replacement | Correct old→new string replacement; fails on non-unique matches | ✅ `TestEditFile` |
+| `bash` tool timeout | Commands killed after timeout; stderr captured | ✅ `tests/test_bash_tools.py::TestBashHandler::test_timeout` |
+| Micro-compaction | Tool results > 10K chars are truncated; annotation appended | ✅ `tests/test_compaction.py::TestMicroCompaction` |
+| Full compaction | Summary generated; session rolled; newest messages preserved | ✅ `tests/test_compaction.py::TestFullCompaction` |
+| Compaction threshold | Compaction triggers at configured token threshold; not before | ✅ `tests/test_compaction.py::TestShouldCompact` |
+| `SkillLoader` | Scans directory; loads by name; returns content | ✅ `tests/test_skill_loader.py::TestSkillLoaderScan`, `TestSkillLoaderLoad` |
+| `skill` tool | Returns skill content as tool result; enum matches available skills | ✅ `tests/test_skill_loader.py::TestSkillTool` |
+| `PromptBuilder` layer ordering | Layers in correct order; cache boundary present; channel hint correct | ✅ `tests/test_prompt_builder.py::TestLayerOrdering`, `TestChannelHint` |
 
 ### 10.2 Integration Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| Orchestrator + `AgentLoop` end-to-end | Slack message → agent loop with file tools → response |
-| Long conversation compaction | 50+ message conversation triggers full compaction; conversation continues coherently |
-| Skill-guided coding task | Load a coding skill → agent follows skill instructions |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| Orchestrator + `AgentLoop` end-to-end | Slack message → agent loop with file tools → response | ✅ `tests/test_integration_agent.py::TestOrchestratorAgentLoopE2E` |
+| Long conversation compaction | 50+ message conversation triggers full compaction; conversation continues coherently | ✅ `tests/test_integration_agent.py::TestLongConversationCompaction` |
+| Skill-guided coding task | Load a coding skill → agent follows skill instructions | ✅ `tests/test_integration_agent.py::TestSkillGuidedTask` |
 
 ---
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from nemoclaw_escapades.config import GerritConfig
 from nemoclaw_escapades.tools.gerrit import (
     GerritClient,

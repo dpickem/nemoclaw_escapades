@@ -8,26 +8,69 @@ handling) lives in the layers above.
 Both the orchestrator and future sub-agents (coding, review) share
 this loop — they differ only in which tools, approval gate, and audit
 backend they inject.
+
+The two-list message model
+---------------------------
+
+NemoClaw uses **two separate message lists** that should not be
+confused:
+
+1. ``LayeredPromptBuilder._thread_history`` — long-lived per-thread
+   state, persisted across requests.  Contains only ``user`` and
+   ``assistant`` role messages (the final assistant text per turn).
+   Owned by ``agent/prompt_builder.py``.
+2. ``AgentLoop``'s ``working_messages`` — ephemeral, local to a single
+   ``run()`` call.  Seeded with what the prompt builder produced
+   (``[system, …history…, user]``), it then grows as tool calls execute.
+
+This module owns #2.  On every round where the model returns
+``tool_calls``:
+
+- ``_build_assistant_tool_message`` converts the response into an
+  ``assistant`` message carrying the requested ``tool_calls`` and
+  appends it to ``working_messages``.
+- ``execute_tool_calls`` runs the tools (concurrent for
+  ``is_concurrency_safe=True``, sequential for the rest) and emits one
+  ``{"role": "tool", "tool_call_id": ..., "content": ...}`` message per
+  result, appended to ``working_messages`` so the next inference call
+  sees them.
+
+Tool results are matched back to their requesting ``tool_call`` via the
+``tool_call_id`` field — this is the OpenAI / Anthropic tool-calling
+protocol.  Before each inference call, ``ContextCompactor`` (see
+``agent/compaction.py``) micro-compacts oversized ``tool``-role messages
+so a giant ``read_file`` doesn't blow the context window within the
+current run.
+
+When the loop terminates (model returns text with no ``tool_calls``),
+``run()`` returns ``AgentLoopResult(content=..., working_messages=...)``.
+The orchestrator reads ``result.content`` (the final assistant text) and
+calls ``prompt.commit_turn(thread_key, user_text, result.content)``.  The
+tool-call round-trips in ``working_messages`` are **intentionally not
+written back to thread history** — otherwise every subsequent turn in
+that thread would drag along every previous turn's tool outputs.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval
-from nemoclaw_escapades.agent.scratchpad import Scratchpad
+from nemoclaw_escapades.agent.compaction import ContextCompactor
 from nemoclaw_escapades.agent.types import (
-    AgentLoopConfig,
     AgentLoopResult,
     ToolEndCallback,
     ToolStartCallback,
 )
 from nemoclaw_escapades.backends.base import BackendBase
+from nemoclaw_escapades.config import AgentLoopConfig
 from nemoclaw_escapades.models.types import (
     InferenceRequest,
     InferenceResponse,
     Message,
+    MessageRole,
     PendingApproval,
     ToolCall,
 )
@@ -90,7 +133,6 @@ class AgentLoop:
         config: AgentLoopConfig,
         audit: AuditDB | None = None,
         approval: ApprovalGate | None = None,
-        scratchpad: Scratchpad | None = None,
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,
     ) -> None:
@@ -107,10 +149,6 @@ class AgentLoop:
             approval: Gate consulted before executing write tools.
                 Defaults to ``AutoApproval`` (allow everything).
                 Inject ``WriteApproval`` for interactive approval.
-            scratchpad: Optional working-memory scratchpad.  When
-                provided, its contents are injected into the system
-                prompt on every inference round and included in the
-                ``AgentLoopResult``.
             on_tool_start: Instance-level default callback invoked
                 before each tool execution.  Per-request callbacks
                 passed to ``run()`` take precedence.
@@ -122,9 +160,9 @@ class AgentLoop:
         self._config = config
         self._audit = audit
         self._approval = approval or AutoApproval()
-        self._scratchpad = scratchpad
         self._on_tool_start = on_tool_start
         self._on_tool_end = on_tool_end
+        self._compactor = ContextCompactor(backend, config)
 
     async def run(
         self,
@@ -141,6 +179,17 @@ class AgentLoop:
         until the model produces a text response or
         ``config.max_tool_rounds`` is reached.
 
+        The caller provides the prompt-builder-produced message list
+        (``[system, …history…, user]``).  This method copies that list
+        into a local ``working_messages`` and appends
+        ``assistant``-with-``tool_calls`` and ``tool``-role messages to
+        it as the loop progresses.  The caller's original list is never
+        mutated.  The returned ``working_messages`` is the ephemeral
+        per-run log — the caller is expected to take
+        ``result.content`` (the final text-only reply) and hand *only
+        that* to ``LayeredPromptBuilder.commit_turn`` for persistence.
+        See the module docstring for the rationale.
+
         Args:
             messages: Initial message list (system + history + user).
             request_id: Correlation ID for structured logging.
@@ -153,7 +202,11 @@ class AgentLoop:
 
         Returns:
             An ``AgentLoopResult`` with the final text, round/tool
-            counters, and the full working message list.
+            counters, and the full working message list (including every
+            ``assistant``-with-``tool_calls`` and ``tool``-role message
+            that was appended during the run — useful for debugging and
+            approval-resume flows, *not* for writing back to thread
+            history).
 
         Raises:
             WriteApprovalError: When a write tool is blocked by the
@@ -172,14 +225,19 @@ class AgentLoop:
         # emitting tool calls (e.g. cyclic tool dependencies or hallucinated
         # tool names that always error).
         for round_num in range(self._config.max_tool_rounds):
-            # Inject the scratchpad into the system message so the model
-            # always sees its latest notes.  We modify a copy of the
-            # first message (not the original) to avoid accumulating
-            # stale scratchpad snapshots across rounds.
-            call_messages = self._inject_scratchpad(working_messages)
+            # Micro-compaction: truncate oversized tool results (zero
+            # cost — pure string slicing, no API call).  Applied before
+            # every inference round so the context window stays healthy.
+            working_messages = self._compactor.truncate_tool_results(working_messages)
+
+            # Full compaction: when total message chars exceed the
+            # threshold, summarize the oldest half via a dedicated
+            # inference call and session-roll.
+            if self._compactor.should_compact(working_messages):
+                working_messages = await self._compactor.compact(working_messages, request_id)
 
             inference_request = InferenceRequest(
-                messages=call_messages,
+                messages=working_messages,
                 model=self._config.model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
@@ -220,7 +278,6 @@ class AgentLoop:
                     tool_calls_made=total_tool_calls,
                     rounds=round_num + 1,
                     hit_safety_limit=False,
-                    scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
                     working_messages=working_messages,
                 )
 
@@ -281,7 +338,6 @@ class AgentLoop:
             tool_calls_made=total_tool_calls,
             rounds=self._config.max_tool_rounds,
             hit_safety_limit=True,
-            scratchpad_contents=self._scratchpad.snapshot() if self._scratchpad else None,
             working_messages=working_messages,
         )
 
@@ -293,6 +349,14 @@ class AgentLoop:
         on_tool_start: ToolStartCallback | None = None,
     ) -> list[Message]:
         """Execute a batch of tool calls and return tool-result messages.
+
+        Concurrency-safe tools (``ToolSpec.is_concurrency_safe=True``)
+        run in parallel via ``asyncio.gather``.  Unsafe tools run
+        sequentially afterwards so workspace mutations are serialized.
+
+        Results are returned in the **same order** as ``tool_calls`` —
+        the OpenAI protocol requires each tool-result message to appear
+        in a stable position matching the assistant's tool-call message.
 
         Public so the orchestrator can call this during approval-resume
         flows (execute the previously-blocked tools, then call ``run()``
@@ -306,132 +370,213 @@ class AgentLoop:
                 the instance-level default.
 
         Returns:
-            A list of ``tool`` role messages, one per tool call.
+            A list of ``tool`` role messages, one per tool call, in the
+            same order as the input.
         """
         # Per-request callback takes precedence over the instance default.
         # This avoids shared mutable state — critical for concurrent
         # requests whose callbacks target different Slack channels.
         effective_on_tool_start = on_tool_start or self._on_tool_start
 
-        results: list[Message] = []
-        for tc in tool_calls:
-            # Notify the connector so it can update the thinking indicator
-            # in real time (e.g. "Searching Jira…").  Failures here must
-            # not block tool execution.
-            if effective_on_tool_start:
-                display = self._tools.display_name(tc.name)
-                try:
-                    await effective_on_tool_start(display)
-                except Exception:
-                    logger.debug("on_tool_start callback failed", exc_info=True)
-
-            # Look up the spec before execution — needed later for audit
-            # metadata even if execute() raises.
+        # Partition by is_concurrency_safe.  Unknown tool names (spec is
+        # None) are treated as safe — they'll fail at execute time with a
+        # clear error, which is better than blocking the whole batch on a
+        # sequential run for a hallucinated tool.
+        safe_indices: list[int] = []
+        unsafe_indices: list[int] = []
+        for i, tc in enumerate(tool_calls):
             spec = self._tools.get(tc.name)
-            tool_timer = Timer()
-            success = True
-            error_msg: str | None = None
+            if spec is None or spec.is_concurrency_safe:
+                safe_indices.append(i)
+            else:
+                unsafe_indices.append(i)
+
+        # Slot-based reassembly: each tool call has a fixed output slot
+        # so the final list matches input order even after parallel
+        # execution reorders completions.
+        results: list[Message | None] = [None] * len(tool_calls)
+
+        # ── Concurrent batch (safe tools) ──────────────────────────────
+        # Fire all safe tools at once via asyncio.gather.  Thinking-
+        # indicator callbacks fire upfront so the user sees them in
+        # input order, not the completion-order (which would be jittery).
+        if safe_indices:
+            for i in safe_indices:
+                await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
+
+            safe_results = await asyncio.gather(
+                *(self._execute_one(tool_calls[i], request_id, thread_ts) for i in safe_indices),
+                return_exceptions=False,
+            )
+            for i, msg in zip(safe_indices, safe_results):
+                results[i] = msg
+
+        # ── Sequential tail (unsafe tools) ─────────────────────────────
+        # Workspace mutations (write_file, bash, git_commit, etc.) must
+        # serialize to avoid races on the filesystem.
+        for i in unsafe_indices:
+            await self._notify_tool_start(tool_calls[i], effective_on_tool_start)
+            results[i] = await self._execute_one(tool_calls[i], request_id, thread_ts)
+
+        # Defensive: every slot should be populated at this point
+        # (``_execute_one`` never raises — errors return an error-payload
+        # Message).  But if a slot somehow stayed ``None`` we MUST NOT
+        # drop it: the OpenAI tool-call protocol requires exactly one
+        # ``tool``-role message per assistant ``tool_call``, keyed by
+        # ``tool_call_id``.  A dropped slot would leave the next
+        # inference call with an unmatched tool_call and the backend
+        # would reject the request.  Substitute a synthetic error so
+        # the output list always has the same length as the input.
+        return [
+            r if r is not None else self._synthesize_missing_tool_result(tc)
+            for tc, r in zip(tool_calls, results)
+        ]
+
+    @staticmethod
+    def _synthesize_missing_tool_result(tc: ToolCall) -> Message:
+        """Build a placeholder tool-result message for a slot that was never filled.
+
+        Should never be reached in practice — ``_execute_one`` handles
+        every exception path.  Acts as belt-and-suspenders so a logic
+        bug in partitioning or dispatch can't break the invariant
+        "one tool-result per tool-call" that the OpenAI protocol
+        requires.
+
+        Args:
+            tc: The tool call whose slot was left empty.
+
+        Returns:
+            A tool-role message carrying a JSON error payload and the
+            correct ``tool_call_id``.
+        """
+        payload = json.dumps(
+            {
+                "error": "Internal error: tool dispatch produced no result",
+                "tool": tc.name,
+            }
+        )
+        return {"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": payload}
+
+    async def _notify_tool_start(
+        self,
+        tc: ToolCall,
+        callback: ToolStartCallback | None,
+    ) -> None:
+        """Fire the thinking-indicator callback for a single tool call.
+
+        Failures are swallowed — a flaky connector must never block
+        tool execution.
+        """
+        if callback is None:
+            return
+        display = self._tools.display_name(tc.name)
+        try:
+            await callback(display)
+        except Exception:
+            logger.debug("on_tool_start callback failed", exc_info=True)
+
+    async def _execute_one(
+        self,
+        tc: ToolCall,
+        request_id: str,
+        thread_ts: str | None,
+    ) -> Message:
+        """Execute a single tool call and produce its tool-result message.
+
+        Handles tool dispatch, error serialization, audit logging, and
+        the per-tool ``on_tool_end`` telemetry callback.  Never raises —
+        errors are serialized as JSON and fed back to the model.
+
+        Args:
+            tc: The tool invocation to execute.
+            request_id: Correlation ID for structured logging.
+            thread_ts: Optional thread timestamp for audit correlation.
+
+        Returns:
+            A tool-role message referencing the input's tool_call_id.
+        """
+        # Look up the spec before execution — needed later for audit
+        # metadata even if execute() raises.
+        spec = self._tools.get(tc.name)
+
+        # Tell the compactor about this call.  At summary time it uses
+        # the (id → name) map to render ``[Tool result (read_file)]``
+        # instead of the opaque tool_call_id — no message walking.
+        self._compactor.register_tool_call(tc.id, tc.name)
+
+        tool_timer = Timer()
+        success = True
+        error_msg: str | None = None
+        try:
+            # The registry handles argument parsing (JSON → kwargs),
+            # dispatch, and output truncation (max_result_chars).
+            output = await self._tools.execute(tc.name, tc.arguments)
+            logger.info(
+                "Tool call succeeded",
+                extra={
+                    "request_id": request_id,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "duration_ms": round(tool_timer.ms, 1),
+                },
+            )
+        except Exception as exc:
+            # Tool errors are serialized as JSON and fed back to the
+            # model — this lets the model explain the failure to the
+            # user or try an alternative approach.
+            success = False
+            error_msg = str(exc)
+            output = json.dumps({"error": error_msg, "tool": tc.name})
+            logger.error(
+                "Tool call failed",
+                extra={
+                    "request_id": request_id,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "duration_ms": round(tool_timer.ms, 1),
+                },
+                exc_info=True,
+            )
+
+        duration_ms = round(tool_timer.ms, 1)
+
+        # Telemetry callback — used by the orchestrator for latency
+        # tracking and by future sub-agents for SLA monitoring.
+        if self._on_tool_end:
             try:
-                # The registry handles argument parsing (JSON → kwargs),
-                # dispatch, and output truncation (max_result_chars).
-                output = await self._tools.execute(tc.name, tc.arguments)
-                logger.info(
-                    "Tool call succeeded",
-                    extra={
-                        "request_id": request_id,
-                        "tool": tc.name,
-                        "tool_call_id": tc.id,
-                        "duration_ms": round(tool_timer.ms, 1),
-                    },
+                await self._on_tool_end(tc.name, duration_ms, success)
+            except Exception:
+                logger.debug("on_tool_end callback failed", exc_info=True)
+
+        # Audit logging is fire-and-forget: the background writer
+        # batches inserts off the hot path so a slow DB never blocks
+        # the tool loop.  Failures are swallowed to avoid poisoning
+        # the user-facing conversation.
+        if self._audit:
+            try:
+                await self._audit.log_tool_call(
+                    session_id=request_id,
+                    thread_ts=thread_ts,
+                    service=spec.toolset if spec else "",
+                    command=tc.name,
+                    args=tc.arguments,
+                    operation_type=("READ" if (spec and spec.is_read_only) else "WRITE"),
+                    duration_ms=duration_ms,
+                    success=success,
+                    error_message=error_msg,
+                    response_payload=output,
                 )
-            except Exception as exc:
-                # Tool errors are serialized as JSON and fed back to the
-                # model — this lets the model explain the failure to the
-                # user or try an alternative approach.
-                success = False
-                error_msg = str(exc)
-                output = json.dumps({"error": error_msg, "tool": tc.name})
-                logger.error(
-                    "Tool call failed",
-                    extra={
-                        "request_id": request_id,
-                        "tool": tc.name,
-                        "tool_call_id": tc.id,
-                        "duration_ms": round(tool_timer.ms, 1),
-                    },
-                    exc_info=True,
-                )
+            except Exception:
+                logger.debug("Audit log_tool_call failed", exc_info=True)
 
-            duration_ms = round(tool_timer.ms, 1)
-
-            # Telemetry callback — used by the orchestrator for latency
-            # tracking and by future sub-agents for SLA monitoring.
-            if self._on_tool_end:
-                try:
-                    await self._on_tool_end(tc.name, duration_ms, success)
-                except Exception:
-                    logger.debug("on_tool_end callback failed", exc_info=True)
-
-            # Audit logging is fire-and-forget: the background writer
-            # batches inserts off the hot path so a slow DB never blocks
-            # the tool loop.  Failures are swallowed to avoid poisoning
-            # the user-facing conversation.
-            if self._audit:
-                try:
-                    await self._audit.log_tool_call(
-                        session_id=request_id,
-                        thread_ts=thread_ts,
-                        service=spec.toolset if spec else "",
-                        command=tc.name,
-                        args=tc.arguments,
-                        operation_type=("READ" if (spec and spec.is_read_only) else "WRITE"),
-                        duration_ms=duration_ms,
-                        success=success,
-                        error_message=error_msg,
-                        response_payload=output,
-                    )
-                except Exception:
-                    logger.debug("Audit log_tool_call failed", exc_info=True)
-
-            # Each tool result must reference the tool_call_id from the
-            # assistant message — this is how the model matches results
-            # back to the tool invocation it requested.
-            results.append({"role": "tool", "tool_call_id": tc.id, "content": output})
-
-        return results
+        # Each tool result must reference the tool_call_id from the
+        # assistant message — this is how the model matches results
+        # back to the tool invocation it requested.
+        return {"role": MessageRole.TOOL, "tool_call_id": tc.id, "content": output}
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _inject_scratchpad(self, messages: list[Message]) -> list[Message]:
-        """Return a copy of *messages* with scratchpad injected into the system prompt.
-
-        If no scratchpad is configured or it's empty, returns the
-        original list unchanged (no copy).  Otherwise, the system
-        message's content is extended with a ``<scratchpad>`` block.
-
-        Args:
-            messages: The working message list (not modified in-place).
-
-        Returns:
-            A message list suitable for the inference request.
-        """
-        if not self._scratchpad:
-            return messages
-
-        block = self._scratchpad.context_block()
-        if not block:
-            return messages
-
-        # Copy only the system message; the rest are shared references.
-        result: list[Message] = list(messages)
-        if result and result[0].get("role") == "system":
-            system = dict(result[0])
-            system["content"] = str(system.get("content", "")) + "\n\n" + block
-            result[0] = system
-
-        return result
 
     @staticmethod
     def _build_assistant_tool_message(result: InferenceResponse) -> Message:
@@ -453,7 +598,7 @@ class AgentLoop:
         # tool_calls to appear in the conversation *before* the
         # corresponding tool-result messages.  We reconstruct it from
         # the InferenceResponse so it matches the wire format exactly.
-        msg: Message = {"role": "assistant", "content": result.content or ""}
+        msg: Message = {"role": MessageRole.ASSISTANT, "content": result.content or ""}
         if result.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -492,11 +637,11 @@ class AgentLoop:
         # scaffolding (assistant partial + "please continue" user msgs)
         # to leak into the caller's message history.
         working: list[Message] = list(messages)
-        working.append({"role": "assistant", "content": result.content})
+        working.append({"role": MessageRole.ASSISTANT, "content": result.content})
 
         for attempt in range(self._config.max_continuation_retries):
             # Append a nudge asking the model to pick up where it left off.
-            working.append({"role": "user", "content": CONTINUATION_PROMPT})
+            working.append({"role": MessageRole.USER, "content": CONTINUATION_PROMPT})
             logger.info(
                 "Continuation retry",
                 extra={"request_id": request_id, "attempt": attempt + 1},
@@ -517,7 +662,7 @@ class AgentLoop:
             # Otherwise, stack another round of partial output.
             if cont_result.finish_reason != "length":
                 break
-            working.append({"role": "assistant", "content": cont_result.content})
+            working.append({"role": MessageRole.ASSISTANT, "content": cont_result.content})
 
         # Stitch all chunks into one seamless response — the model is
         # instructed to continue mid-sentence, so the seams should be
