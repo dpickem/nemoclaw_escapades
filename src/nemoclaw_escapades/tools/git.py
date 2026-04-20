@@ -22,6 +22,8 @@ typically don't have).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from urllib.parse import urlparse
 
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec, tool
@@ -38,6 +40,8 @@ _OUTPUT_MAX_BYTES: int = 65_536
 _TOOLSET: str = "git"
 # Default timeout (seconds) for subprocess git invocations
 _GIT_TIMEOUT_S: int = 30
+# Longer timeout for git clone (network transfer of repository contents).
+_GIT_CLONE_TIMEOUT_S: int = 300
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -198,16 +202,207 @@ def _make_git_log(workspace_root: str) -> ToolSpec:
     return git_log
 
 
+def _make_git_checkout(workspace_root: str) -> ToolSpec:
+    """Create the ``git_checkout`` tool spec bound to *workspace_root*."""
+
+    @tool(
+        "git_checkout",
+        (
+            "Switch to an existing branch or commit in the workspace.  "
+            "Does NOT create new branches — use ``bash`` with ``git checkout -b`` "
+            "for that.  Requires the ref to already exist locally."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Branch name or commit SHA to check out.",
+                },
+            },
+            "required": ["ref"],
+        },
+        display_name="Switching branch",
+        toolset=_TOOLSET,
+        is_read_only=False,
+        is_concurrency_safe=False,
+    )
+    async def git_checkout(ref: str) -> str:
+        """Check out an existing branch or commit.
+
+        Args:
+            ref: Branch name or commit SHA.
+
+        Returns:
+            Git output on success, or an error string.
+        """
+        return await _run_git(workspace_root, "checkout", ref)
+
+    return git_checkout
+
+
+def _parse_allowed_hosts(raw: str) -> frozenset[str]:
+    """Parse ``GIT_CLONE_ALLOWED_HOSTS`` into a set of host names.
+
+    Accepts comma- or whitespace-separated entries.  Empty string →
+    empty set, which fails ``git_clone`` closed.
+    """
+    return frozenset(h.strip() for h in raw.replace(",", " ").split() if h.strip())
+
+
+def _make_git_clone(workspace_root: str, allowed_hosts: frozenset[str]) -> ToolSpec:
+    """Create the ``git_clone`` tool spec.
+
+    Clones are scoped to *workspace_root* (the ``dest`` path is
+    resolved under it and must not escape via ``..``) and restricted
+    to an explicit host allowlist supplied by config.
+
+    Args:
+        workspace_root: Working directory that contains the clone.
+        allowed_hosts: Set of URL host names the clone accepts.  Empty
+            means the tool is disabled (fail-closed).
+    """
+
+    @tool(
+        "git_clone",
+        (
+            "Clone a remote git repository into a subdirectory of the workspace.  "
+            "Requires the remote host to be in the operator-configured allowlist "
+            "(``GIT_CLONE_ALLOWED_HOSTS``).  Paths are rooted in the workspace; "
+            "relative ``..`` in ``dest`` is rejected."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "repo_url": {
+                    "type": "string",
+                    "description": "HTTPS or SSH git URL to clone.",
+                },
+                "dest": {
+                    "type": "string",
+                    "description": (
+                        "Relative destination directory under workspace_root.  "
+                        "Defaults to the repo's basename (e.g. 'myproj.git' → 'myproj')."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["repo_url"],
+        },
+        display_name="Cloning repository",
+        toolset=_TOOLSET,
+        is_read_only=False,
+        is_concurrency_safe=False,
+    )
+    async def git_clone(repo_url: str, dest: str = "") -> str:
+        """Clone *repo_url* into *workspace_root*/*dest*.
+
+        Host-allowlist gate and path-traversal gate are enforced here
+        rather than in the sandbox policy — both layers must agree.
+
+        Args:
+            repo_url: HTTPS or SSH git URL.
+            dest: Optional relative destination directory.  When empty,
+                the repo's basename is used.
+
+        Returns:
+            Git output on success, or an error string describing which
+            gate rejected the call.
+        """
+        if not allowed_hosts:
+            return (
+                "Error: git_clone is disabled (GIT_CLONE_ALLOWED_HOSTS is empty). "
+                "Ask the operator to configure an allowlist."
+            )
+
+        host = _extract_git_url_host(repo_url)
+        if host is None:
+            return f"Error: could not parse host from URL {repo_url!r}"
+        if host not in allowed_hosts:
+            return (
+                f"Error: host {host!r} is not in GIT_CLONE_ALLOWED_HOSTS. "
+                f"Allowed: {sorted(allowed_hosts)}"
+            )
+
+        # Path traversal check: resolve dest under workspace_root and
+        # refuse if it escapes.
+        workspace_abs = Path(workspace_root).resolve()
+        if not dest:
+            dest = _default_clone_dest(repo_url)
+        dest_abs = (workspace_abs / dest).resolve()
+        try:
+            dest_abs.relative_to(workspace_abs)
+        except ValueError:
+            return f"Error: destination {dest!r} escapes the workspace root"
+
+        if dest_abs.exists():
+            return f"Error: destination {dest!r} already exists"
+
+        return await _run_git(
+            workspace_root,
+            "clone",
+            repo_url,
+            str(dest_abs),
+            timeout=_GIT_CLONE_TIMEOUT_S,
+        )
+
+    return git_clone
+
+
+def _extract_git_url_host(repo_url: str) -> str | None:
+    """Extract the host component from an HTTPS or SSH git URL.
+
+    Handles both ``https://host/path`` and ``git@host:path`` forms.
+
+    Args:
+        repo_url: The git URL.
+
+    Returns:
+        The host name, or ``None`` if parsing fails.
+    """
+    # Git's scp-style URL: user@host:path/to/repo.git
+    if "@" in repo_url and ":" in repo_url and "://" not in repo_url:
+        after_at = repo_url.split("@", 1)[1]
+        host = after_at.split(":", 1)[0]
+        return host or None
+
+    # Standard URL (https://, ssh://, git://)
+    parsed = urlparse(repo_url)
+    return parsed.hostname
+
+
+def _default_clone_dest(repo_url: str) -> str:
+    """Compute a sensible default destination directory from a repo URL.
+
+    ``https://example.com/org/myproj.git`` → ``myproj``.
+    """
+    # Strip trailing slash, take the last path component, drop ``.git``.
+    tail = repo_url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if tail.endswith(".git"):
+        tail = tail[: -len(".git")]
+    return tail or "repo"
+
+
 # ── Registration ──────────────────────────────────────────────────────
 
 
-def register_git_tools(registry: ToolRegistry, workspace_root: str) -> None:
-    """Register git_diff, git_commit, and git_log tools.
+def register_git_tools(
+    registry: ToolRegistry,
+    workspace_root: str,
+    git_clone_allowed_hosts: str = "",
+) -> None:
+    """Register git tools (diff, commit, log, checkout, clone).
 
     Args:
         registry: The tool registry to populate.
         workspace_root: Working directory for git commands.
+        git_clone_allowed_hosts: Comma/space-separated hostnames that
+            ``git_clone`` accepts.  Empty disables ``git_clone``
+            (fail-closed for security).
     """
     registry.register(_make_git_diff(workspace_root))
     registry.register(_make_git_commit(workspace_root))
     registry.register(_make_git_log(workspace_root))
+    registry.register(_make_git_checkout(workspace_root))
+    allowed = _parse_allowed_hosts(git_clone_allowed_hosts)
+    registry.register(_make_git_clone(workspace_root, allowed))
