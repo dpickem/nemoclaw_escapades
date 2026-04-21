@@ -40,24 +40,50 @@ from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import load_config
+from nemoclaw_escapades.config import AppConfig
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
+from nemoclaw_escapades.runtime import (
+    RuntimeEnvironment,
+    SandboxConfigurationError,
+    detect_runtime_environment,
+)
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import build_full_tool_registry
 
 
 async def main() -> None:
+    # ── 0. Runtime self-check ─────────────────────────────────────
+    # Evaluate sandbox signals *before* config loading so a broken
+    # deployment (OpenShell version drift, gateway misconfigured,
+    # sandbox env vars leaked into a local shell) fails fast with a
+    # structured diagnostic instead of silently booting with the
+    # wrong defaults.
+    runtime = detect_runtime_environment()
+    if runtime.classification is RuntimeEnvironment.INCONSISTENT:
+        # Logging isn't configured yet (we haven't loaded config); emit
+        # via the detector's own logger, which uses whatever the root
+        # handler defaults to.  That's fine for a fatal startup error.
+        raise SandboxConfigurationError(runtime)
+
     # ── 1. Configuration ──────────────────────────────────────────
-    # Reads env vars / .env into typed dataclasses.  Inside an
-    # OpenShell sandbox, credentials are proxy placeholders resolved
-    # at HTTP-request time — the config layer never sees real secrets.
-    config = load_config()
+    # Dataclass defaults → YAML overlay (``/app/config.yaml`` in the
+    # sandbox, absent locally) → env vars.  Inside the sandbox,
+    # credentials are L7-proxy placeholders resolved at HTTP-request
+    # time — the config layer never sees real secrets.
+    config = AppConfig.load()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
     logger = get_logger("main")
-    logger.info("Starting NemoClaw agent loop")
+    logger.info(
+        "Starting NemoClaw agent loop",
+        extra={
+            "runtime_classification": runtime.classification.value,
+            "runtime_signals_present": list(runtime.signals_present),
+            "runtime_signals_missing": list(runtime.signals_missing),
+        },
+    )
 
     # ── 2. Inference backend ──────────────────────────────────────
     backend = InferenceHubBackend(config.inference)
