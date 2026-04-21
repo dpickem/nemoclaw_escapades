@@ -84,9 +84,6 @@ class TestCliMode:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # Disable audit to avoid SQLite path setup inside the test
-        # process.  The CLI mode still exercises everything above.
-        monkeypatch.setenv("AUDIT_ENABLED", "false")
         workspace = tmp_path / "ws"
         workspace.mkdir()
 
@@ -95,7 +92,6 @@ class TestCliMode:
             workspace_root: str | None,
             config: Any,
             backend: Any,
-            audit: Any,
             logger: Any,
         ) -> int:
             # We patch *_run_cli_mode* itself so the test stays in
@@ -134,9 +130,10 @@ class TestCliMode:
         captured: dict[str, Any] = {}
 
         class _FakeAgentLoop:
-            def __init__(self, *, backend: Any, tools: Any, **_: Any) -> None:
+            def __init__(self, *, backend: Any, tools: Any, audit: Any = None, **_: Any) -> None:
                 captured["tool_names"] = tools.names
                 captured["backend"] = backend
+                captured["audit"] = audit
 
             async def run(self, *, messages: list[Any], request_id: str) -> Any:
                 captured["system_prompt"] = messages[0]["content"]
@@ -174,7 +171,6 @@ class TestCliMode:
             workspace_root=str(workspace),
             config=config,
             backend=_FakeBackend(),
-            audit=None,
             logger=logger,
         )
         assert rc == 0
@@ -185,6 +181,68 @@ class TestCliMode:
         # The prompt carries the task description and workspace.
         assert "write README" in captured["user_prompt"]
         assert str(workspace) in captured["system_prompt"]
+        # Regression: the sub-agent does NOT open its own AuditDB —
+        # Phase 2's AuditBuffer will flush over NMB to the orchestrator's
+        # single audit DB.  Assert the fake loop received ``audit=None``.
+        assert captured["audit"] is None
+
+    @pytest.mark.asyncio
+    async def test_run_task_never_passes_audit_even_when_config_enables_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: ``_run_task`` constructs ``AgentLoop`` with ``audit=None``.
+
+        Even with ``config.audit.enabled=True`` at the process level,
+        the sub-agent must not open its own DB.  The single-authoritative-
+        audit-DB invariant is enforced by the orchestrator; sub-agents
+        buffer and flush (Phase 2).  Guards against a future edit that
+        reintroduces ``AuditDB`` here.
+        """
+        captured: dict[str, Any] = {}
+
+        class _FakeAgentLoop:
+            def __init__(self, **kwargs: Any) -> None:
+                captured.update(kwargs)
+
+            async def run(self, *, messages: list[Any], request_id: str) -> Any:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": "ok",
+                        "rounds": 1,
+                        "tool_calls_made": 0,
+                        "hit_safety_limit": False,
+                    },
+                )()
+
+        monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoop)
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        from nemoclaw_escapades.config import AppConfig
+
+        # Explicitly enable audit at the config level — the sub-agent
+        # still must not open its own DB.
+        monkeypatch.setenv("AUDIT_ENABLED", "true")
+        config = AppConfig.load()
+        import logging
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        rc = await agent_main._run_cli_mode(
+            task_description="noop",
+            workspace_root=str(workspace),
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        assert rc == 0
+        assert captured["audit"] is None
 
 
 # ── AgentSetupBundle round-trip ─────────────────────────────────────

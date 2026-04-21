@@ -42,7 +42,6 @@ from nemoclaw_escapades.agent.approval import AutoApproval
 from nemoclaw_escapades.agent.loop import AgentLoop
 from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, SourceType
 from nemoclaw_escapades.agent.types import AgentSetupBundle
-from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
 from nemoclaw_escapades.config import AppConfig, load_system_prompt
@@ -110,7 +109,6 @@ async def _run_task(
     identity_prompt: str,
     bundle: AgentSetupBundle,
     config: AppConfig,
-    audit: AuditDB | None,
     logger: object,
 ) -> str:
     """Run one task end-to-end and return the final assistant text.
@@ -141,7 +139,17 @@ async def _run_task(
         # defaults.  Operators can tune a sub-agent's model independently
         # from the orchestrator's via the ``agent_loop.model`` YAML key.
         config=config.agent_loop,
-        audit=audit,
+        # Phase 1 ships the sub-agent without its own ``AuditDB``: the
+        # design (``docs/design_m2b.md`` §13) is that sub-agent tool
+        # calls accumulate in an in-memory ``AuditBuffer`` and flush
+        # to the orchestrator over NMB, which writes them to the
+        # single authoritative audit DB.  Opening a second DB here
+        # would fight the orchestrator for the ``/sandbox/audit.db``
+        # write lock and lose the agent-id attribution.
+        # ``AuditBuffer`` lands in Phase 2 alongside the NMB receive
+        # loop; until then the sub-agent runs without audit.  Tool
+        # invocations still surface in the structured log.
+        audit=None,
         # Sub-agents run inside their own sandbox / workspace, so auto-
         # approve writes — any external containment is provided by the
         # sandbox policy, not the approval gate.  The orchestrator
@@ -174,7 +182,6 @@ async def _run_cli_mode(
     workspace_root: str | None,
     config: AppConfig,
     backend: BackendBase,
-    audit: AuditDB | None,
     logger: object,
 ) -> int:
     """Run a single task from a CLI arg and print the result.
@@ -195,7 +202,7 @@ async def _run_cli_mode(
     tools = _build_tool_registry(config, bundle)
     identity = _load_coding_prompt()
     try:
-        content = await _run_task(backend, tools, identity, bundle, config, audit, logger)
+        content = await _run_task(backend, tools, identity, bundle, config, logger)
     except Exception:  # pragma: no cover - surfaced in logs
         logger.error("Coding agent task failed", exc_info=True)  # type: ignore[attr-defined]
         return 1
@@ -206,7 +213,6 @@ async def _run_cli_mode(
 async def _run_nmb_mode(
     config: AppConfig,
     backend: BackendBase,
-    audit: AuditDB | None,
     logger: object,
     shutdown_event: asyncio.Event,
 ) -> int:
@@ -301,9 +307,13 @@ async def _async_main(argv: list[str] | None = None) -> int:
     2. Config load (dataclass → YAML → env → validate).
     3. Logging setup.
     4. Inference backend.
-    5. Audit DB (optional).
-    6. Dispatch on run mode (CLI or NMB).
-    7. Teardown in reverse order.
+    5. Dispatch on run mode (CLI or NMB).
+    6. Teardown in reverse order.
+
+    The sub-agent deliberately does *not* open its own ``AuditDB``:
+    Phase 2 introduces an ``AuditBuffer`` that flushes over NMB to the
+    orchestrator's single authoritative DB.  See ``docs/design_m2b.md``
+    §13.
     """
     args = _parse_args(argv)
 
@@ -323,14 +333,10 @@ async def _async_main(argv: list[str] | None = None) -> int:
     )
 
     backend = InferenceHubBackend(config.inference)
-    audit: AuditDB | None = None
-    if config.audit.enabled:
-        audit = AuditDB(
-            str(Path(config.audit.db_path).expanduser()),
-            persist_payloads=config.audit.persist_payloads,
-        )
-        await audit.open()
-        await audit.start_background_writer()
+    # No AuditDB on the sub-agent side: Phase 2 introduces an in-memory
+    # ``AuditBuffer`` that flushes over NMB to the orchestrator's single
+    # authoritative audit DB (``docs/design_m2b.md`` §13).  For Phase 1
+    # the sub-agent's tool calls are captured via the structured log.
 
     shutdown_event = asyncio.Event()
 
@@ -349,20 +355,15 @@ async def _async_main(argv: list[str] | None = None) -> int:
                 workspace_root=args.workspace,
                 config=config,
                 backend=backend,
-                audit=audit,
                 logger=logger,
             )
         return await _run_nmb_mode(
             config=config,
             backend=backend,
-            audit=audit,
             logger=logger,
             shutdown_event=shutdown_event,
         )
     finally:
-        if audit is not None:
-            await audit.stop_background_writer()
-            await audit.close()
         await backend.close()
 
 
