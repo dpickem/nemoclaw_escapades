@@ -71,6 +71,24 @@ class TestGitToolRegistration:
         assert spec is not None
         assert "message" in spec.input_schema.get("required", [])
 
+    def test_include_commit_false_omits_git_commit(self, workspace: Path) -> None:
+        """Sub-agent registry: ``git_commit`` is deliberately excluded.
+
+        Per design §7.1 the orchestrator owns finalisation.  Sub-agents
+        describe their changes and let the orchestrator assemble the
+        commit via its ``push_and_create_pr`` finalisation tool.
+        Registering ``git_commit`` on the sub-agent side would create
+        a second write path against the repo that bypasses the
+        orchestrator's review gate.
+        """
+        reg = ToolRegistry()
+        register_git_tools(reg, str(workspace), include_commit=False)
+        assert "git_commit" not in reg.names
+        # The read + clone tools are still there.
+        assert {"git_diff", "git_log", "git_checkout", "git_clone"}.issubset(
+            set(reg.names)
+        )
+
 
 class TestGitHandlers:
     async def test_diff_in_non_git_dir(self, registry: ToolRegistry) -> None:

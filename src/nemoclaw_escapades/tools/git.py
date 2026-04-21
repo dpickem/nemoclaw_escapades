@@ -441,8 +441,10 @@ def register_git_tools(
     registry: ToolRegistry,
     workspace_root: str,
     git_clone_allowed_hosts: str = "",
+    *,
+    include_commit: bool = True,
 ) -> None:
-    """Register git tools (diff, commit, log, checkout, clone).
+    """Register git tools (diff, log, checkout, clone, optionally commit).
 
     Args:
         registry: The tool registry to populate.
@@ -450,9 +452,18 @@ def register_git_tools(
         git_clone_allowed_hosts: Comma/space-separated hostnames that
             ``git_clone`` accepts.  Empty disables ``git_clone``
             (fail-closed for security).
+        include_commit: When ``True`` (default), registers ``git_commit``
+            alongside the other tools.  The orchestrator-side registry
+            keeps this on because the orchestrator is the component
+            that finalises work (``push_and_create_pr`` composes
+            ``git_commit`` under the hood).  Sub-agents pass ``False``:
+            per design §7.1 they describe their changes and let the
+            orchestrator assemble the commit, so ``git_commit`` is
+            not part of their surface.
     """
     registry.register(_make_git_diff(workspace_root))
-    registry.register(_make_git_commit(workspace_root))
+    if include_commit:
+        registry.register(_make_git_commit(workspace_root))
     registry.register(_make_git_log(workspace_root))
     registry.register(_make_git_checkout(workspace_root))
     allowed = _parse_allowed_hosts(git_clone_allowed_hosts)

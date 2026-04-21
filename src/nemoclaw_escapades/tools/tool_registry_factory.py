@@ -46,7 +46,16 @@ def create_coding_tool_registry(
     *,
     git_clone_allowed_hosts: str = "",
 ) -> ToolRegistry:
-    """Create a registry with just the coding-agent tools.
+    """Create a registry with just the coding sub-agent's tools.
+
+    The sub-agent's git suite is **read-only plus clone**
+    (``git_diff``, ``git_log``, ``git_checkout``, ``git_clone``) —
+    ``git_commit`` is deliberately excluded.  Per design §7.1 the
+    orchestrator owns finalisation: sub-agents report their changes,
+    the orchestrator decides how they land (commit, push, open PR)
+    via its finalization tools.  Giving the sub-agent a direct
+    commit path would create two write sources against the same
+    repository state and bypass the orchestrator's review gate.
 
     Args:
         workspace_root: Absolute path to the workspace directory.
@@ -63,6 +72,7 @@ def create_coding_tool_registry(
         registry,
         workspace_root=workspace_root,
         git_clone_allowed_hosts=git_clone_allowed_hosts,
+        include_git_commit=False,
     )
     return registry
 
@@ -134,12 +144,14 @@ def _register_coding_tools(
     *,
     workspace_root: str,
     git_clone_allowed_hosts: str,
+    include_git_commit: bool = True,
 ) -> None:
     """Register the coding-agent suite onto *registry*.
 
-    Shared by ``create_coding_tool_registry`` (standalone usage) and
-    ``build_full_tool_registry`` (whole-process wiring) so the list of
-    coding tools stays defined in exactly one place.
+    Shared by ``create_coding_tool_registry`` (standalone usage, sub-
+    agents) and ``build_full_tool_registry`` (whole-process wiring,
+    orchestrator) so the list of coding tools stays defined in
+    exactly one place.
 
     Args:
         registry: The registry to populate.
@@ -147,8 +159,18 @@ def _register_coding_tools(
             bash/git tools operate on.
         git_clone_allowed_hosts: Forwarded to ``register_git_tools``;
             empty disables ``git_clone`` (fail-closed).
+        include_git_commit: Forwarded to ``register_git_tools``.
+            Orchestrator-side callers default to ``True``; sub-agents
+            pass ``False`` so ``git_commit`` stays an orchestrator-
+            only capability (see ``create_coding_tool_registry``
+            docstring for the design rationale).
     """
     register_file_tools(registry, workspace_root)
     register_search_tools(registry, workspace_root)
     register_bash_tool(registry, workspace_root)
-    register_git_tools(registry, workspace_root, git_clone_allowed_hosts)
+    register_git_tools(
+        registry,
+        workspace_root,
+        git_clone_allowed_hosts,
+        include_commit=include_git_commit,
+    )

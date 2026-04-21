@@ -185,7 +185,14 @@ class TestGlob:
 
 
 class TestCodingToolRegistry:
-    def test_factory_creates_all_tools(self, workspace: Path) -> None:
+    def test_factory_creates_sub_agent_tool_surface(self, workspace: Path) -> None:
+        """Sub-agent registry covers file / search / bash + read-only git.
+
+        ``git_commit`` is deliberately absent — per design §7.1 the
+        orchestrator owns finalisation and composes commits via its
+        ``push_and_create_pr`` tool.  Sub-agents describe changes
+        and report back; they don't write to repo history directly.
+        """
         reg = create_coding_tool_registry(str(workspace))
         names = set(reg.names)
         assert "read_file" in names
@@ -196,8 +203,10 @@ class TestCodingToolRegistry:
         assert "glob_search" in names
         assert "bash" in names
         assert "git_diff" in names
-        assert "git_commit" in names
         assert "git_log" in names
+        assert "git_checkout" in names
+        assert "git_clone" in names
+        assert "git_commit" not in names
 
 
 # ── Output truncation ─────────────────────────────────────────────────
