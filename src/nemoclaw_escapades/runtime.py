@@ -63,8 +63,33 @@ _ALL_SIGNALS: tuple[str, ...] = (
 _SANDBOX_SIGNAL_THRESHOLD: int = 4
 
 # Below this count → confident ``LOCAL_DEV``.  Between this and the
-# sandbox threshold → ``INCONSISTENT``.
+# sandbox threshold → ``INCONSISTENT``, *unless* the present signals
+# are only from :data:`_BENIGN_LOCAL_ENV_SIGNALS` (see below).
 _LOCAL_DEV_SIGNAL_CEILING: int = 1
+
+# Signals that can show up in a perfectly normal local-dev shell for
+# reasons unrelated to OpenShell — so we shouldn't trip
+# ``INCONSISTENT`` when *only* these are present.
+#
+# Concretely: developers behind a corporate VPN / MITM proxy usually
+# have ``HTTPS_PROXY`` in their shell profile and
+# ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` pointing at the
+# corporate CA their IT team installed.  Two signals, no paths, no
+# DNS — not an OpenShell sandbox, just the user's normal dev
+# environment.  If we classified that as ``INCONSISTENT`` the
+# ``SandboxConfigurationError`` in ``main.py`` would refuse to start
+# for every such developer.
+#
+# Any path signal (``/sandbox`` writable, ``/app/src`` present) or
+# the ``inference.local`` DNS signal *is* OpenShell-specific, so if
+# one of those appears alongside the env signals we keep classifying
+# as ``INCONSISTENT``.
+_BENIGN_LOCAL_ENV_SIGNALS: frozenset[str] = frozenset(
+    {
+        _SIGNAL_HTTPS_PROXY,
+        _SIGNAL_SSL_CERT_BUNDLE,
+    }
+)
 
 # Paths / hostnames the signals inspect.
 _SANDBOX_DIR: Path = Path("/sandbox")
@@ -232,6 +257,15 @@ def _classify(signals_present: tuple[str, ...]) -> tuple[RuntimeEnvironment, str
     if n_present >= _SANDBOX_SIGNAL_THRESHOLD:
         return RuntimeEnvironment.SANDBOX, ""
     if n_present <= _LOCAL_DEV_SIGNAL_CEILING:
+        return RuntimeEnvironment.LOCAL_DEV, ""
+
+    # Corporate-proxy escape hatch: if every present signal is a
+    # ``_BENIGN_LOCAL_ENV_SIGNALS`` member (no path signal, no DNS
+    # signal, no ``OPENSHELL_SANDBOX``), the environment is almost
+    # certainly a developer's normal shell behind a VPN / MITM CA.
+    # Classify as ``LOCAL_DEV`` so the startup self-check doesn't
+    # refuse to run for every developer behind corporate networking.
+    if set(signals_present).issubset(_BENIGN_LOCAL_ENV_SIGNALS):
         return RuntimeEnvironment.LOCAL_DEV, ""
 
     # Between the two thresholds.  Common misdiagnoses, in rough order

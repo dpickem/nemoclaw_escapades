@@ -171,6 +171,49 @@ class TestClassification:
         assert report.classification is RuntimeEnvironment.INCONSISTENT
         assert "gateway didn't inject" in report.likely_cause
 
+    def test_corporate_proxy_dev_is_local_dev_not_inconsistent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Regression: a developer behind a corporate VPN / MITM proxy
+        # usually has HTTPS_PROXY and SSL_CERT_FILE set in their shell
+        # profile.  Two signals, no paths, no DNS, no
+        # OPENSHELL_SANDBOX.  Must classify LOCAL_DEV — otherwise the
+        # startup self-check refuses to run for every such developer.
+        _mock_all_signals(
+            https_proxy=True,
+            ssl_cert=True,
+            openshell_env=False,
+            sandbox_dir=False,
+            app_src=False,
+            inference_dns=False,
+            monkeypatch=monkeypatch,
+        )
+        report = detect_runtime_environment()
+        assert report.classification is RuntimeEnvironment.LOCAL_DEV
+        assert report.likely_cause == ""
+
+    def test_path_signal_alongside_benign_env_is_still_inconsistent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Belt and braces: the corporate-proxy escape hatch must NOT
+        # kick in when any sandbox-specific signal (path, DNS,
+        # OPENSHELL_SANDBOX) is also present.  Here /sandbox is
+        # writable in addition to HTTPS_PROXY + SSL_CERT_FILE — that's
+        # genuinely suspicious and should still flag INCONSISTENT.
+        _mock_all_signals(
+            https_proxy=True,
+            ssl_cert=True,
+            sandbox_dir=True,
+            openshell_env=False,
+            app_src=False,
+            inference_dns=False,
+            monkeypatch=monkeypatch,
+        )
+        report = detect_runtime_environment()
+        assert report.classification is RuntimeEnvironment.INCONSISTENT
+
 
 # ── Exception surface ───────────────────────────────────────────────
 
