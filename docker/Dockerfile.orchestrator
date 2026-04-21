@@ -32,7 +32,11 @@ WORKDIR /app
 #   - sandbox user/group: the supervisor drops to this after applying policies
 #   - iproute2: needed by the supervisor to create network namespaces
 #   - curl: used by test scripts to fetch credentials from the host
-RUN apt-get update && apt-get install -y --no-install-recommends iproute2 curl \
+#   - git: used by the coding agent's git tools (git_diff / git_commit /
+#     git_log / git_checkout / git_clone).  The binary must also be
+#     whitelisted for each git-host endpoint in policies/orchestrator.yaml
+#     or OpenShell's L7 proxy blocks its network calls.
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 curl git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r sandbox && useradd -r -g sandbox -d /app -s /bin/bash sandbox
 

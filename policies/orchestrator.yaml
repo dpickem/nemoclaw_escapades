@@ -166,6 +166,12 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # Allow the coding agent's git_clone / git_checkout tools to reach
+      # this host over HTTPS.  Authenticated clones need credentials in
+      # .gitconfig or via a helper — the L7 proxy's credential-placeholder
+      # resolver only applies to HTTP headers in requests from the other
+      # whitelisted binaries.
+      - { path: /usr/bin/git }
 
   gerrit:
     name: gerrit
@@ -179,6 +185,8 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # See gitlab policy above for the rationale on ``git``.
+      - { path: /usr/bin/git }
 
   github:
     name: github
@@ -196,6 +204,8 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # See gitlab policy above for the rationale on ``git``.
+      - { path: /usr/bin/git }
 
   # Slack user API — uses the user OAuth token (SLACK_USER_TOKEN / xoxp-...),
   # distinct from the bot token used by the connector.  Shares the same

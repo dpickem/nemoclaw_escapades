@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from nemoclaw_escapades.tools.git import (
+    _build_git_env,
     _default_clone_dest,
     _extract_git_url_host,
     _parse_allowed_hosts,
@@ -162,6 +163,38 @@ class TestGitClone:
         )
         assert "already exists" in result.lower()
 
+    def test_description_advertises_approved_hosts(self, workspace: Path) -> None:
+        """The model-visible description lists the configured allowlist.
+
+        Regression: an opaque "operator-configured allowlist" phrasing
+        triggered Claude's safety reasoning and occasionally caused the
+        model to refuse ``git_clone`` claiming the tool didn't exist.
+        Making the approved-host list visible in the tool description
+        gives the model explicit permission language to act on.
+        """
+        reg = ToolRegistry()
+        register_git_tools(
+            reg,
+            str(workspace),
+            git_clone_allowed_hosts="github.com, gitlab.example.com",
+        )
+        desc = reg.get("git_clone").description  # type: ignore[union-attr]
+        assert "Approved hosts: github.com, gitlab.example.com" in desc
+
+    def test_description_marks_disabled_when_allowlist_empty(
+        self, workspace: Path
+    ) -> None:
+        """Empty allowlist → the description explicitly says DISABLED.
+
+        Prevents the model from attempting a call it knows will fail,
+        and gives a clear reason when it reports back to the user.
+        """
+        reg = ToolRegistry()
+        register_git_tools(reg, str(workspace))  # empty allowlist
+        desc = reg.get("git_clone").description  # type: ignore[union-attr]
+        assert "DISABLED" in desc
+        assert "no hosts approved" in desc
+
 
 class TestGitCloneHelpers:
     """Pure-function helpers used by git_clone."""
@@ -199,3 +232,146 @@ class TestGitCloneHelpers:
 
     def test_default_dest_scp_style(self) -> None:
         assert _default_clone_dest("git@github.com:foo/myproj.git") == "myproj"
+
+
+class TestGitEnvBackfill:
+    """``_build_git_env`` backfills ``GIT_SSL_CAINFO`` from the sandbox CA bundle.
+
+    Sandbox CAs are exposed as ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE``
+    by OpenShell — env var names Python and curl honour.  Git has its
+    own namespace and would otherwise fall back to the Debian system
+    trust store, which doesn't contain OpenShell's CA.  The backfill
+    makes every git invocation (``clone`` / ``fetch`` / ``push`` / …)
+    trust the proxy-presented cert without each tool setting the env
+    var itself.
+    """
+
+    def test_sets_git_ssl_cainfo_from_ssl_cert_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/openshell-ca.pem")
+        monkeypatch.delenv("GIT_SSL_CAINFO", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        env = _build_git_env()
+        assert env["GIT_SSL_CAINFO"] == "/etc/ssl/openshell-ca.pem"
+
+    def test_ssl_cert_file_preferred_over_requests_ca_bundle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/preferred.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/ssl/fallback.pem")
+        monkeypatch.delenv("GIT_SSL_CAINFO", raising=False)
+        env = _build_git_env()
+        assert env["GIT_SSL_CAINFO"] == "/etc/ssl/preferred.pem"
+
+    def test_falls_back_to_requests_ca_bundle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/ssl/fallback.pem")
+        monkeypatch.delenv("GIT_SSL_CAINFO", raising=False)
+        env = _build_git_env()
+        assert env["GIT_SSL_CAINFO"] == "/etc/ssl/fallback.pem"
+
+    def test_does_not_clobber_existing_git_ssl_cainfo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("GIT_SSL_CAINFO", "/operator/choice.pem")
+        monkeypatch.setenv("SSL_CERT_FILE", "/should/not/be/used.pem")
+        env = _build_git_env()
+        assert env["GIT_SSL_CAINFO"] == "/operator/choice.pem"
+
+    def test_noop_when_no_ca_bundle_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Local-dev baseline: no sandbox signals → no backfill, git
+        # uses its default system trust store.
+        for key in ("GIT_SSL_CAINFO", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            monkeypatch.delenv(key, raising=False)
+        env = _build_git_env()
+        assert "GIT_SSL_CAINFO" not in env
+
+    def test_env_is_a_copy_of_os_environ(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Regression guard: ``_build_git_env`` must return a *copy* —
+        # mutating it must not leak into the parent process's
+        # ``os.environ``.  Otherwise a backfill for one git call would
+        # poison every subsequent Python HTTPS request in-process.
+        import os
+
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/openshell-ca.pem")
+        monkeypatch.delenv("GIT_SSL_CAINFO", raising=False)
+        env = _build_git_env()
+        assert "GIT_SSL_CAINFO" in env
+        assert "GIT_SSL_CAINFO" not in os.environ
+
+
+class TestGitSubprocessEnvWiring:
+    """``_run_git`` actually passes the backfilled env to the subprocess.
+
+    ``_build_git_env`` is unit-tested above; this pair of tests covers
+    the wiring at the ``create_subprocess_exec`` call site — easy to
+    regress if someone refactors ``_run_git``.
+    """
+
+    async def test_git_subprocess_receives_backfilled_env(
+        self,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/openshell-ca.pem")
+        monkeypatch.delenv("GIT_SSL_CAINFO", raising=False)
+        captured_env: dict[str, str] = {}
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        async def _fake_exec(*_args: object, **kwargs: object) -> object:
+            env_kwarg = kwargs.get("env")
+            assert isinstance(env_kwarg, dict)
+            captured_env.update(env_kwarg)
+            return _FakeProc()
+
+        import nemoclaw_escapades.tools.git as git_mod
+
+        monkeypatch.setattr(git_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        # Any git invocation exercises the same path; use the cheapest.
+        await git_mod._run_git(str(workspace), "log", "--oneline", "-1")
+        assert captured_env.get("GIT_SSL_CAINFO") == "/etc/ssl/openshell-ca.pem"
+
+    async def test_git_subprocess_env_unchanged_in_local_dev(
+        self,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for key in ("GIT_SSL_CAINFO", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            monkeypatch.delenv(key, raising=False)
+        captured_env: dict[str, str] = {}
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        async def _fake_exec(*_args: object, **kwargs: object) -> object:
+            env_kwarg = kwargs.get("env")
+            assert isinstance(env_kwarg, dict)
+            captured_env.update(env_kwarg)
+            return _FakeProc()
+
+        import nemoclaw_escapades.tools.git as git_mod
+
+        monkeypatch.setattr(git_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        await git_mod._run_git(str(workspace), "log", "--oneline", "-1")
+        assert "GIT_SSL_CAINFO" not in captured_env
