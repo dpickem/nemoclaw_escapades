@@ -59,6 +59,8 @@ from slack_bolt.async_app import AsyncApp
 
 from nemoclaw_escapades.connectors.base import ConnectorBase, MessageHandler
 from nemoclaw_escapades.models.types import (
+    APPROVAL_ACTION_APPROVE,
+    APPROVAL_ACTION_DENY,
     ActionBlock,
     ActionPayload,
     ConfirmBlock,
@@ -257,6 +259,14 @@ class SlackConnector(ConnectorBase):
         self._ERROR_WINDOW_S = 60.0
         self._ERROR_MAX_PER_WINDOW = 3
 
+        # Tracks the most recent live approval-prompt message per thread
+        # so the connector can mark the old prompt as superseded when a
+        # new one supersedes it, and remove buttons after Approve / Deny.
+        # Keyed by the conversation ``thread_key`` (thread_ts for threaded
+        # messages, top-level ts otherwise); value is the ``(channel,
+        # message_ts)`` of the live approval message.
+        self._thread_approval_msg: dict[str, tuple[str, str]] = {}
+
         self._register_listeners()
 
     # ------------------------------------------------------------------
@@ -405,6 +415,12 @@ class SlackConnector(ConnectorBase):
         """
         channel = request.channel_id
         thread_ts = request.thread_ts
+        # Key used to correlate live approval prompts with follow-up
+        # clicks.  Mirrors the orchestrator's ``thread_key`` — the
+        # Slack thread_ts when present, otherwise a synthetic key
+        # anchored on the originating request id so standalone
+        # (non-threaded) messages don't collide across channels.
+        thread_key = thread_ts or f"{channel}:{request.request_id}"
 
         # 1. Post a transient "Thinking…" placeholder so the user gets
         #    instant visual feedback while the orchestrator works.
@@ -443,6 +459,34 @@ class SlackConnector(ConnectorBase):
                     pass
             return
 
+        # 4b. Handle approval button lifecycle before we post anything.
+        #     Valid Approve / Deny clicks update the clicked message to
+        #     its consumed state ("✓ Approved — executing" / "✗ Denied");
+        #     stale clicks carry ``suppress_post=True`` and are dropped
+        #     silently so the user isn't spammed with "No pending write
+        #     operation found" replies.
+        approval_outcome = self._approval_click_outcome(request)
+        if approval_outcome and not response.suppress_post:
+            await self._update_clicked_approval(client, request, approval_outcome)
+            self._thread_approval_msg.pop(thread_key, None)
+
+        # 4c. Suppressed response: delete the thinking placeholder and
+        #     skip posting.  Used for stale-click no-ops.
+        if response.suppress_post:
+            if thinking_ts:
+                try:
+                    await client.chat_delete(channel=channel, ts=thinking_ts)
+                except Exception:
+                    logger.debug("Failed to delete thinking placeholder", exc_info=True)
+            return
+
+        # 4d. When we're about to post a brand-new approval prompt in
+        #     a thread that already has one live, mark the prior prompt
+        #     as superseded so the user can tell at a glance which
+        #     buttons are still current.
+        if self._is_approval_prompt(response):
+            await self._supersede_prior_approval(client, thread_key)
+
         # 5. Render the platform-neutral RichResponse into Block Kit JSON.
         blocks = self.render(response)
         fallback_text = self._extract_fallback_text(response)
@@ -450,13 +494,19 @@ class SlackConnector(ConnectorBase):
         # 6. Swap the placeholder with the real content (or post a new
         #    message if the placeholder was never created).
         if thinking_ts:
-            await self._update_message(
+            posted_ts = await self._update_message(
                 client, channel, thinking_ts, fallback_text, blocks, request.request_id
             )
         else:
-            await self._post_message(
+            posted_ts = await self._post_message(
                 client, channel, thread_ts, fallback_text, blocks, request.request_id
             )
+
+        # 7. Record the live approval message's ts for later lifecycle
+        #    updates (supersede / consume).  Only set when we actually
+        #    posted an approval prompt and know the message's ts.
+        if self._is_approval_prompt(response) and posted_ts:
+            self._thread_approval_msg[thread_key] = (channel, posted_ts)
 
     def _is_error_rate_limited(self, channel: str) -> bool:
         """Check if error responses for this channel have exceeded the limit."""
@@ -497,7 +547,7 @@ class SlackConnector(ConnectorBase):
         text: str,
         blocks: list[dict[str, Any]],
         request_id: str = "",
-    ) -> None:
+    ) -> str | None:
         """Replace an existing message (the thinking placeholder) in-place.
 
         Falls back to posting a new message if the update fails.
@@ -509,6 +559,12 @@ class SlackConnector(ConnectorBase):
             text:       Plain-text fallback.
             blocks:     Block Kit JSON dicts for the updated message.
             request_id: Correlation ID for structured logging.
+
+        Returns:
+            The ts of the (still-in-place) message on success, or the ts
+            of the fallback post, or ``None`` if posting also failed.
+            Callers use this to correlate posted approval prompts with
+            later button clicks (see ``_thread_approval_msg``).
         """
         try:
             await client.chat_update(
@@ -521,12 +577,13 @@ class SlackConnector(ConnectorBase):
                 "Response sent (updated thinking message)",
                 extra={"request_id": request_id, "channel_id": channel, "ts": ts},
             )
+            return ts
         except Exception:
             logger.warning(
                 "Failed to update thinking message, posting new message",
                 exc_info=True,
             )
-            await self._post_message(client, channel, None, text, blocks, request_id)
+            return await self._post_message(client, channel, None, text, blocks, request_id)
 
     async def _post_message(
         self,
@@ -536,7 +593,7 @@ class SlackConnector(ConnectorBase):
         text: str,
         blocks: list[dict[str, Any]],
         request_id: str = "",
-    ) -> None:
+    ) -> str | None:
         """Post a new message (fallback when thinking update fails).
 
         Args:
@@ -546,9 +603,12 @@ class SlackConnector(ConnectorBase):
             text:       Plain-text fallback.
             blocks:     Block Kit JSON dicts.
             request_id: Correlation ID for structured logging.
+
+        Returns:
+            The posted message's ``ts`` on success, or ``None`` on failure.
         """
         try:
-            await client.chat_postMessage(
+            resp = await client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
                 text=text or "…",
@@ -558,6 +618,7 @@ class SlackConnector(ConnectorBase):
                 "Response sent (new message)",
                 extra={"request_id": request_id, "channel_id": channel, "thread_ts": thread_ts},
             )
+            return cast(str | None, resp.get("ts"))
         except Exception:
             logger.error(
                 "Failed to send Slack reply",
@@ -566,6 +627,105 @@ class SlackConnector(ConnectorBase):
                     "channel_id": channel,
                     "error_category": "connector_error",
                 },
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Approval-button lifecycle
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_approval_prompt(response: RichResponse) -> bool:
+        """Return ``True`` if *response* is a pending-write approval prompt.
+
+        Detected by the presence of an Approve button on one of the
+        response's action blocks.  Connectors use this to apply
+        approval-specific UI lifecycle rules (supersede the prior
+        prompt, mark consumed after click) without the orchestrator
+        having to tag the response explicitly.
+        """
+        return any(
+            isinstance(block, ActionBlock)
+            and any(btn.action_id == APPROVAL_ACTION_APPROVE for btn in block.actions)
+            for block in response.blocks
+        )
+
+    @staticmethod
+    def _approval_click_outcome(request: NormalizedRequest) -> str:
+        """Return the consumed-state label for an approval-button click.
+
+        ``"Approved — executing"`` for an Approve click, ``"Denied"``
+        for a Deny click, empty string when the request is not an
+        approval click.  Used to rewrite the clicked message so stale
+        Approve buttons can't sit around looking live.
+        """
+        action = request.action
+        if action is None:
+            return ""
+        if action.action_id == APPROVAL_ACTION_APPROVE:
+            return "Approved — executing"
+        if action.action_id == APPROVAL_ACTION_DENY:
+            return "Denied"
+        return ""
+
+    async def _update_clicked_approval(
+        self,
+        client: Any,
+        request: NormalizedRequest,
+        outcome: str,
+    ) -> None:
+        """Rewrite the clicked approval message to its consumed state.
+
+        Strips the Approve / Deny buttons and replaces them with a
+        one-line status so the user can tell at a glance which prompts
+        are still actionable.  Failures are logged at DEBUG — the main
+        response still posts regardless.
+        """
+        raw = request.raw_event
+        message = raw.get("message") if isinstance(raw, dict) else None
+        if not isinstance(message, dict):
+            return
+        message_ts = message.get("ts")
+        if not message_ts:
+            return
+        icon = ":white_check_mark:" if outcome.startswith("Approved") else ":x:"
+        try:
+            await client.chat_update(
+                channel=request.channel_id,
+                ts=message_ts,
+                text=f"{icon} {outcome}",
+                blocks=[_section(f"{icon} _{outcome}_")],
+            )
+        except Exception:
+            logger.debug(
+                "Failed to update consumed approval message",
+                extra={"channel_id": request.channel_id, "ts": message_ts},
+                exc_info=True,
+            )
+
+    async def _supersede_prior_approval(self, client: Any, thread_key: str) -> None:
+        """Mark the previous live approval prompt for *thread_key* as superseded.
+
+        A new approval prompt is about to be posted; rewrite the prior
+        one to strip its buttons so the user doesn't click both.  No-op
+        when no prior prompt is tracked for the thread.
+        """
+        prior = self._thread_approval_msg.pop(thread_key, None)
+        if prior is None:
+            return
+        channel, ts = prior
+        try:
+            await client.chat_update(
+                channel=channel,
+                ts=ts,
+                text="Superseded — see newer approval prompt below",
+                blocks=[_section(":arrow_down: _Superseded — see newer approval prompt below._")],
+            )
+        except Exception:
+            logger.debug(
+                "Failed to supersede prior approval message",
+                extra={"channel_id": channel, "ts": ts},
                 exc_info=True,
             )
 

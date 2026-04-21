@@ -62,6 +62,8 @@ from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import AgentLoopConfig, OrchestratorConfig, load_system_prompt
 from nemoclaw_escapades.connectors.base import StatusCallback
 from nemoclaw_escapades.models.types import (
+    APPROVAL_ACTION_APPROVE,
+    APPROVAL_ACTION_DENY,
     ActionBlock,
     ActionButton,
     ErrorCategory,
@@ -87,12 +89,6 @@ if TYPE_CHECKING:
     from nemoclaw_escapades.audit.db import AuditDB
 
 logger = get_logger("orchestrator")
-
-# Slack ``action_id`` values attached to the Approve / Deny buttons
-# rendered by ``_build_approval_response``.  The connector routes
-# button clicks back to ``handle()`` keyed on these IDs.
-APPROVAL_ACTION_APPROVE = "approve_write"
-APPROVAL_ACTION_DENY = "deny_write"
 
 
 class Orchestrator:
@@ -537,11 +533,22 @@ class Orchestrator:
             a new approval prompt if a cascading write was detected.
         """
         # Pop atomically — if the user double-clicks Approve, the second
-        # click gets the "no pending" message instead of re-executing.
+        # click finds no pending approval and we return a suppressed
+        # response so the connector silently drops it instead of posting
+        # a confusing "No pending write operation" reply.
         pending = self._pending_approvals.pop(thread_key, None)
         if not pending:
-            return self._shape_response(
-                request, "No pending write operation found for this thread."
+            logger.info(
+                "Stale Approve click — no pending approval",
+                extra={
+                    "request_id": request.request_id,
+                    "thread_key": thread_key,
+                },
+            )
+            return RichResponse(
+                channel_id=request.channel_id,
+                thread_ts=request.thread_ts,
+                suppress_post=True,
             )
 
         if self._agent_loop is None:
@@ -618,15 +625,30 @@ class Orchestrator:
         # model's tool-call attempt are both dropped, keeping the
         # thread history clean for the next turn.
         pending = self._pending_approvals.pop(thread_key, None)
-        if pending:
+        if not pending:
+            # Stale Deny click (e.g. user clicks an old Deny button after
+            # the approval was already consumed / superseded).  Suppress
+            # the reply rather than posting a noisy "no pending" note.
             logger.info(
-                "User denied write operation",
+                "Stale Deny click — no pending approval",
                 extra={
-                    "request_id": pending.request_id,
+                    "request_id": request.request_id,
                     "thread_key": thread_key,
-                    "tool_calls": [tc.name for tc in pending.tool_calls],
                 },
             )
+            return RichResponse(
+                channel_id=request.channel_id,
+                thread_ts=request.thread_ts,
+                suppress_post=True,
+            )
+        logger.info(
+            "User denied write operation",
+            extra={
+                "request_id": pending.request_id,
+                "thread_key": thread_key,
+                "tool_calls": [tc.name for tc in pending.tool_calls],
+            },
+        )
         return self._shape_response(request, "Got it — the write operation was cancelled.")
 
     def _build_approval_response(

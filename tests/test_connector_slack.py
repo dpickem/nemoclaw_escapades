@@ -10,11 +10,15 @@ from nemoclaw_escapades.connectors.slack import (
     thinking_blocks,
 )
 from nemoclaw_escapades.models.types import (
+    APPROVAL_ACTION_APPROVE,
+    APPROVAL_ACTION_DENY,
     ActionBlock,
     ActionButton,
+    ActionPayload,
     ConfirmBlock,
     FormBlock,
     FormField,
+    NormalizedRequest,
     RichResponse,
     TextBlock,
 )
@@ -344,3 +348,81 @@ class TestThinkingBlocks:
         assert blocks[0]["type"] == "section"
         assert "Thinking" in blocks[0]["text"]["text"]
         assert ":hourglass_flowing_sand:" in blocks[0]["text"]["text"]
+
+
+class TestApprovalPromptDetection:
+    """``_is_approval_prompt`` identifies approval responses by action_id."""
+
+    def test_detects_approve_button(self) -> None:
+        resp = RichResponse(
+            channel_id="C1",
+            thread_ts="t1",
+            blocks=[
+                TextBlock(text="approval please"),
+                ActionBlock(
+                    actions=[
+                        ActionButton(
+                            label="Approve",
+                            action_id=APPROVAL_ACTION_APPROVE,
+                            value="t1",
+                        ),
+                        ActionButton(
+                            label="Deny",
+                            action_id=APPROVAL_ACTION_DENY,
+                            value="t1",
+                        ),
+                    ]
+                ),
+            ],
+        )
+        assert SlackConnector._is_approval_prompt(resp) is True
+
+    def test_rejects_normal_response(self) -> None:
+        resp = RichResponse(channel_id="C1", blocks=[TextBlock(text="hi")])
+        assert SlackConnector._is_approval_prompt(resp) is False
+
+    def test_rejects_response_with_non_approval_buttons(self) -> None:
+        resp = RichResponse(
+            channel_id="C1",
+            blocks=[
+                ActionBlock(
+                    actions=[
+                        ActionButton(label="Retry", action_id="retry_btn", value="x"),
+                    ]
+                ),
+            ],
+        )
+        assert SlackConnector._is_approval_prompt(resp) is False
+
+
+class TestApprovalClickOutcome:
+    """``_approval_click_outcome`` maps click action_ids to consumed labels."""
+
+    def _make(self, action_id: str | None) -> NormalizedRequest:
+        action = ActionPayload(action_id=action_id, value="") if action_id else None
+        return NormalizedRequest(
+            text="",
+            user_id="U",
+            channel_id="C1",
+            timestamp=0.0,
+            source="slack",
+            action=action,
+        )
+
+    def test_approve_click(self) -> None:
+        req = self._make(APPROVAL_ACTION_APPROVE)
+        assert SlackConnector._approval_click_outcome(req) == "Approved — executing"
+
+    def test_deny_click(self) -> None:
+        req = self._make(APPROVAL_ACTION_DENY)
+        assert SlackConnector._approval_click_outcome(req) == "Denied"
+
+    def test_non_approval_click(self) -> None:
+        req = self._make("form_submit")
+        assert SlackConnector._approval_click_outcome(req) == ""
+
+    def test_text_message_not_a_click(self) -> None:
+        # No action → outcome is empty; the connector treats this as a
+        # regular message, not an approval lifecycle event.
+        req = self._make(None)
+        assert SlackConnector._approval_click_outcome(req) == ""
