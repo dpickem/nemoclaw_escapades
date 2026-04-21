@@ -61,7 +61,7 @@ def _mock_all_signals(
         lambda: sandbox_dir,
     )
     monkeypatch.setattr(
-        "nemoclaw_escapades.runtime._check_app_src_readonly",
+        "nemoclaw_escapades.runtime._check_app_src_present",
         lambda: app_src,
     )
     monkeypatch.setattr(

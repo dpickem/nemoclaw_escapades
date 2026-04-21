@@ -24,10 +24,10 @@ self-check.
 
 from __future__ import annotations
 
-import enum
 import os
 import socket
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from nemoclaw_escapades.observability.logging import get_logger
@@ -41,7 +41,11 @@ logger = get_logger("runtime")
 # so unit tests and log-inspection tooling have one source of truth.
 _SIGNAL_OPENSHELL_ENV: str = "OPENSHELL_SANDBOX"
 _SIGNAL_SANDBOX_DIR: str = "sandbox_dir_writable"
-_SIGNAL_APP_SRC_READONLY: str = "app_src_readonly"
+# Named "present" rather than "readonly": the check is just
+# ``is_dir()``; Landlock enforcement happens externally.  The old
+# ``_SIGNAL_APP_SRC_READONLY`` name implied a stricter check than
+# is performed, which was misleading to readers of structured logs.
+_SIGNAL_APP_SRC_PRESENT: str = "app_src_present"
 _SIGNAL_HTTPS_PROXY: str = "https_proxy_env"
 _SIGNAL_SSL_CERT_BUNDLE: str = "ssl_cert_bundle_env"
 _SIGNAL_INFERENCE_DNS: str = "inference_local_resolves"
@@ -49,7 +53,7 @@ _SIGNAL_INFERENCE_DNS: str = "inference_local_resolves"
 _ALL_SIGNALS: tuple[str, ...] = (
     _SIGNAL_OPENSHELL_ENV,
     _SIGNAL_SANDBOX_DIR,
-    _SIGNAL_APP_SRC_READONLY,
+    _SIGNAL_APP_SRC_PRESENT,
     _SIGNAL_HTTPS_PROXY,
     _SIGNAL_SSL_CERT_BUNDLE,
     _SIGNAL_INFERENCE_DNS,
@@ -97,11 +101,14 @@ _APP_SRC_DIR: Path = Path("/app/src")
 _INFERENCE_DNS_NAME: str = "inference.local"
 
 
-class RuntimeEnvironment(str, enum.Enum):
+class RuntimeEnvironment(StrEnum):
     """Classification result from :func:`detect_runtime_environment`.
 
-    Inherits from ``str`` so it's ergonomic in structured logs and
-    equality comparisons with plain strings.
+    ``StrEnum`` makes the member values ergonomic in structured logs
+    and equality comparisons with plain strings.  Mirrors
+    :class:`nemoclaw_escapades.models.types.ErrorCategory` /
+    :class:`nemoclaw_escapades.models.types.MessageRole` so the
+    codebase stays internally consistent.
     """
 
     LOCAL_DEV = "LOCAL_DEV"
@@ -165,13 +172,13 @@ def _check_sandbox_dir_writable() -> bool:
     return _SANDBOX_DIR.is_dir() and os.access(_SANDBOX_DIR, os.W_OK)
 
 
-def _check_app_src_readonly() -> bool:
-    """``/app/src`` exists (Dockerfile copied the app in) and is read-only.
+def _check_app_src_present() -> bool:
+    """``/app/src`` exists where the Dockerfile copied the app in.
 
     Presence alone is evidence the container was built by our
-    Dockerfile.  We don't require read-only-ness to be *enforced* at
-    Landlock level — just that the directory exists where the image
-    put it.
+    Dockerfile.  Landlock / filesystem policy enforce read-only-ness
+    externally; this signal just verifies the image shape is what we
+    expect.
     """
     return _APP_SRC_DIR.is_dir()
 
@@ -231,8 +238,8 @@ def _evaluate_signal(name: str) -> bool:
         return _check_openshell_env()
     if name == _SIGNAL_SANDBOX_DIR:
         return _check_sandbox_dir_writable()
-    if name == _SIGNAL_APP_SRC_READONLY:
-        return _check_app_src_readonly()
+    if name == _SIGNAL_APP_SRC_PRESENT:
+        return _check_app_src_present()
     if name == _SIGNAL_HTTPS_PROXY:
         return _check_https_proxy_env()
     if name == _SIGNAL_SSL_CERT_BUNDLE:
@@ -284,7 +291,7 @@ def _classify(signals_present: tuple[str, ...]) -> tuple[RuntimeEnvironment, str
     )
     has_path_signals = (
         _SIGNAL_SANDBOX_DIR in signals_present
-        or _SIGNAL_APP_SRC_READONLY in signals_present
+        or _SIGNAL_APP_SRC_PRESENT in signals_present
     )
     if has_env_signals and not has_path_signals:
         causes.append(

@@ -31,8 +31,9 @@ See also:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from nemoclaw_escapades.models.types import Message
 
@@ -124,20 +125,26 @@ class AgentSetupBundle:
     workspace_root: str
     source_type: str = "agent"
 
-    def to_dict(self) -> dict[str, str]:
-        """Serialise to a JSON-safe dict for NMB transport."""
-        return {
-            "task_id": self.task_id,
-            "agent_id": self.agent_id,
-            "parent_agent_id": self.parent_agent_id,
-            "task_description": self.task_description,
-            "workspace_root": self.workspace_root,
-            "source_type": self.source_type,
-        }
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-safe dict for NMB transport.
+
+        Thin wrapper around :func:`dataclasses.asdict` — kept as an
+        explicit method so the serde surface matches the custom
+        :meth:`from_dict` below (which needs explicit handling of
+        missing required fields).
+        """
+        return dataclasses.asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, str]) -> AgentSetupBundle:
+    def from_dict(cls, payload: dict[str, Any]) -> AgentSetupBundle:
         """Deserialise from an NMB payload dict.
+
+        Dataclasses don't provide a built-in ``from_dict`` that fails
+        loudly on a missing required field.  We want the "missing
+        required field in a ``task.assign`` payload" case to raise
+        rather than silently construct with defaults, so this stays
+        custom — one ``[key]`` lookup per required field, one
+        ``.get(..., default)`` for the one optional field.
 
         Raises:
             KeyError: If a required field is missing.
