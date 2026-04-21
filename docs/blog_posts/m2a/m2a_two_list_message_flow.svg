@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="780" viewBox="0 0 1600 780">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 17px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .msgRole { fill: #0f172a; font: 700 13px 'Courier New', monospace; }
+      .msgText { fill: #475569; font: 500 13px 'Courier New', monospace; }
+      .flowLabel { fill: #1d4ed8; font: 700 14px Arial, sans-serif; }
+      .droppedLabel { fill: #b91c1c; font: 700 14px Arial, sans-serif; }
+      .noteText { fill: #475569; font: 500 14px Arial, sans-serif; font-style: italic; }
+      .arrow { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#blueHead); }
+      .arrowRed { stroke: #dc2626; stroke-width: 2.5; fill: none; stroke-dasharray: 8 6; marker-end: url(#redHead); }
+      .arrowGrey { stroke: #64748b; stroke-width: 2; fill: none; marker-end: url(#greyHead); }
+    </style>
+    <marker id="blueHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="redHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+    </marker>
+    <marker id="greyHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="780"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Two-List Message Flow</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">Thread history is permanent. Working messages are ephemeral. Tool round-trips belong to the second list, never the first.</text>
+
+  <!-- Top half: Permanent thread history -->
+  <rect x="80" y="120" width="1440" height="260" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="120" width="620" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="146">LayeredPromptBuilder._thread_history  (permanent)</text>
+  <text class="noteText" x="720" y="146">keyed by thread_ts &#183; capped at max_thread_history &#183; only user / assistant</text>
+
+  <!-- Messages in history -->
+  <rect x="110" y="180" width="260" height="70" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="msgRole" x="125" y="205">user</text>
+  <text class="msgText" x="125" y="228">"Check auth.py"</text>
+
+  <rect x="400" y="180" width="260" height="70" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="msgRole" x="415" y="205">assistant</text>
+  <text class="msgText" x="415" y="228">"It validates tokens via ..."</text>
+
+  <rect x="690" y="180" width="260" height="70" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="msgRole" x="705" y="205">user</text>
+  <text class="msgText" x="705" y="228">"Refactor the helpers."</text>
+
+  <rect x="980" y="180" width="260" height="70" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="msgRole" x="995" y="205">assistant</text>
+  <text class="msgText" x="995" y="228">"Done -- consolidated into..."</text>
+
+  <!-- Next turn marker -->
+  <rect x="1270" y="180" width="220" height="70" rx="10" fill="#ffffff" stroke="#93c5fd" stroke-dasharray="6 4"/>
+  <text class="msgRole" x="1285" y="205">user (new)</text>
+  <text class="msgText" x="1285" y="228">"Now commit it."</text>
+
+  <text class="cardText" x="110" y="300">messages_for_inference(thread_key, user_text) returns:</text>
+  <text class="msgText" x="110" y="330">[ system,  ...capped history...,  user (new) ]</text>
+  <text class="noteText" x="110" y="358">&#8627; this is the starting message list handed to AgentLoop.run()</text>
+
+  <!-- Arrow from top to bottom -->
+  <path class="arrow" d="M800 380 L800 430"/>
+  <text class="flowLabel" x="820" y="410">AgentLoop.run()</text>
+
+  <!-- Bottom half: Ephemeral working messages -->
+  <rect x="80" y="440" width="1440" height="260" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="440" width="480" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="466">AgentLoop working_messages  (ephemeral)</text>
+  <text class="noteText" x="570" y="466">one per run() call &#183; grows as tools execute &#183; discarded on return</text>
+
+  <rect x="110" y="500" width="170" height="60" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="msgRole" x="125" y="522">system</text>
+  <text class="msgText" x="125" y="542">4-layer prompt</text>
+
+  <rect x="300" y="500" width="170" height="60" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="msgRole" x="315" y="522">...history...</text>
+  <text class="msgText" x="315" y="542">user/assistant</text>
+
+  <rect x="490" y="500" width="170" height="60" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="msgRole" x="505" y="522">user</text>
+  <text class="msgText" x="505" y="542">"Now commit it."</text>
+
+  <rect x="680" y="500" width="220" height="60" rx="10" fill="#fef3c7" stroke="#fcd34d"/>
+  <text class="msgRole" x="695" y="522">assistant + tool_calls</text>
+  <text class="msgText" x="695" y="542">[git_diff, read_file]</text>
+
+  <rect x="920" y="500" width="170" height="60" rx="10" fill="#fecaca" stroke="#fca5a5"/>
+  <text class="msgRole" x="935" y="522">tool (git_diff)</text>
+  <text class="msgText" x="935" y="542">"diff --git a/auth.py"</text>
+
+  <rect x="1110" y="500" width="170" height="60" rx="10" fill="#fecaca" stroke="#fca5a5"/>
+  <text class="msgRole" x="1125" y="522">tool (read_file)</text>
+  <text class="msgText" x="1125" y="542">"def validate()..."</text>
+
+  <rect x="1300" y="500" width="200" height="60" rx="10" fill="#dcfce7" stroke="#86efac"/>
+  <text class="msgRole" x="1315" y="522">assistant (final)</text>
+  <text class="msgText" x="1315" y="542">"Committed as a3f1b9c."</text>
+
+  <text class="cardText" x="110" y="605">After run() returns:  AgentLoopResult(content=&quot;Committed as a3f1b9c.&quot;, working_messages=[...all of the above...])</text>
+
+  <!-- Dropped path: red arrow from the tool-result cards down to the DROPPED label -->
+  <path class="arrowRed" d="M1010 560 L720 650"/>
+  <text class="droppedLabel" x="110" y="655">tool_calls + tool results DROPPED on commit</text>
+  <text class="noteText" x="110" y="678">(otherwise a large read_file blows every future turn's context)</text>
+
+  <!-- Commit path: grey arrow from the final card up to the history box -->
+  <path class="arrowGrey" d="M1400 500 L1400 385"/>
+  <text class="flowLabel" x="1490" y="655" text-anchor="end">commit_turn(user_text, result.content)</text>
+  <text class="noteText" x="1490" y="678" text-anchor="end">only the final assistant TEXT travels back</text>
+
+  <!-- Bottom caption -->
+  <text class="subtitle" x="800" y="752" text-anchor="middle">Audit DB records the dropped round-trips separately &#8212; they're not lost, just not in the prompt.</text>
+</svg>

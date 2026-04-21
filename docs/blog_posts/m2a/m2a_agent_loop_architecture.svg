@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .layerLabel { fill: #475569; font: 700 16px Arial, sans-serif; }
+      .noteText { fill: #475569; font: 500 13px Arial, sans-serif; font-style: italic; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+      .arrowDashed { stroke: #94a3b8; stroke-width: 2; fill: none; stroke-dasharray: 6 6; marker-end: url(#arrowHeadLight); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="arrowHeadLight" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="760"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Three-Layer Agent Architecture</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">One AgentLoop, reused everywhere &#8212; role-specific wrappers add the context</text>
+
+  <!-- Layer 3: Channels -->
+  <text class="layerLabel" x="60" y="150">Layer 3</text>
+  <text class="noteText" x="60" y="172">Role context</text>
+
+  <rect x="180" y="120" width="260" height="80" rx="14" fill="#fef3c7" stroke="#fde68a"/>
+  <text class="cardTitle" x="310" y="152" text-anchor="middle">Slack Connector</text>
+  <text class="cardText" x="310" y="176" text-anchor="middle">Events &#8594; NormalizedRequest</text>
+
+  <rect x="470" y="120" width="260" height="80" rx="14" fill="#fef3c7" stroke="#fde68a"/>
+  <text class="cardTitle" x="600" y="152" text-anchor="middle">NMB Messaging</text>
+  <text class="cardText" x="600" y="176" text-anchor="middle">task.assign / task.complete</text>
+
+  <rect x="760" y="120" width="260" height="80" rx="14" fill="#fef3c7" stroke="#fde68a"/>
+  <text class="cardTitle" x="890" y="152" text-anchor="middle">Local CLI / dev</text>
+  <text class="cardText" x="890" y="176" text-anchor="middle">stdin &#8594; NormalizedRequest</text>
+
+  <rect x="1050" y="120" width="260" height="80" rx="14" fill="#fef3c7" stroke="#fde68a"/>
+  <text class="cardTitle" x="1180" y="152" text-anchor="middle">Cron Worker</text>
+  <text class="cardText" x="1180" y="176" text-anchor="middle">scheduled &#8594; periodic tasks</text>
+
+  <!-- Layer 2: Role-specific wrappers -->
+  <text class="layerLabel" x="60" y="290">Layer 2</text>
+  <text class="noteText" x="60" y="312">Role wrappers</text>
+
+  <rect x="180" y="260" width="400" height="120" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="180" y="260" width="260" height="36" rx="10" fill="#2563eb"/>
+  <text class="stageTitle" x="210" y="284">Orchestrator (today)</text>
+  <text class="cardText" x="200" y="326">Thread history, approval UI, error</text>
+  <text class="cardText" x="200" y="346">responses, Slack-shaped replies,</text>
+  <text class="cardText" x="200" y="366">commit_turn semantics.</text>
+
+  <rect x="620" y="260" width="400" height="120" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="620" y="260" width="200" height="36" rx="10" fill="#7c3aed"/>
+  <text class="stageTitle" x="650" y="284">Integration Tests</text>
+  <text class="cardText" x="640" y="326">Direct AgentLoop instantiation</text>
+  <text class="cardText" x="640" y="346">with MockBackend + AutoApproval</text>
+  <text class="cardText" x="640" y="366">&#8212; exercises the role-agnostic path.</text>
+
+  <rect x="1060" y="260" width="300" height="120" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <rect x="1060" y="260" width="200" height="36" rx="10" fill="#16a34a"/>
+  <text class="stageTitle" x="1090" y="284">Local dev loop</text>
+  <text class="cardText" x="1080" y="326">Print to stdout, no approvals,</text>
+  <text class="cardText" x="1080" y="346">fast iteration for AgentLoop</text>
+  <text class="cardText" x="1080" y="366">changes.</text>
+
+  <!-- Layer 1: AgentLoop -->
+  <text class="layerLabel" x="60" y="470">Layer 1</text>
+  <text class="noteText" x="60" y="492">Reusable core</text>
+
+  <rect x="180" y="430" width="1180" height="180" rx="22" fill="#dbeafe" stroke="#60a5fa" stroke-width="2"/>
+  <rect x="180" y="430" width="260" height="40" rx="12" fill="#1d4ed8"/>
+  <text class="stageTitle" x="210" y="456">AgentLoop.run()</text>
+
+  <rect x="210" y="490" width="260" height="90" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+  <text class="cardTitle" x="340" y="518" text-anchor="middle">Inference</text>
+  <text class="cardText" x="340" y="542" text-anchor="middle">BackendBase abstraction,</text>
+  <text class="cardText" x="340" y="562" text-anchor="middle">continuation + transcript repair</text>
+
+  <rect x="495" y="490" width="260" height="90" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+  <text class="cardTitle" x="625" y="518" text-anchor="middle">Tool Execution</text>
+  <text class="cardText" x="625" y="542" text-anchor="middle">Concurrent for safe tools,</text>
+  <text class="cardText" x="625" y="562" text-anchor="middle">sequential for writes</text>
+
+  <rect x="780" y="490" width="260" height="90" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+  <text class="cardTitle" x="910" y="518" text-anchor="middle">Compaction</text>
+  <text class="cardText" x="910" y="542" text-anchor="middle">Truncate tool results each</text>
+  <text class="cardText" x="910" y="562" text-anchor="middle">round; full roll at threshold</text>
+
+  <rect x="1065" y="490" width="270" height="90" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+  <text class="cardTitle" x="1200" y="518" text-anchor="middle">Approval Gate</text>
+  <text class="cardText" x="1200" y="542" text-anchor="middle">Blocks writes, raises</text>
+  <text class="cardText" x="1200" y="562" text-anchor="middle">WriteApprovalError</text>
+
+  <!-- Dependencies: backend + tools + audit -->
+  <text class="layerLabel" x="60" y="680">Injected</text>
+  <text class="noteText" x="60" y="702">dependencies</text>
+
+  <rect x="180" y="650" width="260" height="70" rx="12" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text class="cardTitle" x="310" y="680" text-anchor="middle">BackendBase</text>
+  <text class="cardText" x="310" y="702" text-anchor="middle">Inference Hub / local / test</text>
+
+  <rect x="470" y="650" width="260" height="70" rx="12" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text class="cardTitle" x="600" y="680" text-anchor="middle">ToolRegistry</text>
+  <text class="cardText" x="600" y="702" text-anchor="middle">Coding tools, service tools, skill tool</text>
+
+  <rect x="760" y="650" width="260" height="70" rx="12" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text class="cardTitle" x="890" y="680" text-anchor="middle">AuditDB</text>
+  <text class="cardText" x="890" y="702" text-anchor="middle">Tool + inference call logs</text>
+
+  <rect x="1050" y="650" width="260" height="70" rx="12" fill="#f3f4f6" stroke="#d1d5db"/>
+  <text class="cardTitle" x="1180" y="680" text-anchor="middle">ApprovalGate</text>
+  <text class="cardText" x="1180" y="702" text-anchor="middle">WriteApproval or AutoApproval</text>
+
+  <!-- Arrows: L3 to L2 -->
+  <path class="arrow" d="M310 200 L310 260"/>
+  <path class="arrow" d="M600 200 L700 260"/>
+  <path class="arrow" d="M890 200 L890 260"/>
+  <path class="arrow" d="M1180 200 L1180 260"/>
+
+  <!-- Arrows: L2 to L1 -->
+  <path class="arrow" d="M380 380 L380 430"/>
+  <path class="arrow" d="M820 380 L820 430"/>
+  <path class="arrow" d="M1210 380 L1200 430"/>
+
+  <!-- Arrows: L1 to injected -->
+  <path class="arrowDashed" d="M310 580 L310 650"/>
+  <path class="arrowDashed" d="M600 580 L600 650"/>
+  <path class="arrowDashed" d="M890 580 L890 650"/>
+  <path class="arrowDashed" d="M1180 580 L1180 650"/>
+</svg>

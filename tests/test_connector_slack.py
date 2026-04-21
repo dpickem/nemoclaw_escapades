@@ -70,6 +70,29 @@ class TestBotFiltering:
         connector._bot_user_id = "B999"
         assert connector._should_ignore(event) is True
 
+    def test_ignore_message_changed_subtype(self) -> None:
+        # Our own chat_update on the thinking placeholder triggers
+        # ``message_changed``.  Must stay ignored to prevent bot-loop.
+        event = {"subtype": "message_changed", "text": "edited"}
+        connector = SlackConnector.__new__(SlackConnector)
+        connector._bot_user_id = "B999"
+        assert connector._should_ignore(event) is True
+
+    def test_allow_thread_broadcast_subtype(self) -> None:
+        # ``thread_broadcast`` is a legitimate user message posted as a
+        # thread reply *and* broadcast to the channel.  Must pass
+        # through so its ``thread_ts`` reaches the orchestrator.
+        event = {
+            "subtype": "thread_broadcast",
+            "user": "U123",
+            "text": "broadcast reply",
+            "ts": "123.999",
+            "thread_ts": "123.000",
+        }
+        connector = SlackConnector.__new__(SlackConnector)
+        connector._bot_user_id = "B999"
+        assert connector._should_ignore(event) is False
+
     def test_ignore_event_with_bot_id(self) -> None:
         event = {"bot_id": "B123", "text": "also a bot"}
         connector = SlackConnector.__new__(SlackConnector)

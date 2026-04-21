@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="540" viewBox="0 0 1600 540">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 15px Arial, sans-serif; }
+      .sectionLabel { fill: #0f172a; font: 700 13px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 13px Arial, sans-serif; }
+      .meta { fill: #475569; font: 700 12px 'Courier New', monospace; }
+      .driver { fill: #475569; font: 500 12px Arial, sans-serif; font-style: italic; }
+      .axisLine { stroke: #cbd5e1; stroke-width: 3; fill: none; }
+      .connector { stroke: #cbd5e1; stroke-width: 2; fill: none; }
+    </style>
+    <marker id="axisArrow" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+      <polygon points="0 0, 10 4, 0 8" fill="#cbd5e1"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="540"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Evolution of the Tool Registry</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">Five inflection points &#183; Apr 10&#8211;20, 2026 &#183; each phase added a capability driven by a real integration</text>
+
+  <!-- Timeline axis -->
+  <line class="axisLine" x1="80" y1="130" x2="1540" y2="130" marker-end="url(#axisArrow)"/>
+  <text class="meta" x="60" y="135" text-anchor="end">time</text>
+
+  <!-- Phase dots on axis -->
+  <circle cx="220" cy="130" r="9" fill="#2563eb"/>
+  <circle cx="520" cy="130" r="9" fill="#7c3aed"/>
+  <circle cx="820" cy="130" r="9" fill="#b45309"/>
+  <circle cx="1120" cy="130" r="9" fill="#4338ca"/>
+  <circle cx="1420" cy="130" r="9" fill="#16a34a"/>
+
+  <!-- Axis to card connectors -->
+  <line class="connector" x1="220" y1="139" x2="220" y2="170"/>
+  <line class="connector" x1="520" y1="139" x2="520" y2="170"/>
+  <line class="connector" x1="820" y1="139" x2="820" y2="170"/>
+  <line class="connector" x1="1120" y1="139" x2="1120" y2="170"/>
+  <line class="connector" x1="1420" y1="139" x2="1420" y2="170"/>
+
+  <!-- Phase 1 Card -->
+  <rect x="80" y="170" width="280" height="300" rx="14" fill="#dbeafe" stroke="#93c5fd" stroke-width="2"/>
+  <rect x="80" y="170" width="280" height="40" rx="10" fill="#2563eb"/>
+  <text class="stageTitle" x="100" y="196">Phase 1 &#183; Formalization</text>
+  <text class="meta" x="100" y="232">Apr 10</text>
+  <text class="meta" x="100" y="250">1038814</text>
+  <text class="sectionLabel" x="100" y="284">Added:</text>
+  <text class="cardText" x="100" y="306">&#8226; toolset grouping</text>
+  <text class="cardText" x="100" y="326">&#8226; check_fn availability</text>
+  <text class="cardText" x="100" y="346">&#8226; max_result_chars cap</text>
+  <text class="cardText" x="100" y="366">&#8226; to_definition() wire format</text>
+  <text class="cardText" x="100" y="386">&#8226; display_name for UI</text>
+  <text class="sectionLabel" x="100" y="424">Driver:</text>
+  <text class="driver" x="100" y="446">Hermes agent patterns</text>
+
+  <!-- Phase 2 Card -->
+  <rect x="380" y="170" width="280" height="300" rx="14" fill="#ede9fe" stroke="#c4b5fd" stroke-width="2"/>
+  <rect x="380" y="170" width="280" height="40" rx="10" fill="#7c3aed"/>
+  <text class="stageTitle" x="400" y="196">Phase 2 &#183; Service Tools + @tool</text>
+  <text class="meta" x="400" y="232">Apr 10 &#8211; Apr 15</text>
+  <text class="meta" x="400" y="250">7ca5e3c, 633b9bc, 3917422,</text>
+  <text class="meta" x="400" y="268">203a9c5, 9f8f9b1</text>
+  <text class="sectionLabel" x="400" y="300">Added:</text>
+  <text class="cardText" x="400" y="322">&#8226; GitLab (28 tools), Gerrit,</text>
+  <text class="cardText" x="400" y="342">&#160; Confluence, Slack search</text>
+  <text class="cardText" x="400" y="362">&#8226; Closure-based async clients</text>
+  <text class="cardText" x="400" y="382">&#8226; Explicit JSON Schema @tool</text>
+  <text class="sectionLabel" x="400" y="424">Driver:</text>
+  <text class="driver" x="400" y="446">BYOO tutorial &#183; OpenShell proxy</text>
+
+  <!-- Phase 3 Card -->
+  <rect x="680" y="170" width="280" height="300" rx="14" fill="#fef3c7" stroke="#fcd34d" stroke-width="2"/>
+  <rect x="680" y="170" width="280" height="40" rx="10" fill="#b45309"/>
+  <text class="stageTitle" x="700" y="196">Phase 3 &#183; Coding Tools + Factory</text>
+  <text class="meta" x="700" y="232">Apr 15</text>
+  <text class="meta" x="700" y="250">a53d3b2, d6db29d, e8f01b8</text>
+  <text class="sectionLabel" x="700" y="284">Added:</text>
+  <text class="cardText" x="700" y="306">&#8226; bash / files / git / search</text>
+  <text class="cardText" x="700" y="326">&#8226; web_search + web_fetch</text>
+  <text class="cardText" x="700" y="346">&#8226; git_clone host allowlist</text>
+  <text class="cardText" x="700" y="366">&#8226; tool_registry_factory.py</text>
+  <text class="cardText" x="700" y="386">&#160; (composition vs definitions)</text>
+  <text class="sectionLabel" x="700" y="424">Driver:</text>
+  <text class="driver" x="700" y="446">Coding agent suite</text>
+
+  <!-- Phase 4 Card -->
+  <rect x="980" y="170" width="280" height="300" rx="14" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="2"/>
+  <rect x="980" y="170" width="280" height="40" rx="10" fill="#4338ca"/>
+  <text class="stageTitle" x="1000" y="196">Phase 4 &#183; Skills + Concurrency</text>
+  <text class="meta" x="1000" y="232">Apr 15 &#8211; Apr 17</text>
+  <text class="meta" x="1000" y="250">2afc1cd, 85c5d5b</text>
+  <text class="sectionLabel" x="1000" y="284">Added:</text>
+  <text class="cardText" x="1000" y="306">&#8226; skill tool (dynamic enum)</text>
+  <text class="cardText" x="1000" y="326">&#8226; is_concurrency_safe flag</text>
+  <text class="cardText" x="1000" y="346">&#8226; Parallel-safe partition in</text>
+  <text class="cardText" x="1000" y="366">&#160; AgentLoop.execute_tool_calls</text>
+  <text class="sectionLabel" x="1000" y="424">Driver:</text>
+  <text class="driver" x="1000" y="446">SKILL.md + parallel tool batches</text>
+
+  <!-- Phase 5 Card -->
+  <rect x="1280" y="170" width="280" height="300" rx="14" fill="#dcfce7" stroke="#86efac" stroke-width="2"/>
+  <rect x="1280" y="170" width="280" height="40" rx="10" fill="#16a34a"/>
+  <text class="stageTitle" x="1300" y="196">Phase 5 &#183; Consolidation</text>
+  <text class="meta" x="1300" y="232">Apr 20</text>
+  <text class="meta" x="1300" y="250">5460f5d</text>
+  <text class="sectionLabel" x="1300" y="284">Added:</text>
+  <text class="cardText" x="1300" y="306">&#8226; build_full_tool_registry()</text>
+  <text class="cardText" x="1300" y="326">&#8226; create_coding_tool_registry()</text>
+  <text class="cardText" x="1300" y="346">&#8226; Single top-level factory</text>
+  <text class="cardText" x="1300" y="366">&#160; replaces ~40 lines in main.py</text>
+  <text class="sectionLabel" x="1300" y="424">Driver:</text>
+  <text class="driver" x="1300" y="446">main.py entry-point cleanup</text>
+
+  <!-- Footer banner -->
+  <rect x="80" y="490" width="1480" height="36" rx="10" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text class="subtitle" x="820" y="514" text-anchor="middle">From a dict inside the orchestrator to a config-driven, role-agnostic registry &#8212; each inflection point was forced, not planned.</text>
+</svg>

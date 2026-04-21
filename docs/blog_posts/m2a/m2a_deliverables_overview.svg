@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .checkmark { fill: #16a34a; font: 700 22px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrowHead); }
+    </style>
+    <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="620"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">M2a Deliverable Map</text>
+  <text class="subtitle" x="800" y="80" text-anchor="middle">A single-agent milestone &#8212; make the loop reusable, give it real tools, and keep context under control</text>
+
+  <!-- Top row: 4 core deliverables -->
+  <rect x="80" y="110" width="1440" height="200" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="110" width="260" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="136">Core Deliverables</text>
+
+  <rect x="120" y="170" width="320" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="checkmark" x="140" y="212">&#10003;</text>
+  <text class="cardTitle" x="168" y="212">Reusable AgentLoop</text>
+  <text class="cardText" x="140" y="242">Multi-turn tool loop extracted</text>
+  <text class="cardText" x="140" y="262">from orchestrator. Role-agnostic</text>
+  <text class="cardText" x="140" y="282">core, reused via DI by any caller.</text>
+
+  <rect x="460" y="170" width="320" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="checkmark" x="480" y="212">&#10003;</text>
+  <text class="cardTitle" x="508" y="212">Coding Tool Suite</text>
+  <text class="cardText" x="480" y="242">read/write/edit/list, grep/glob,</text>
+  <text class="cardText" x="480" y="262">bash, git_diff/log/commit/</text>
+  <text class="cardText" x="480" y="282">checkout/clone &#8212; workspace-rooted.</text>
+
+  <rect x="800" y="170" width="320" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="checkmark" x="820" y="212">&#10003;</text>
+  <text class="cardTitle" x="848" y="212">Two-Tier Compaction</text>
+  <text class="cardText" x="820" y="242">Micro (truncate big tool results,</text>
+  <text class="cardText" x="820" y="262">no API call) + full (LLM summary +</text>
+  <text class="cardText" x="820" y="282">session roll). Promoted from M3.</text>
+
+  <rect x="1140" y="170" width="320" height="120" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="checkmark" x="1160" y="212">&#10003;</text>
+  <text class="cardTitle" x="1188" y="212">Skill Loading</text>
+  <text class="cardText" x="1160" y="242">SKILL.md scanner + on-demand</text>
+  <text class="cardText" x="1160" y="262">skill tool. Four starter skills:</text>
+  <text class="cardText" x="1160" y="282">debugging, review, refactor, scratchpad.</text>
+
+  <path class="arrow" d="M440 230 L460 230"/>
+  <path class="arrow" d="M780 230 L800 230"/>
+  <path class="arrow" d="M1120 230 L1140 230"/>
+
+  <!-- Bottom row: 4 supporting deliverables -->
+  <rect x="80" y="340" width="1440" height="200" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="80" y="340" width="300" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="110" y="366">Supporting Deliverables</text>
+
+  <rect x="120" y="400" width="320" height="120" rx="14" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="checkmark" x="140" y="442">&#10003;</text>
+  <text class="cardTitle" x="168" y="442">Layered Prompt Builder</text>
+  <text class="cardText" x="140" y="472">4 layers with a cache boundary &#8212;</text>
+  <text class="cardText" x="140" y="492">provider prompt caching can reuse</text>
+  <text class="cardText" x="140" y="512">the static prefix across turns.</text>
+
+  <rect x="460" y="400" width="320" height="120" rx="14" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="checkmark" x="480" y="442">&#10003;</text>
+  <text class="cardTitle" x="508" y="442">Concurrent Tool Exec</text>
+  <text class="cardText" x="480" y="472">Safe tools run via asyncio.gather;</text>
+  <text class="cardText" x="480" y="492">writes (is_concurrency_safe=False)</text>
+  <text class="cardText" x="480" y="512">run sequentially after.</text>
+
+  <rect x="800" y="400" width="320" height="120" rx="14" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="checkmark" x="820" y="442">&#10003;</text>
+  <text class="cardTitle" x="848" y="442">Two-List Message Model</text>
+  <text class="cardText" x="820" y="472">Permanent thread history (user/</text>
+  <text class="cardText" x="820" y="492">assistant) vs ephemeral working</text>
+  <text class="cardText" x="820" y="512">messages (+ tool rounds).</text>
+
+  <rect x="1140" y="400" width="320" height="120" rx="14" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text class="checkmark" x="1160" y="442">&#10003;</text>
+  <text class="cardTitle" x="1188" y="442">Scratchpad as a Skill</text>
+  <text class="cardText" x="1160" y="472">No class, no tool, no injection &#8212;</text>
+  <text class="cardText" x="1160" y="492">a Markdown file + the file tools +</text>
+  <text class="cardText" x="1160" y="512">a skill describing the convention.</text>
+
+  <text class="subtitle" x="800" y="590" text-anchor="middle">All of M2a is in-process and single-agent &#8212; everything above runs inside one sandbox with a single AgentLoop.</text>
+</svg>
