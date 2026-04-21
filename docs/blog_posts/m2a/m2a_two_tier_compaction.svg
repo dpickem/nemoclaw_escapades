@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="700" viewBox="0 0 1600 700">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 17px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .cost { fill: #16a34a; font: 700 14px Arial, sans-serif; }
+      .costRed { fill: #dc2626; font: 700 14px Arial, sans-serif; }
+      .noteText { fill: #475569; font: 500 14px Arial, sans-serif; font-style: italic; }
+      .code { fill: #334155; font: 500 14px 'Courier New', monospace; }
+      .codeStrong { fill: #0f172a; font: 700 14px 'Courier New', monospace; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="700"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Two-Tier Context Compaction</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">Cheap truncation every round, expensive LLM summary only when the window actually fills</text>
+
+  <!-- Left tier: micro-compaction -->
+  <rect x="80" y="130" width="680" height="460" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+  <rect x="80" y="130" width="400" height="40" rx="12" fill="#2563eb"/>
+  <text class="stageTitle" x="110" y="156">Tier 1 &#8212; Micro-compaction</text>
+  <text class="cost" x="490" y="156">$0 &#183; 0 ms &#183; no API call</text>
+
+  <text class="cardTitle" x="110" y="198">When:</text>
+  <text class="cardText" x="110" y="222">Before every inference call</text>
+
+  <text class="cardTitle" x="110" y="262">What it does:</text>
+  <text class="cardText" x="110" y="286">Walks working_messages, truncates any</text>
+  <text class="cardText" x="110" y="306">tool-role message whose content exceeds</text>
+  <text class="cardText" x="110" y="326">~10K chars. Adds an annotation so the</text>
+  <text class="cardText" x="110" y="346">model knows the original was larger.</text>
+
+  <rect x="110" y="370" width="620" height="180" rx="10" fill="#ffffff" stroke="#93c5fd"/>
+  <text class="code" x="130" y="398">for msg in working_messages:</text>
+  <text class="code" x="130" y="418">    if msg["role"] == "tool":</text>
+  <text class="code" x="130" y="438">        content = msg["content"]</text>
+  <text class="code" x="130" y="458">        if len(content) &gt; MAX_TOOL_RESULT:</text>
+  <text class="codeStrong" x="130" y="478">            msg["content"] = truncate_with_marker(</text>
+  <text class="codeStrong" x="130" y="498">                content, MAX_TOOL_RESULT</text>
+  <text class="codeStrong" x="130" y="518">            )</text>
+
+  <!-- Right tier: full compaction -->
+  <rect x="840" y="130" width="680" height="460" rx="18" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <rect x="840" y="130" width="400" height="40" rx="12" fill="#7c3aed"/>
+  <text class="stageTitle" x="870" y="156">Tier 2 &#8212; Full compaction</text>
+  <text class="costRed" x="1250" y="156">$ &#183; ~2&#8211;4s &#183; LLM summary call</text>
+
+  <text class="cardTitle" x="870" y="198">When:</text>
+  <text class="cardText" x="870" y="222">Prompt tokens cross a configurable</text>
+  <text class="cardText" x="870" y="242">threshold (default ~70% of context window)</text>
+
+  <text class="cardTitle" x="870" y="282">What it does:</text>
+  <text class="cardText" x="870" y="306">Summarises the older half of the</text>
+  <text class="cardText" x="870" y="326">conversation into a few-paragraph brief,</text>
+  <text class="cardText" x="870" y="346">rolls the session, and keeps the newest</text>
+  <text class="cardText" x="870" y="366">messages + tool map intact.</text>
+
+  <rect x="870" y="390" width="620" height="160" rx="10" fill="#ffffff" stroke="#c4b5fd"/>
+  <text class="code" x="890" y="418">summary = backend.summarise(older_half)</text>
+  <text class="code" x="890" y="438">working_messages = [</text>
+  <text class="code" x="890" y="458">    system,</text>
+  <text class="codeStrong" x="890" y="478">    {"role":"system","content":summary},</text>
+  <text class="code" x="890" y="498">    *newest_kept,</text>
+  <text class="code" x="890" y="518">]</text>
+
+  <!-- Cost note banner -->
+  <rect x="80" y="620" width="1440" height="60" rx="14" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text class="subtitle" x="800" y="648" text-anchor="middle">Micro runs every round; most turns never hit Tier 2 at all.</text>
+  <text class="noteText" x="800" y="672" text-anchor="middle">When Tier 2 does fire, Tier 1 has already kept things honest &#8212; the summary never has to absorb a 50K-char tool result.</text>
+</svg>

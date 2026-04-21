@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="740" viewBox="0 0 1600 740">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 34px Arial, sans-serif; }
+      .subtitle { fill: #475569; font: 500 18px Arial, sans-serif; }
+      .stageTitle { fill: #ffffff; font: 700 18px Arial, sans-serif; }
+      .cardTitle { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .cardText { fill: #334155; font: 500 14px Arial, sans-serif; }
+      .tag { fill: #ffffff; font: 700 12px Arial, sans-serif; }
+      .cacheBoundary { fill: #b91c1c; font: 700 16px Arial, sans-serif; letter-spacing: 2px; }
+      .noteText { fill: #475569; font: 500 14px Arial, sans-serif; font-style: italic; }
+      .savings { fill: #16a34a; font: 700 16px Arial, sans-serif; }
+      .arrowGreen { stroke: #16a34a; stroke-width: 3; fill: none; stroke-dasharray: 10 6; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="740"/>
+
+  <text class="title" x="800" y="50" text-anchor="middle">Layered Prompt Builder</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">4 ordered layers &#183; cache boundary between static and dynamic &#183; provider caching cuts repeat cost by ~90%</text>
+
+  <!-- Stack of layers -->
+  <!-- Layer 1 -->
+  <rect x="300" y="130" width="1000" height="100" rx="14" fill="#dbeafe" stroke="#60a5fa" stroke-width="2"/>
+  <rect x="300" y="130" width="140" height="32" rx="8" fill="#1d4ed8"/>
+  <text class="tag" x="320" y="152">LAYER 1</text>
+  <rect x="460" y="130" width="90" height="32" rx="8" fill="#94a3b8"/>
+  <text class="tag" x="475" y="152">STATIC</text>
+  <text class="cardTitle" x="580" y="154">Identity</text>
+  <text class="cardText" x="320" y="188">"You are NemoClaw, an AI coding assistant..."</text>
+  <text class="noteText" x="320" y="214">Set at construction time &#8212; never changes within an agent's lifetime.</text>
+
+  <!-- Layer 2 -->
+  <rect x="300" y="250" width="1000" height="100" rx="14" fill="#e0e7ff" stroke="#818cf8" stroke-width="2"/>
+  <rect x="300" y="250" width="140" height="32" rx="8" fill="#4338ca"/>
+  <text class="tag" x="320" y="272">LAYER 2</text>
+  <rect x="460" y="250" width="130" height="32" rx="8" fill="#94a3b8"/>
+  <text class="tag" x="475" y="272">STATIC (per task)</text>
+  <text class="cardTitle" x="620" y="274">Task Context</text>
+  <text class="cardText" x="320" y="308">Workspace description, skill content loaded via the `skill` tool, task instructions.</text>
+  <text class="noteText" x="320" y="334">Changes between tasks but not between rounds of the same task.</text>
+
+  <!-- Cache boundary -->
+  <line x1="300" y1="380" x2="1300" y2="380" stroke="#b91c1c" stroke-width="3" stroke-dasharray="10 8"/>
+  <rect x="640" y="365" width="320" height="30" rx="6" fill="#fef2f2" stroke="#fca5a5"/>
+  <text class="cacheBoundary" x="800" y="386" text-anchor="middle">-- CACHE BOUNDARY --</text>
+
+  <!-- Layer 3 -->
+  <rect x="300" y="410" width="1000" height="100" rx="14" fill="#fef3c7" stroke="#fbbf24" stroke-width="2"/>
+  <rect x="300" y="410" width="140" height="32" rx="8" fill="#b45309"/>
+  <text class="tag" x="320" y="432">LAYER 3</text>
+  <rect x="460" y="410" width="110" height="32" rx="8" fill="#ea580c"/>
+  <text class="tag" x="475" y="432">DYNAMIC</text>
+  <text class="cardTitle" x="600" y="434">Runtime Metadata</text>
+  <text class="cardText" x="320" y="468">"Agent ID: a3f1b9c2 &#183; Current time: 2026-04-15 &#183; Tools: read_file, grep, bash, ..."</text>
+  <text class="noteText" x="320" y="494">Rebuilt on every turn &#8212; timestamp changes, tool set may vary.</text>
+
+  <!-- Layer 4 -->
+  <rect x="300" y="530" width="1000" height="100" rx="14" fill="#f5f3ff" stroke="#a78bfa" stroke-width="2"/>
+  <rect x="300" y="530" width="140" height="32" rx="8" fill="#6d28d9"/>
+  <text class="tag" x="320" y="552">LAYER 4</text>
+  <rect x="460" y="530" width="110" height="32" rx="8" fill="#ea580c"/>
+  <text class="tag" x="475" y="552">DYNAMIC</text>
+  <text class="cardTitle" x="600" y="554">Channel Hint</text>
+  <text class="cardText" x="320" y="588">"You are responding to a user via slack." / "You are processing a scheduled cron task." / cli.</text>
+  <text class="noteText" x="320" y="614">Tells the model the source of the request so it can shape its output &#8212; conversational, terse, or strictly formatted.</text>
+
+  <!-- Side annotation: cacheable portion -->
+  <path class="arrowGreen" d="M270 130 L270 380"/>
+  <text class="savings" x="245" y="260" text-anchor="end" transform="rotate(-90 245 260)">cacheable &#183; reused across turns</text>
+
+  <!-- Bottom: savings caption -->
+  <rect x="80" y="660" width="1440" height="60" rx="14" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text class="subtitle" x="800" y="688" text-anchor="middle">Providers cache the prefix up to the boundary. Subsequent turns only pay for the dynamic layers + messages &#8212; ~90% discount on stable tasks.</text>
+  <text class="noteText" x="800" y="712" text-anchor="middle">The scratchpad layer in earlier drafts lived here as Layer 5 &#8212; it's gone, replaced by the scratchpad skill (just a file).</text>
+</svg>
