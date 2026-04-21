@@ -42,13 +42,21 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
 # Application code (read-only at runtime per policy).  ``skills/``
 # ships with the image so ``SkillLoader`` finds the starter skills at
-# ``/app/skills`` without depending on CWD.  The config's SKILLS_DIR
-# default is sandbox-aware (see ``_SANDBOX_SKILLS_DIR`` in config.py).
+# ``/app/skills`` without depending on CWD — the YAML overlay at
+# ``/app/config.yaml`` sets ``skills.skills_dir: /app/skills``.
 COPY --chown=root:root src/ ./src/
 COPY --chown=root:root prompts/ ./prompts/
 COPY --chown=root:root scripts/ ./scripts/
 COPY --chown=root:root skills/ ./skills/
-RUN chmod -R a+rX,a-w src/ skills/
+
+# Resolved sandbox config — produced at build time by
+# ``scripts/gen_config.py`` from ``config/defaults.yaml`` + category-B
+# values merged from ``.env``.  The file is gitignored; if absent,
+# ``make gen-config`` (prereq of ``make setup-sandbox``) creates it.
+# Loaded at startup by ``AppConfig.load()``.
+COPY --chown=root:root config/orchestrator.resolved.yaml /app/config.yaml
+
+RUN chmod -R a+rX,a-w src/ skills/ && chmod a-w /app/config.yaml
 
 # Writable directories (per policy)
 RUN mkdir -p /app/logs && chown sandbox:sandbox /app/logs

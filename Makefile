@@ -189,11 +189,15 @@ setup-providers: .env ## Register all credential providers with the gateway
 gen-policy: .env ## Generate resolved policy with allowed_ips from .env
 	@PYTHONPATH=src $(CONDA_RUN) python scripts/gen_policy.py
 
+.PHONY: gen-config
+gen-config: .env ## Generate resolved config.yaml with category-B values from .env
+	@PYTHONPATH=src $(CONDA_RUN) python scripts/gen_config.py
+
 # Symlink docker/Dockerfile.orchestrator → ./Dockerfile so the build
 # context is the project root.  Cleaned up immediately after.
 # Before destroying the old sandbox, save the audit DB if it exists.
 .PHONY: setup-sandbox
-setup-sandbox: gen-policy ## Build image, create sandbox, and start the app inside it
+setup-sandbox: gen-policy gen-config ## Build image, create sandbox, and start the app inside it
 	@echo "Creating orchestrator sandbox..."
 	@command -v openshell >/dev/null 2>&1 && { \
 		if openshell sandbox get $(SANDBOX_NAME) >/dev/null 2>&1; then \

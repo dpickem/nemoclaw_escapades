@@ -40,6 +40,7 @@ filesystem_policy:
     - /proc
     - /dev/urandom
     - /app/src
+    - /app/config.yaml  # resolved sandbox config (built from config/defaults.yaml + .env)
     - /etc
   read_write:
     - /app/logs
