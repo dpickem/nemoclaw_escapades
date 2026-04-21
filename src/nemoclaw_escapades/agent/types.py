@@ -72,3 +72,81 @@ class AgentLoopResult:
     rounds: int
     hit_safety_limit: bool
     working_messages: list[Message] = field(default_factory=list)
+
+
+@dataclass
+class AgentSetupBundle:
+    """Setup payload the orchestrator sends to a sub-agent via ``task.assign``.
+
+    In M2b Phase 1 this is the protocol surface between the
+    orchestrator and the coding sub-agent.  The orchestrator builds
+    it per task and sends it in the NMB ``task.assign`` payload; the
+    sub-agent unpacks it at task start to configure the ``AgentLoop``:
+
+    - ``task_description`` seeds the initial user message.
+    - ``workspace_root`` scopes the file / search / bash / git tools.
+    - ``agent_id`` is surfaced in the system prompt's runtime-metadata
+      layer so the ``scratchpad`` skill can key its
+      ``notes-<task-slug>-<agent-id>.md`` filename off it.
+    - ``source_type`` feeds the channel-hint layer so the model knows
+      it's running as a delegated sub-agent (concise output, no
+      conversational pleasantries).
+
+    See ``docs/design_m2b.md`` §4.1 (Spawn Sequence) and §6.2
+    (Sub-Agent Entrypoint).
+
+    Attributes:
+        task_id: Globally unique task identifier.  Stamped into
+            ``task.complete`` replies so the orchestrator can match
+            results back to the request.
+        agent_id: Unique identifier for this sub-agent invocation.
+            Used as the notes-file owner tag and as the NMB sandbox
+            identity when applicable.  Short enough to embed in a
+            filename (truncate UUIDs to 8 chars for readability).
+        parent_agent_id: Identifier of the agent that spawned this
+            one — normally the orchestrator.  Included in audit
+            records so the delegation tree is traceable.
+        task_description: Natural-language description of the work
+            to be done.  Forms the initial user message for the
+            AgentLoop.
+        workspace_root: Absolute filesystem path the sub-agent
+            operates in.  File / bash / git tools treat this as their
+            root; path traversal outside is rejected.
+        source_type: Channel-hint source label.  Defaults to
+            ``"agent"`` — the prompt builder uses this to craft a
+            sub-agent-appropriate channel hint.
+    """
+
+    task_id: str
+    agent_id: str
+    parent_agent_id: str
+    task_description: str
+    workspace_root: str
+    source_type: str = "agent"
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialise to a JSON-safe dict for NMB transport."""
+        return {
+            "task_id": self.task_id,
+            "agent_id": self.agent_id,
+            "parent_agent_id": self.parent_agent_id,
+            "task_description": self.task_description,
+            "workspace_root": self.workspace_root,
+            "source_type": self.source_type,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, str]) -> AgentSetupBundle:
+        """Deserialise from an NMB payload dict.
+
+        Raises:
+            KeyError: If a required field is missing.
+        """
+        return cls(
+            task_id=payload["task_id"],
+            agent_id=payload["agent_id"],
+            parent_agent_id=payload["parent_agent_id"],
+            task_description=payload["task_description"],
+            workspace_root=payload["workspace_root"],
+            source_type=payload.get("source_type", "agent"),
+        )
