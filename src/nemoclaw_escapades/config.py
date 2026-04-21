@@ -1,22 +1,48 @@
-"""Configuration loading and validation from environment variables.
+"""Configuration loading and validation.
 
-Secrets (API keys, tokens) are injected by OpenShell at sandbox creation
-time.  The application code never reads a .env file — it only reads
-os.environ.  For local development without OpenShell, the Makefile
-exports .env vars into the shell before launching the process
-(see ``make run-local-dev``).
+Three sources feed the final :class:`AppConfig`, lowest to highest
+precedence (see ``docs/design_m2b.md`` §5.3):
+
+1. **Dataclass field defaults** — hardcoded below.  These reflect
+   local-dev sensible defaults (e.g. ``~/.nemoclaw/workspace``).
+2. **YAML overlay** — ``/app/config.yaml`` inside the sandbox, a merged
+   file produced at build time by ``scripts/gen_config.py`` from
+   ``config/defaults.yaml`` plus category-B values from ``.env``.
+   Missing file is not an error — local dev simply gets dataclass
+   defaults.  ``NEMOCLAW_CONFIG_PATH`` overrides the default path.
+3. **Environment variables** — override individual fields at runtime.
+   This is the escape hatch for local-dev knob-twiddling
+   (``LOG_LEVEL=DEBUG make run-local-dev``) and for the L7 proxy's
+   secret placeholders (``SLACK_BOT_TOKEN``, ``JIRA_AUTH``, etc.).
+
+Secrets (API keys, tokens, usernames, passwords) are **never** written
+to the YAML — they flow through env vars only.  In the sandbox the env
+values are OpenShell-provider-injected placeholders that the L7 proxy
+resolves at HTTP-request time.  For local dev, ``make run-local-dev``
+exports ``.env`` into the shell before launching the process.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import yaml
+
+from nemoclaw_escapades.observability.logging import get_logger
+
+logger = get_logger("config")
 
 # ── Defaults (single source of truth — no magic strings elsewhere) ─
 
+# Base URL the sandbox points at for inference.  Kept here (not in the
+# YAML) because the proxy routes every request to ``inference.local``
+# regardless of the deployment and the value is not an operator knob.
 SANDBOX_INFERENCE_BASE_URL: str = "https://inference.local/v1"
-DEFAULT_INFERENCE_MODEL: str = "azure/anthropic/claude-opus-4-6"  # hyphenated, not dotted
+DEFAULT_INFERENCE_MODEL: str = "azure/anthropic/claude-opus-4-6"
 DEFAULT_INFERENCE_TIMEOUT_S: int = 60
 DEFAULT_INFERENCE_MAX_RETRIES: int = 3
 DEFAULT_SYSTEM_PROMPT_PATH: str = "prompts/system_prompt.md"
@@ -134,13 +160,15 @@ DEFAULT_AUDIT_CHECKPOINT_INTERVAL: int = 10
 DEFAULT_JIRA_URL: str = "https://jirasw.nvidia.com"
 DEFAULT_JIRA_AUTH_ENV_VAR: str = "JIRA_AUTH"
 
-# ── GitLab tool defaults ─────────────────────────────────────────────
+# ── GitLab / Gerrit tool defaults ─────────────────────────────────────
+#
+# Left deliberately empty in the public source — these URLs live in
+# ``.env`` and are merged into ``config/orchestrator.resolved.yaml`` by
+# ``scripts/gen_config.py``.  See ``docs/design_m2b.md`` §5.3.2 for the
+# rationale ("category B — private non-secret").
 
-DEFAULT_GITLAB_URL: str = "https://gitlab-master.nvidia.com"
-
-# ── Gerrit tool defaults ─────────────────────────────────────────────
-
-DEFAULT_GERRIT_URL: str = "https://git-av.nvidia.com/r/a"
+DEFAULT_GITLAB_URL: str = ""
+DEFAULT_GERRIT_URL: str = ""
 
 # ── Confluence tool defaults ─────────────────────────────────────────
 
@@ -156,38 +184,33 @@ DEFAULT_WEB_SEARCH_LIMIT: int = 5
 
 # ── Coding agent defaults ────────────────────────────────────────────
 
-# Default workspace root (local development).  Inside the OpenShell
-# sandbox, ``load_config`` picks ``_SANDBOX_CODING_WORKSPACE_ROOT``
-# instead — a writable path on the sandbox PVC.
+# Local-development default for the coding-agent workspace.  The
+# sandbox overrides this via ``/app/config.yaml`` (``coding.workspace_root:
+# /sandbox/workspace``), which is produced at build time by the
+# ``gen_config.py`` resolver.
 DEFAULT_CODING_WORKSPACE_ROOT: str = "~/.nemoclaw/workspace"
-# Path used inside the OpenShell sandbox.  /sandbox is the PVC-backed
-# writable mount (see Makefile's AUDIT_DB_SANDBOX pattern).
-_SANDBOX_CODING_WORKSPACE_ROOT: str = "/sandbox/workspace"
 
-# ``git_clone`` host allowlist.  Local dev defaults to fail-closed (empty)
-# — the operator must opt in via ``GIT_CLONE_ALLOWED_HOSTS`` in ``.env``.
-# Inside the OpenShell sandbox we bake in the hosts whose network policy
-# already permits egress (see ``policies/orchestrator.yaml``): every other
-# host is proxy-blocked anyway, so there's no extra attack surface and the
-# tool is usable out of the box.  This is baked-in rather than provider-
-# injected because OpenShell ``--credential`` values are substituted as
-# placeholder strings inside the sandbox (the L7 proxy resolves them at
-# request time, not in ``os.environ``); a placeholder comma-split would
-# poison the allowlist.  ``GIT_CLONE_ALLOWED_HOSTS`` still overrides this
-# for local-dev or tighter sandbox deployments.
+# ``git_clone`` host allowlist.  Empty = fail-closed: the tool refuses
+# to clone anything until an operator supplies hosts via
+# ``GIT_CLONE_ALLOWED_HOSTS`` in ``.env`` (then picked up by the
+# resolver into the sandbox YAML) or directly in the runtime
+# environment for local dev.
 DEFAULT_GIT_CLONE_ALLOWED_HOSTS: str = ""
-_SANDBOX_GIT_CLONE_ALLOWED_HOSTS: str = ""
 
 # ── Skills defaults ──────────────────────────────────────────────────
 
-# Local-development default for the ``SkillLoader`` scan root.
-# Resolves relative to the process CWD — works out of the box when the
-# orchestrator is launched from the repo root.
+# Local-development default for the ``SkillLoader`` scan root.  In the
+# sandbox the Dockerfile copies ``skills/`` into ``/app/skills`` and
+# the YAML overlay selects that path via ``skills.skills_dir``.
 DEFAULT_SKILLS_DIR: str = "skills"
-# Absolute path used inside the OpenShell sandbox.  The Dockerfile
-# copies ``skills/`` into ``/app/skills`` so the packaged starter
-# skills are available at runtime without relying on CWD.
-_SANDBOX_SKILLS_DIR: str = "/app/skills"
+
+# ── YAML overlay ─────────────────────────────────────────────────────
+
+# Path of the resolved config file inside the sandbox image.  Set by
+# ``scripts/gen_config.py`` + Dockerfile ``COPY``.  Missing file is
+# not an error — the loader falls back to dataclass defaults, which
+# is the correct behaviour for local-dev (no YAML shipped).
+_DEFAULT_YAML_PATH: Path = Path("/app/config.yaml")
 
 # ── Misc ─────────────────────────────────────────────────────────────
 
@@ -318,7 +341,9 @@ class GitLabConfig:
 
     Attributes:
         enabled: Whether GitLab tools are registered with the orchestrator.
-        url: GitLab instance base URL.
+        url: GitLab instance base URL.  Empty by default because the
+            specific URL is a category-B value stored in ``.env`` and
+            merged into ``/app/config.yaml`` by ``gen_config.py``.
         token: Personal Access Token (``glpat-...``).
     """
 
@@ -337,6 +362,7 @@ class GerritConfig:
     Attributes:
         enabled: Whether Gerrit tools are registered with the orchestrator.
         url: Gerrit instance base URL (including ``/a`` if needed).
+            Empty by default — category-B value, merged in at build time.
         username: HTTP Basic auth username.
         http_password: HTTP Basic auth password.
     """
@@ -421,20 +447,20 @@ class CodingAgentConfig:
     Attributes:
         enabled: Whether the coding tools are wired in.  Defaults to
             ``True`` — the coding tools are the orchestrator's core
-            capability.  File writes are still gated by the write-approval
-            flow, and ``git_clone`` stays fail-closed via an empty
-            ``git_clone_allowed_hosts`` allowlist.  Set
+            capability.  File writes are still gated by the
+            write-approval flow, and ``git_clone`` stays fail-closed
+            via an empty ``git_clone_allowed_hosts`` allowlist.  Set
             ``CODING_AGENT_ENABLED=false`` to opt out.
         workspace_root: Absolute path to the directory that file/search/
             bash/git tools operate on.  Path traversal outside this
-            directory is rejected by the file tools.
+            directory is rejected by the file tools.  Sandbox override
+            (``/sandbox/workspace``) comes from the YAML overlay at
+            startup; the dataclass default matches local-dev.
         git_clone_allowed_hosts: Comma-separated list of host names that
             ``git_clone`` will accept.  Empty disables ``git_clone``
-            entirely (fail-closed for security).  ``load_config``
-            substitutes ``_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`` when the
-            process is running inside the OpenShell sandbox so the tool
-            is usable out of the box against hosts the orchestrator
-            policy already permits.
+            entirely (fail-closed for security).  Populated in the
+            sandbox via the YAML overlay (``gen_config.py`` merges the
+            operator's ``GIT_CLONE_ALLOWED_HOSTS`` from ``.env``).
     """
 
     enabled: bool = True
@@ -453,6 +479,9 @@ class SkillsConfig:
     Attributes:
         enabled: Whether skill loading is wired in.
         skills_dir: Directory tree scanned for ``SKILL.md`` files.
+            Sandbox uses ``/app/skills`` via the YAML overlay; the
+            dataclass default targets a ``skills/`` directory relative
+            to CWD for local-dev runs from the repo root.
     """
 
     enabled: bool = True
@@ -517,158 +546,397 @@ class AppConfig:
     coding: CodingAgentConfig = field(default_factory=CodingAgentConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
 
+    @classmethod
+    def load(cls, path: str | Path | None = None) -> AppConfig:
+        """Load configuration from dataclass defaults + YAML overlay + env vars.
 
-def load_config() -> AppConfig:
-    """Load configuration from environment variables.
+        The three sources combine in the precedence documented at the
+        top of this module:
 
-    In the OpenShell sandbox, secrets are injected by the gateway.
-    For local dev, ``make run-local-dev`` sources ``.env`` into the shell.
+        1. Start from dataclass defaults (local-dev friendly values).
+        2. Apply the YAML overlay at *path*, ``NEMOCLAW_CONFIG_PATH``,
+           or :data:`_DEFAULT_YAML_PATH` (first hit wins).  Missing
+           file is not an error.
+        3. Apply environment-variable overrides per-field.
+        4. Validate that required secrets (Slack tokens, inference key
+           /URL) are present.
+
+        Args:
+            path: Optional YAML path override.  Takes precedence over
+                ``NEMOCLAW_CONFIG_PATH`` and :data:`_DEFAULT_YAML_PATH`.
+
+        Returns:
+            A fully populated ``AppConfig``.
+
+        Raises:
+            ValueError: If required secrets are missing, or if the
+                YAML at *path* is malformed.
+        """
+        config = cls()
+        _apply_yaml_overlay(config, path)
+        _apply_env_overrides(config)
+        _check_required_secrets(config)
+        return config
+
+
+# ── YAML overlay ────────────────────────────────────────────────────
+
+# YAML top-level sections that map 1:1 to an ``AppConfig`` sub-config
+# field of the same name.  ``toolsets`` is handled separately because
+# it nests the per-service configs one level deeper in the YAML.
+_DIRECT_SECTIONS: dict[str, str] = {
+    "orchestrator": "orchestrator",
+    "log": "log",
+    "audit": "audit",
+    "coding": "coding",
+    "skills": "skills",
+}
+
+# YAML ``toolsets.<key>`` → ``AppConfig.<key>`` mapping.  The sub-
+# configs live at the top level of ``AppConfig`` to keep call sites
+# short (``config.jira`` rather than ``config.toolsets.jira``); the
+# YAML groups them under ``toolsets`` for readability.
+_TOOLSET_SECTIONS: dict[str, str] = {
+    "jira": "jira",
+    "gitlab": "gitlab",
+    "gerrit": "gerrit",
+    "confluence": "confluence",
+    "slack_search": "slack_search",
+    "web_search": "web_search",
+}
+
+# Top-level YAML keys that the loader recognises but doesn't map to
+# an ``AppConfig`` field (yet).  Keeps forward-compat: unknown keys
+# log a warning, known-but-unmapped keys stay silent.
+_RESERVED_YAML_KEYS: frozenset[str] = frozenset(
+    {
+        # ``AgentLoopConfig`` isn't a field on ``AppConfig`` today; the
+        # loop receives its config directly at construction.  Accepting
+        # the section here lets ``defaults.yaml`` document the knobs
+        # without the loader griping.
+        "agent_loop",
+    }
+)
+
+
+def _resolve_yaml_path(path: str | Path | None) -> Path:
+    """Resolve which YAML path the loader should try.
+
+    Precedence:
+        1. Caller-supplied ``path`` argument.
+        2. ``NEMOCLAW_CONFIG_PATH`` environment variable.
+        3. :data:`_DEFAULT_YAML_PATH` (``/app/config.yaml``).
+
+    Args:
+        path: Explicit path override, or ``None`` to consult the env
+            and default.
 
     Returns:
-        Fully populated ``AppConfig`` ready for use by the application.
+        A ``Path`` object.  The file may or may not exist — the
+        caller is responsible for the ``.is_file()`` check.
+    """
+    if path is not None:
+        return Path(path)
+    env_path = os.environ.get("NEMOCLAW_CONFIG_PATH")
+    if env_path:
+        return Path(env_path)
+    return _DEFAULT_YAML_PATH
+
+
+def _apply_yaml_overlay(config: AppConfig, path: str | Path | None) -> None:
+    """Apply the YAML overlay to *config*, mutating in place.
+
+    Missing file is not an error — local-dev runs have no YAML and
+    simply keep the dataclass defaults.  A malformed YAML *is* an
+    error and surfaces as ``ValueError``.
+
+    Args:
+        config: ``AppConfig`` instance to mutate.
+        path: Optional explicit YAML path.  Falls back to the env /
+            default per :func:`_resolve_yaml_path`.
 
     Raises:
-        ValueError: If required environment variables (``SLACK_BOT_TOKEN``,
-            ``SLACK_APP_TOKEN``, ``INFERENCE_HUB_API_KEY``,
-            ``INFERENCE_HUB_BASE_URL``) are missing outside sandbox mode.
+        ValueError: If the YAML file is present but unparseable.
+    """
+    yaml_path = _resolve_yaml_path(path)
+    if not yaml_path.is_file():
+        return
+
+    try:
+        overlay = yaml.safe_load(yaml_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML in {yaml_path}: {exc}") from exc
+
+    if not isinstance(overlay, dict):
+        raise ValueError(
+            f"Top-level YAML in {yaml_path} must be a mapping, got {type(overlay).__name__}"
+        )
+
+    # Direct top-level sections.
+    for yaml_key, attr_name in _DIRECT_SECTIONS.items():
+        section = overlay.get(yaml_key)
+        if section is not None:
+            _apply_section(getattr(config, attr_name), section, f"{yaml_key}")
+
+    # Grouped toolset sections.
+    toolsets = overlay.get("toolsets") or {}
+    if not isinstance(toolsets, dict):
+        logger.warning(
+            "YAML 'toolsets' must be a mapping; ignoring",
+            extra={"path": str(yaml_path), "got": type(toolsets).__name__},
+        )
+    else:
+        for yaml_key, attr_name in _TOOLSET_SECTIONS.items():
+            section = toolsets.get(yaml_key)
+            if section is not None:
+                _apply_section(
+                    getattr(config, attr_name),
+                    section,
+                    f"toolsets.{yaml_key}",
+                )
+
+    # Unknown top-level keys: log, but don't fail.  Forward-compat.
+    known_top_level = (
+        set(_DIRECT_SECTIONS) | {"toolsets"} | _RESERVED_YAML_KEYS
+    )
+    for key in overlay:
+        if key not in known_top_level:
+            logger.warning(
+                "Unknown top-level key in YAML overlay",
+                extra={"section": key, "path": str(yaml_path)},
+            )
+
+    logger.info("Loaded YAML config overlay", extra={"path": str(yaml_path)})
+
+
+def _apply_section(sub_config: Any, values: dict[str, Any], path_for_log: str) -> None:
+    """Apply YAML ``values`` onto a dataclass instance, mutating in place.
+
+    Unknown fields log a warning but don't raise — the YAML may be
+    newer than the Python (forward-compat) or older (with fields
+    since renamed).
+
+    Args:
+        sub_config: Dataclass instance (e.g. ``config.coding``).
+        values: Mapping of field name → value as loaded from YAML.
+        path_for_log: YAML section path for warning messages.
+    """
+    if not isinstance(values, dict):
+        logger.warning(
+            "YAML section must be a mapping; ignoring",
+            extra={"section": path_for_log, "got": type(values).__name__},
+        )
+        return
+
+    known_fields = {f.name for f in dataclasses.fields(sub_config)}
+    for key, value in values.items():
+        if key in known_fields:
+            setattr(sub_config, key, value)
+        else:
+            logger.warning(
+                "Unknown field in YAML overlay section",
+                extra={
+                    "section": path_for_log,
+                    "field": key,
+                    "dataclass": type(sub_config).__name__,
+                },
+            )
+
+
+# ── Env overrides ────────────────────────────────────────────────────
+
+
+def _apply_env_overrides(config: AppConfig) -> None:
+    """Apply environment-variable overrides on top of *config*.
+
+    Mutates *config* in place.  For each env var that is non-empty
+    (``os.environ.get(...)`` returns a truthy string), the matching
+    field on *config* is overwritten.  Env vars trump YAML, matching
+    the documented precedence.
+
+    The one piece of sandbox-aware branching remaining in config
+    loading: ``INFERENCE_HUB_BASE_URL`` is backfilled with
+    :data:`SANDBOX_INFERENCE_BASE_URL` inside the OpenShell sandbox
+    when neither the env var nor the YAML supplies a value.  This
+    isn't a category-B leak — ``inference.local`` is the proxy-side
+    endpoint the sandbox always talks to, irrespective of
+    deployment.
     """
     in_sandbox = bool(os.environ.get("OPENSHELL_SANDBOX"))
 
-    # In sandbox, the inference.local proxy handles API key injection —
-    # the app never sees the real key.  Locally, read from .env.
-    api_key = os.environ.get("INFERENCE_HUB_API_KEY", "")
-    if not api_key and not in_sandbox:
-        api_key = ""  # will trigger the missing-var error below
+    # ── Slack (required secrets) ───────────────────────────────────
+    if bot := os.environ.get("SLACK_BOT_TOKEN"):
+        config.slack.bot_token = bot
+    if app := os.environ.get("SLACK_APP_TOKEN"):
+        config.slack.app_token = app
 
+    # ── Inference ──────────────────────────────────────────────────
+    if url := os.environ.get("INFERENCE_HUB_BASE_URL"):
+        config.inference.base_url = url
+    elif in_sandbox and not config.inference.base_url:
+        # Proxy-mediated endpoint inside the sandbox.
+        config.inference.base_url = SANDBOX_INFERENCE_BASE_URL
+    if key := os.environ.get("INFERENCE_HUB_API_KEY"):
+        config.inference.api_key = key
+    if model := os.environ.get("INFERENCE_MODEL"):
+        config.inference.model = model
+        # Orchestrator shares the same model by default.
+        config.orchestrator.model = model
+    if val := os.environ.get("INFERENCE_TIMEOUT_S"):
+        config.inference.timeout_s = int(val)
+    if val := os.environ.get("INFERENCE_MAX_RETRIES"):
+        config.inference.max_retries = int(val)
+
+    # ── Orchestrator ───────────────────────────────────────────────
+    if val := os.environ.get("SYSTEM_PROMPT_PATH"):
+        config.orchestrator.system_prompt_path = val
+    if val := os.environ.get("MAX_THREAD_HISTORY"):
+        config.orchestrator.max_thread_history = int(val)
+    if val := os.environ.get("TEMPERATURE"):
+        config.orchestrator.temperature = float(val)
+    if val := os.environ.get("MAX_TOKENS"):
+        config.orchestrator.max_tokens = int(val)
+
+    # ── Log ────────────────────────────────────────────────────────
+    if val := os.environ.get("LOG_LEVEL"):
+        config.log.level = val
+    # ``LOG_FILE`` unset → None, as before.  Explicit empty string
+    # still means stderr-only.
+    if "LOG_FILE" in os.environ:
+        raw = os.environ["LOG_FILE"]
+        config.log.log_file = raw or None
+
+    # ── Audit ──────────────────────────────────────────────────────
+    if val := os.environ.get("AUDIT_ENABLED"):
+        config.audit.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("AUDIT_DB_PATH"):
+        config.audit.db_path = val
+    if val := os.environ.get("AUDIT_PERSIST_PAYLOADS"):
+        config.audit.persist_payloads = val.lower() in _TRUTHY_VALUES
+
+    # ── Jira ───────────────────────────────────────────────────────
+    if val := os.environ.get("JIRA_ENABLED"):
+        config.jira.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("JIRA_URL"):
+        config.jira.url = val
+    # JIRA_AUTH_ENV_VAR selects *which* env var holds the auth header;
+    # defaults to JIRA_AUTH.  Preserve that indirection for parity with
+    # the previous loader.
+    auth_env = os.environ.get("JIRA_AUTH_ENV_VAR", DEFAULT_JIRA_AUTH_ENV_VAR)
+    if val := os.environ.get(auth_env):
+        config.jira.auth_header = val
+
+    # ── GitLab ─────────────────────────────────────────────────────
+    if val := os.environ.get("GITLAB_ENABLED"):
+        config.gitlab.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("GITLAB_URL"):
+        config.gitlab.url = val
+    if val := os.environ.get("GITLAB_TOKEN"):
+        config.gitlab.token = val
+
+    # ── Gerrit ─────────────────────────────────────────────────────
+    if val := os.environ.get("GERRIT_ENABLED"):
+        config.gerrit.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("GERRIT_URL"):
+        config.gerrit.url = val
+    if val := os.environ.get("GERRIT_USERNAME"):
+        config.gerrit.username = val
+    if val := os.environ.get("GERRIT_HTTP_PASSWORD"):
+        config.gerrit.http_password = val
+
+    # ── Confluence ─────────────────────────────────────────────────
+    if val := os.environ.get("CONFLUENCE_ENABLED"):
+        config.confluence.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("CONFLUENCE_URL"):
+        config.confluence.url = val
+    if val := os.environ.get("CONFLUENCE_USERNAME"):
+        config.confluence.username = val
+    if val := os.environ.get("CONFLUENCE_API_TOKEN"):
+        config.confluence.api_token = val
+
+    # ── Slack search ───────────────────────────────────────────────
+    if val := os.environ.get("SLACK_SEARCH_ENABLED"):
+        config.slack_search.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("SLACK_USER_TOKEN"):
+        config.slack_search.user_token = val
+
+    # ── Web search ─────────────────────────────────────────────────
+    if val := os.environ.get("WEB_SEARCH_ENABLED"):
+        config.web_search.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("BRAVE_SEARCH_API_KEY"):
+        config.web_search.api_key = val
+    if val := os.environ.get("JINA_API_KEY"):
+        config.web_search.jina_api_key = val
+    if val := os.environ.get("WEB_SEARCH_DEFAULT_LIMIT"):
+        config.web_search.default_limit = int(val)
+
+    # ── Coding agent ───────────────────────────────────────────────
+    if val := os.environ.get("CODING_AGENT_ENABLED"):
+        config.coding.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("CODING_WORKSPACE_ROOT"):
+        config.coding.workspace_root = val
+    if val := os.environ.get("GIT_CLONE_ALLOWED_HOSTS"):
+        config.coding.git_clone_allowed_hosts = val
+
+    # ── Skills ─────────────────────────────────────────────────────
+    if val := os.environ.get("SKILLS_ENABLED"):
+        config.skills.enabled = val.lower() in _TRUTHY_VALUES
+    if val := os.environ.get("SKILLS_DIR"):
+        config.skills.skills_dir = val
+
+
+# ── Validation ──────────────────────────────────────────────────────
+
+
+def _check_required_secrets(config: AppConfig) -> None:
+    """Ensure required secrets are present.
+
+    Slack bot + app tokens are required in every environment.
+    Inference API key and base URL are required for local dev; inside
+    the sandbox, ``inference.local`` resolution + proxy-injected key
+    make both optional from the app's perspective (the proxy supplies
+    them).
+
+    Raises:
+        ValueError: If any required secret is missing.  Message lists
+            all missing keys so the operator sees the full set in one
+            pass.
+    """
+    in_sandbox = bool(os.environ.get("OPENSHELL_SANDBOX"))
     missing: list[str] = []
-    if not os.environ.get("SLACK_BOT_TOKEN"):
+    if not config.slack.bot_token:
         missing.append("SLACK_BOT_TOKEN")
-    if not os.environ.get("SLACK_APP_TOKEN"):
+    if not config.slack.app_token:
         missing.append("SLACK_APP_TOKEN")
-    if not api_key and not in_sandbox:
-        missing.append("INFERENCE_HUB_API_KEY")
-    if not os.environ.get("INFERENCE_HUB_BASE_URL") and not in_sandbox:
-        missing.append("INFERENCE_HUB_BASE_URL")
+    if not in_sandbox:
+        if not config.inference.api_key:
+            missing.append("INFERENCE_HUB_API_KEY")
+        if not config.inference.base_url:
+            missing.append("INFERENCE_HUB_BASE_URL")
+
     if missing:
         raise ValueError(
             f"Missing required environment variables: {', '.join(missing)}. "
             "Copy .env.example to .env and fill in real values."
         )
 
-    # In sandbox, use inference.local (OpenShell's inference proxy handles
-    # auth and routing).  Locally, use the URL from .env.
-    default_base_url = (
-        SANDBOX_INFERENCE_BASE_URL if in_sandbox else os.environ.get("INFERENCE_HUB_BASE_URL", "")
-    )
-    model = os.environ.get("INFERENCE_MODEL", DEFAULT_INFERENCE_MODEL)
 
-    return AppConfig(
-        slack=SlackConfig(
-            bot_token=os.environ["SLACK_BOT_TOKEN"],
-            app_token=os.environ["SLACK_APP_TOKEN"],
-        ),
-        inference=InferenceConfig(
-            base_url=os.environ.get("INFERENCE_HUB_BASE_URL", default_base_url),
-            api_key=api_key,
-            model=model,
-            timeout_s=int(os.environ.get("INFERENCE_TIMEOUT_S", str(DEFAULT_INFERENCE_TIMEOUT_S))),
-            max_retries=int(
-                os.environ.get("INFERENCE_MAX_RETRIES", str(DEFAULT_INFERENCE_MAX_RETRIES))
-            ),
-        ),
-        orchestrator=OrchestratorConfig(
-            model=model,
-            system_prompt_path=os.environ.get("SYSTEM_PROMPT_PATH", DEFAULT_SYSTEM_PROMPT_PATH),
-            max_thread_history=int(
-                os.environ.get("MAX_THREAD_HISTORY", str(DEFAULT_MAX_THREAD_HISTORY))
-            ),
-            temperature=float(os.environ.get("TEMPERATURE", str(DEFAULT_TEMPERATURE))),
-            max_tokens=int(os.environ.get("MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
-        ),
-        log=LogConfig(
-            level=os.environ.get("LOG_LEVEL", DEFAULT_LOG_LEVEL),
-            log_file=os.environ.get("LOG_FILE"),
-        ),
-        audit=AuditConfig(
-            enabled=os.environ.get("AUDIT_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            db_path=os.environ.get(
-                "AUDIT_DB_PATH",
-                "/sandbox/audit.db" if in_sandbox else DEFAULT_AUDIT_DB_PATH,
-            ),
-            persist_payloads=os.environ.get("AUDIT_PERSIST_PAYLOADS", "true").lower()
-            in _TRUTHY_VALUES,
-        ),
-        jira=JiraConfig(
-            enabled=os.environ.get("JIRA_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            url=os.environ.get("JIRA_URL", DEFAULT_JIRA_URL),
-            auth_header=os.environ.get(
-                os.environ.get("JIRA_AUTH_ENV_VAR", DEFAULT_JIRA_AUTH_ENV_VAR), ""
-            ),
-        ),
-        gitlab=GitLabConfig(
-            enabled=os.environ.get("GITLAB_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            url=os.environ.get("GITLAB_URL", DEFAULT_GITLAB_URL),
-            token=os.environ.get("GITLAB_TOKEN", ""),
-        ),
-        gerrit=GerritConfig(
-            enabled=os.environ.get("GERRIT_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            url=os.environ.get("GERRIT_URL", DEFAULT_GERRIT_URL),
-            username=os.environ.get("GERRIT_USERNAME", ""),
-            http_password=os.environ.get("GERRIT_HTTP_PASSWORD", ""),
-        ),
-        confluence=ConfluenceConfig(
-            enabled=os.environ.get("CONFLUENCE_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            url=os.environ.get("CONFLUENCE_URL", DEFAULT_CONFLUENCE_URL),
-            username=os.environ.get("CONFLUENCE_USERNAME", ""),
-            api_token=os.environ.get("CONFLUENCE_API_TOKEN", ""),
-        ),
-        slack_search=SlackSearchConfig(
-            enabled=os.environ.get("SLACK_SEARCH_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            user_token=os.environ.get("SLACK_USER_TOKEN", ""),
-        ),
-        web_search=WebSearchConfig(
-            enabled=os.environ.get("WEB_SEARCH_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            api_key=os.environ.get("BRAVE_SEARCH_API_KEY", ""),
-            jina_api_key=os.environ.get("JINA_API_KEY", ""),
-            default_limit=int(
-                os.environ.get("WEB_SEARCH_DEFAULT_LIMIT", str(DEFAULT_WEB_SEARCH_LIMIT))
-            ),
-        ),
-        coding=CodingAgentConfig(
-            # Default ON — the coding tools (file/search/bash/git) are
-            # the orchestrator's core capability.  Writes still require
-            # user approval, and git_clone remains fail-closed until a
-            # host allowlist is supplied.  Set CODING_AGENT_ENABLED=false
-            # to opt out.
-            enabled=os.environ.get("CODING_AGENT_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            # In sandbox: writable paths on the /sandbox PVC.  Locally:
-            # home-directory folders that respect HOME.
-            workspace_root=os.environ.get(
-                "CODING_WORKSPACE_ROOT",
-                _SANDBOX_CODING_WORKSPACE_ROOT if in_sandbox else DEFAULT_CODING_WORKSPACE_ROOT,
-            ),
-            # Sandbox: bake in hosts whose egress is already whitelisted
-            # by the orchestrator network policy (see the
-            # ``_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`` docstring for rationale
-            # — provider-injected values become proxy placeholders and
-            # can't be parsed here).  Local dev: empty means fail-closed
-            # until the operator opts in via the env var.
-            git_clone_allowed_hosts=os.environ.get(
-                "GIT_CLONE_ALLOWED_HOSTS",
-                _SANDBOX_GIT_CLONE_ALLOWED_HOSTS if in_sandbox else DEFAULT_GIT_CLONE_ALLOWED_HOSTS,
-            ),
-        ),
-        skills=SkillsConfig(
-            enabled=os.environ.get("SKILLS_ENABLED", "true").lower() in _TRUTHY_VALUES,
-            # In sandbox: the Dockerfile copies ``skills/`` into
-            # ``/app/skills`` so the packaged starter skills are
-            # available regardless of CWD.
-            skills_dir=os.environ.get(
-                "SKILLS_DIR",
-                _SANDBOX_SKILLS_DIR if in_sandbox else DEFAULT_SKILLS_DIR,
-            ),
-        ),
-    )
+# ── Public entry point ──────────────────────────────────────────────
+
+
+def load_config() -> AppConfig:
+    """Load configuration from the standard sources.
+
+    Thin backward-compat wrapper around :meth:`AppConfig.load`.  New
+    call sites should prefer ``AppConfig.load()`` directly.
+
+    Returns:
+        Fully populated ``AppConfig`` ready for use by the application.
+
+    Raises:
+        ValueError: If required environment variables are missing.
+    """
+    return AppConfig.load()
 
 
 def load_system_prompt(path: str) -> str:
