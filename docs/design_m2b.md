@@ -6,7 +6,7 @@
 >
 > **Successor:** [Milestone 3 — Review Agent](design.md#milestone-3--review-agent)
 >
-> **Last updated:** 2026-04-14
+> **Last updated:** 2026-04-20
 
 ---
 
@@ -116,8 +116,11 @@ no code duplication.
 │  │  NMB Broker                       │   │  Coding Agent Process  │   │
 │  │  (WebSocket, single-host)         │   │                        │   │
 │  └──────────────────────────────────┘   │  AgentLoop (from M2a)  │   │
-│                                          │  File Tools            │   │
-│                                          │  Notes file (skill)    │   │
+│                                          │  File/Search/Bash/Git  │   │
+│                                          │  Skill tool + skills/  │   │
+│                                          │   (scratchpad skill →  │   │
+│                                          │    notes-<slug>-<id>.md│   │
+│                                          │    via file tools)     │   │
 │                                          │  AuditBuffer           │   │
 │                                          └────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
@@ -162,10 +165,21 @@ no code duplication.
 *Full specification: [original §5.2–5.3](design_m2.md#52--workspace-setup-setup-workspacesh)*
 
 The orchestrator prepares the workspace before spawning the sub-agent:
-- Clone/checkout the target repository (shallow clone for speed)
-- Seed `notes.md` with an initial template (via the `scratchpad` skill)
-- Seed skills directory (placeholder for M5+)
-- Seed memory directory (placeholder for M5+)
+- Clone/checkout the target repository (shallow clone for speed).  The
+  coding agent itself also has `git_clone` and `git_checkout` tools
+  (M2a §4); `git_clone` is fail-closed behind the
+  `GIT_CLONE_ALLOWED_HOSTS` allowlist — empty disables the tool.
+- No notes file is pre-seeded.  The `scratchpad` skill
+  (`skills/scratchpad/SKILL.md`) teaches the agent to create a
+  task-scoped file named `notes-<task-slug>-<agent-id>.md` on demand
+  using the ordinary `read_file` / `write_file` / `edit_file` tools.
+  Using a bare `notes.md` is forbidden — it collides the moment two
+  agents run in the same workspace.
+- The `skills/` directory is bundled with the sandbox image (Dockerfile
+  copies it into `/app/skills`); M2a's `SkillLoader` discovers
+  `SKILL.md` files from `SKILLS_DIR` at sub-agent startup and the
+  `skill` tool exposes them via an enum.
+- Seed memory directory (placeholder for M5+).
 
 ### 4.3 Sandbox Cleanup
 
@@ -200,6 +214,362 @@ for the full design.
 
 Sub-agents connect to the NMB broker at startup. The broker URL is provided
 via environment variable. Authentication is by sandbox identity.
+
+### 5.3 Sandbox Configuration Layer (`/app/config.yaml`)
+
+#### 5.3.1 Problem Statement
+
+Today the sandbox receives configuration via three incomplete mechanisms:
+
+1. **Provider-injected env vars** — OpenShell attaches providers (`make setup-providers`)
+   and injects placeholder env vars that the L7 proxy resolves at HTTP request
+   time. Only works for values that flow through HTTP headers (auth tokens).
+2. **Dockerfile `ENV` directives** — static, baked at image build time. No
+   per-deployment override.
+3. **`in_sandbox` branches in `config.py`** — `_SANDBOX_CODING_WORKSPACE_ROOT`,
+   `_SANDBOX_SKILLS_DIR`, and similar constants are selected when
+   `OPENSHELL_SANDBOX` is set. Every new knob adds another `if in_sandbox:`
+   branch, and two sandboxes running from the same image cannot have different
+   settings.
+
+This means **non-secret configuration** (log level, workspace root, feature
+flags, tuning parameters) cannot be overridden per sandbox without rebuilding
+the image. `openshell sandbox create` does not support `--build-arg` or a
+general `--env KEY=VALUE` flag, so there is no clean escape hatch today.
+
+#### 5.3.2 Three Categories of Configuration
+
+The config problem is not a clean secret-vs-non-secret split. We actually have
+**three** categories of values:
+
+| Category | Example fields | Where it lives today | Problem |
+|----------|----------------|----------------------|---------|
+| **A — Public non-secret** | `log.level`, `orchestrator.model`, `audit.db_path`, `coding.workspace_root`, tuning knobs | Dataclass defaults + `in_sandbox` branches in `config.py`, Dockerfile `ENV`, scattered | Not in sandbox env; every new knob needs another `if in_sandbox:` branch |
+| **B — Private non-secret** | `coding.git_clone_allowed_hosts`, `ENDPOINTS_NEEDING_ALLOWED_IPS`, `ALLOWED_IPS`, internal URLs | `.env` (gitignored) + `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` constant in `config.py` | **`_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` currently leaks internal NVIDIA hostnames into the public repo** |
+| **C — Secret** | `SLACK_BOT_TOKEN`, `JIRA_AUTH`, `GITLAB_TOKEN`, inference API key | `.env` (gitignored) → OpenShell providers → proxy placeholders | Works fine — nothing to change |
+
+Category B is the one your question flags. These values are not credentials,
+so the provider/placeholder flow doesn't apply (the app reads them directly,
+not via HTTP headers). But they *also* shouldn't ship in the public repo.
+Today we work around this by inlining them as `_SANDBOX_*` constants in
+`config.py`, which leaks them into every git push.
+
+#### 5.3.3 Proposal: Public Base + Private Overlay + Build-Time Resolver
+
+Mirror the existing `scripts/gen_policy.py` pattern (which already solves the
+same problem for network-policy `allowed_ips` CIDRs):
+
+| File | Purpose | Committed? | Shipped in image? |
+|------|---------|------------|-------------------|
+| `config/defaults.yaml` | Public non-secret defaults (category A) + fail-closed placeholders for category B | ✅ committed | ✅ (intermediate build input) |
+| `.env` | Category B overrides + category C secrets | ❌ gitignored | ❌ never |
+| `config/orchestrator.resolved.yaml` | Merged: defaults + category B values from `.env` | ❌ gitignored | ✅ as `/app/config.yaml` |
+| `scripts/gen_config.py` | Reads `defaults.yaml` + `.env` → writes `resolved.yaml` | ✅ committed | — |
+
+Build flow:
+
+1. `make setup-sandbox` depends on `make gen-config` (new target, mirrors
+   `gen-policy`).
+2. `gen_config.py` reads `config/defaults.yaml`, applies overrides from `.env`
+   for a *named allowlist* of category-B keys, writes
+   `config/orchestrator.resolved.yaml`.
+3. `docker/Dockerfile.orchestrator` has
+   `COPY --chown=root:root config/orchestrator.resolved.yaml /app/config.yaml`.
+4. The resolved file is gitignored (alongside `policies/orchestrator.resolved.yaml`).
+
+Runtime flow:
+
+1. App reads `/app/config.yaml` at startup — it already contains the merged
+   category-A + category-B values baked in at build time.
+2. Env vars still override individual fields (category C secrets come in
+   this way as provider placeholders; local-dev overrides also still work).
+
+OSS / CI consumers without a `.env`: `gen_config.py` emits a resolved file
+that's byte-identical to `defaults.yaml`. All category-B fields hold their
+fail-closed values (e.g. `git_clone_allowed_hosts: ""` → `git_clone` tool
+refuses every URL), which is the correct security posture for a fresh clone.
+
+#### 5.3.4 Schema
+
+`config/defaults.yaml` — shipped publicly, **no sensitive values**:
+
+```yaml
+orchestrator:
+  model: azure/anthropic/claude-opus-4-6
+  system_prompt_path: prompts/system_prompt.md
+  max_thread_history: 50
+  temperature: 0.7
+  max_tokens: 2048
+
+agent_loop:
+  max_tool_rounds: 10
+  max_continuation_retries: 2
+  micro_compaction_chars: 10000
+  compaction_threshold_chars: 400000
+  compaction_compress_ratio: 0.5
+  compaction_min_keep: 4
+
+log:
+  level: INFO
+  # log_file deliberately unset — Dockerfile ENV wins so the path stays
+  # image-structure-dependent (/app/logs/nemoclaw.log).
+
+audit:
+  enabled: true
+  db_path: /sandbox/audit.db
+  persist_payloads: true
+
+coding:
+  enabled: true
+  workspace_root: /sandbox/workspace
+  git_clone_allowed_hosts: ""   # category B — resolver fills from .env; empty = fail-closed
+
+skills:
+  enabled: true
+  skills_dir: /app/skills
+
+toolsets:
+  jira:
+    enabled: true
+    url: https://jirasw.nvidia.com  # public SaaS URL
+  gitlab:
+    enabled: true
+    url: ""   # category B — resolver fills from .env if GITLAB_URL is set
+  gerrit:
+    enabled: true
+    url: ""   # category B — resolver fills from .env if GERRIT_URL is set
+  confluence:
+    enabled: true
+    url: https://nvidia.atlassian.net/wiki  # public SaaS URL
+  slack_search:
+    enabled: true
+  web_search:
+    enabled: true
+    default_limit: 5
+```
+
+`scripts/gen_config.py` — explicit allowlist of the keys it will fill from
+`.env`. Any other `.env` key is ignored (so an operator can't accidentally
+inject arbitrary config):
+
+```python
+# Category-B keys: .env var name → YAML dotted path
+_CATEGORY_B_KEYS: dict[str, str] = {
+    "GIT_CLONE_ALLOWED_HOSTS":    "coding.git_clone_allowed_hosts",
+    "GITLAB_URL":                 "toolsets.gitlab.url",
+    "GERRIT_URL":                 "toolsets.gerrit.url",
+    # Future: any other host/IP-flavoured override.
+}
+```
+
+**Explicit non-goal**: secret-like fields (`auth_header`, `token`,
+`api_token`, `username`, `http_password`, `bot_token`, `app_token`,
+`user_token`, `api_key`, `jina_api_key`) are **deliberately** excluded from
+both the YAML schema and the `gen_config.py` allowlist. They continue to
+load from env vars — which, in the sandbox, are provider-injected
+placeholders resolved by the L7 proxy. Mixing them into a file-based config
+would either expose secrets in images or require yet another resolution
+layer. `gen_config.py` refuses to write any key whose name matches the
+forbidden suffix list.
+
+#### 5.3.5 Configuration Precedence
+
+Load order at runtime, lowest to highest precedence:
+
+| # | Source | Scope | Notes |
+|---|--------|-------|-------|
+| 1 | Dataclass field defaults | Process-wide | Hardcoded in `config.py` |
+| 2 | `/app/config.yaml` (the resolved file baked into the image) | Per-deployment | Missing file is not an error — treated as empty overlay |
+| 3 | Environment variables | Per-run | `os.environ.get(...)` overrides file values; respects `NEMOCLAW_CONFIG_PATH` for alternate YAML |
+| 4 | Provider-injected env vars (secrets) | Per-run | Placeholder strings resolved by proxy at request time |
+
+Rationale:
+
+- **YAML before env**: the file provides the deployment's defaults; env vars
+  remain the escape hatch for local dev (`LOG_LEVEL=DEBUG make run-local-dev`).
+- **Env wins at the leaf, not the root**: the precedence is applied
+  per-field, not at the top level, so an env var for one knob doesn't erase
+  the YAML's values for others.
+- **Secrets stay in env**: unchanged from today, so the existing
+  provider-resolution flow is preserved.
+- **Category-B values flow defaults → resolver → YAML → runtime** without
+  ever touching `os.environ` inside the sandbox — so the L7 proxy's
+  placeholder substitution (which only applies to HTTP headers) is never
+  relevant for them.
+
+#### 5.3.6 Loader Implementation Sketch
+
+A new `NemoClawConfig.load()` classmethod replaces `load_config()`:
+
+```python
+# config.py
+@classmethod
+def load(cls, path: str | None = None) -> AppConfig:
+    # 1. Start with dataclass defaults.
+    config = AppConfig()
+
+    # 2. Apply YAML overlay (if present).
+    yaml_path = Path(path or os.environ.get("NEMOCLAW_CONFIG_PATH") or _DEFAULT_YAML_PATH)
+    if yaml_path.is_file():
+        overlay = yaml.safe_load(yaml_path.read_text()) or {}
+        config = _merge_yaml_overlay(config, overlay)
+
+    # 3. Apply env-var overrides (existing behaviour).
+    config = _apply_env_overrides(config)
+
+    # 4. Validate required secrets are present (from provider-injected env).
+    _check_required_secrets(config)
+
+    return config
+```
+
+`_merge_yaml_overlay` walks the nested dict and assigns to corresponding
+dataclass fields using `dataclasses.replace` on each sub-config. Unknown top-
+level keys log a warning but don't fail (forward compatibility).
+
+`_apply_env_overrides` is the existing `os.environ.get(...)` logic, lifted
+out of `load_config()` and converted to update an existing `AppConfig`
+rather than constructing one from scratch.
+
+#### 5.3.7 Migration Plan
+
+1. **Remove the leak**: delete `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` and
+   `_SANDBOX_CODING_WORKSPACE_ROOT` and `_SANDBOX_SKILLS_DIR` constants
+   from `config.py`. These values move to `config/defaults.yaml` (public-safe
+   versions) and — for the host-allowlist case — to `.env` plus the resolver.
+2. **Create `config/defaults.yaml`** with the schema above, using
+   fail-closed / empty-string values for all category-B fields.
+3. **Create `scripts/gen_config.py`** mirroring `scripts/gen_policy.py`.
+   Output path: `config/orchestrator.resolved.yaml`. Add to `.gitignore`.
+4. **Wire into the Makefile**: new `gen-config` target; `setup-sandbox`
+   gains `gen-config` as a prerequisite (alongside the existing
+   `gen-policy`).
+5. **Update `docker/Dockerfile.orchestrator`**:
+   `COPY --chown=root:root config/orchestrator.resolved.yaml /app/config.yaml`
+   and add `/app/config.yaml` to the read-only filesystem policy.
+6. **Replace `load_config()` with `NemoClawConfig.load()`**; remove the
+   `in_sandbox` branches for `coding.workspace_root`, `skills.skills_dir`,
+   `audit.db_path`, and `coding.git_clone_allowed_hosts`.
+7. **Keep `OPENSHELL_SANDBOX` detection** for the *startup self-check*
+   only (§5.4); the YAML-based path selection obsoletes it for config
+   routing.
+8. **Update `.env.example`** with a comment listing the category-B keys
+   (`GIT_CLONE_ALLOWED_HOSTS`, `GITLAB_URL`, `GERRIT_URL`) and noting that
+   `gen_config.py` is the only consumer of those for sandbox deployment.
+   Remove stale references to `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`.
+
+#### 5.3.8 What Changes for the Operator
+
+Today:
+
+```bash
+# .env
+GIT_CLONE_ALLOWED_HOSTS=url1.nvidia.com,url2.nvidia.com,github.com
+```
+- Works locally (Makefile exports → `os.environ` → `load_config`).
+- Does NOT work in sandbox (the `.env` isn't read inside; `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` constant is what's used, so the value silently ignores `.env`).
+
+After M2b:
+
+```bash
+# .env — unchanged
+GIT_CLONE_ALLOWED_HOSTS=url1.nvidia.com,url2.nvidia.com,github.com
+```
+
+- `make gen-config` reads `.env`, writes
+  `config/orchestrator.resolved.yaml:coding.git_clone_allowed_hosts`.
+- `make setup-sandbox` COPYs the resolved file into the image → the sandbox
+  starts with the allowlist honoured, no `_SANDBOX_*` constant in public code.
+- Local-dev path is unchanged — env vars still flow through `NemoClawConfig.load()`.
+
+### 5.4 Sandbox Detection and Startup Self-Check
+
+#### 5.4.1 Problem Statement
+
+`in_sandbox` today depends on a single signal: `os.environ.get("OPENSHELL_SANDBOX")`.
+The value is *never set by this repo* — the code assumes OpenShell injects it
+automatically. If the convention changes (new OpenShell version, custom image,
+misconfigured profile), the app silently falls back to local-dev defaults.
+Symptoms are all downstream and non-obvious:
+
+- Inference calls fail (`INFERENCE_HUB_BASE_URL` required but empty).
+- Audit DB written to `~/.nemoclaw/audit.db` inside a container with no
+  persistent `~` directory.
+- File tools root at `~/.nemoclaw/workspace` which doesn't exist in the
+  sandbox filesystem policy.
+
+Once §5.3 lands, the YAML provides the correct paths directly, so most of
+these silent fallbacks disappear. But the `in_sandbox` flag is still useful
+for *validation* — it gates "am I running where I think I am?" checks.
+
+#### 5.4.2 Multi-Signal Detection
+
+A new helper `detect_runtime_environment()` evaluates independent signals and
+classifies the environment:
+
+| # | Signal | Meaning |
+|---|--------|---------|
+| 1 | `OPENSHELL_SANDBOX` env var set | OpenShell's self-identification |
+| 2 | `/sandbox` directory exists and is writable | PVC mount point present |
+| 3 | `/app/src` exists and is read-only | Dockerfile-copied app source |
+| 4 | `HTTPS_PROXY` env var set | L7 proxy is active |
+| 5 | `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` set | OpenShell CA installed |
+| 6 | `inference.local` DNS resolves | Inference proxy reachable |
+
+Result is one of:
+
+- `LOCAL_DEV` — none or almost none of the sandbox signals present.
+- `SANDBOX` — all or nearly all signals present (≥ N/6 threshold).
+- `INCONSISTENT` — a mix: some signals say sandbox, others say local dev.
+  Almost always a deployment bug.
+
+The threshold lets us tolerate minor signal drift (e.g. the `inference.local`
+DNS lookup is a network op and can be slow or flaky) without weakening the
+check. A conservative default is "at least 4 of 6 sandbox signals ⇒ SANDBOX".
+
+#### 5.4.3 Startup Self-Check
+
+`main.py` calls `detect_runtime_environment()` immediately after logging setup
+and before `NemoClawConfig.load()`. On `INCONSISTENT`, it raises
+`SandboxConfigurationError` with a structured log entry showing which signals
+were present and which were missing, plus a suggested fix. Example:
+
+```json
+{
+  "level": "ERROR",
+  "component": "main",
+  "message": "Sandbox detection inconsistent — refusing to start",
+  "signals_present": ["HTTPS_PROXY", "sandbox_dir", "ssl_cert_file"],
+  "signals_missing": ["OPENSHELL_SANDBOX", "inference_local_resolves"],
+  "classification": "INCONSISTENT",
+  "likely_cause": "OpenShell version drift or gateway misconfigured",
+  "suggested_fix": "Run `make status` to inspect providers; recreate sandbox with `make run-local-sandbox`"
+}
+```
+
+On `LOCAL_DEV` and `SANDBOX` the same signals are logged at INFO so operators
+can inspect them in the running log without special tooling.
+
+#### 5.4.4 Interaction with Config Loading
+
+The self-check runs *before* `NemoClawConfig.load()`, so config loading can
+trust the detection result instead of re-deriving it. This lets us:
+
+- Pass the detected environment into `NemoClawConfig.load(env=detected_env)`
+  to select a default YAML path (`/app/config.yaml` in `SANDBOX`,
+  `config/defaults.yaml` for local dev).
+- Surface `detected_env` in the structured log for every request, so the
+  audit trail records which environment served each turn.
+
+#### 5.4.5 Why Not Trust `OPENSHELL_SANDBOX` Alone?
+
+A multi-signal check costs roughly 50 lines of Python and one extra log line
+per startup. The alternative — trusting a single env var — has already caused
+one class of silent failure (`load_config()` happily producing a config with
+an empty `INFERENCE_HUB_BASE_URL` if that env var is missing while
+`OPENSHELL_SANDBOX` is set, or vice versa). The self-check is cheap insurance
+against the full family of "I thought I was in a sandbox" bugs, not just the
+specific `OPENSHELL_SANDBOX` case.
 
 ---
 
@@ -239,10 +609,21 @@ async def main():
     await agent.run()
 ```
 
-The `CodingAgent` (Layer 3) uses the same `AgentLoop` (Layer 1) from M2a with
-a coding-specific tool registry.  Working memory is maintained by the
-agent itself via the `scratchpad` skill — a convention for using the
-ordinary file tools against a well-known notes file.
+The `CodingAgent` (Layer 3) uses the same `AgentLoop` (Layer 1) from M2a
+with a coding-specific tool registry built by
+`create_coding_tool_registry()` (file, search, bash, git — M2a §4).
+There is no dedicated scratchpad class or pair of
+`scratchpad_read` / `_write` tools — that primitive was removed in M2a
+in favour of a pure convention.  The `scratchpad` skill
+(`skills/scratchpad/SKILL.md`) teaches the agent to create and edit a
+task-scoped `notes-<task-slug>-<agent-id>.md` file in its workspace
+using the ordinary file tools; the file carries an `Owner:` header
+(keyed off the `Agent ID` line in the prompt's runtime-metadata layer)
+so concurrent agents in the same workspace can't silently clobber each
+other's working memory.  The system prompt is a four-layer builder
+(identity / task-context / runtime-metadata / channel-hint) — the
+fifth, auto-injected scratchpad layer from earlier drafts no longer
+exists.
 
 ---
 
@@ -499,17 +880,48 @@ rendering (thinking indicator, step count, current tool).
 
 ## 14  Implementation Plan
 
-### Phase 1 — Coding agent process + sub-agent entrypoint
+### Phase 1 — Sandbox configuration layer + coding agent process
 
 | Task | Files |
 |------|-------|
+| Ship `config/defaults.yaml` (public-safe, no category-B values) | `config/defaults.yaml` |
+| Implement `scripts/gen_config.py` (mirrors `gen_policy.py`) with category-B allowlist and secret-field guard | `scripts/gen_config.py` |
+| Add `gen-config` Make target; make it a prerequisite of `setup-sandbox` | `Makefile` |
+| Gitignore `config/orchestrator.resolved.yaml` | `.gitignore` |
+| Dockerfile: `COPY config/orchestrator.resolved.yaml /app/config.yaml`; add `/app/config.yaml` to read-only filesystem policy | `docker/Dockerfile.orchestrator`, `policies/orchestrator.yaml` |
+| **Remove the public-repo leak**: delete `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`, `_SANDBOX_CODING_WORKSPACE_ROOT`, `_SANDBOX_SKILLS_DIR` constants from `config.py` | `src/nemoclaw_escapades/config.py` |
+| Implement `NemoClawConfig.load()` with YAML + env-var precedence | `src/nemoclaw_escapades/config.py` |
+| Remove `in_sandbox` branches for paths / host allowlists | `src/nemoclaw_escapades/config.py` |
+| Implement `detect_runtime_environment()` with multi-signal check | `src/nemoclaw_escapades/runtime.py` (new) |
+| Wire startup self-check in `main.py`; raise `SandboxConfigurationError` on `INCONSISTENT` | `src/nemoclaw_escapades/main.py` |
+| Unit tests for YAML overlay, env-var precedence, signal detection, `gen_config.py` resolver | `tests/test_config.py`, `tests/test_gen_config.py` |
+| Update `.env.example`: document category-B keys, remove references to `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` | `.env.example` |
 | Create sub-agent `__main__` entrypoint | `agent/__main__.py` |
 | Create `AgentSetupBundle` dataclass | `agent/types.py` |
 | Create coding agent system prompt template | `prompts/coding_agent.md` |
 | End-to-end test: agent process starts, handles task, returns result | `tests/integration/test_coding_agent.py` |
 
-**Exit criteria:** Coding agent process starts, connects to NMB, receives
-`task.assign`, runs the M2a `AgentLoop` with file tools, sends `task.complete`.
+**Exit criteria:**
+
+- `config.py` contains no internal NVIDIA hostnames; `git grep nvidia.com src/`
+  returns no matches outside of docstrings and tool URL defaults.
+- `make gen-config` with an empty `.env` produces a resolved file whose
+  category-B fields all hold fail-closed values.
+- `make gen-config` with a populated `.env` produces a resolved file whose
+  `coding.git_clone_allowed_hosts` matches the operator's `.env` value.
+- `gen_config.py` refuses to write any key whose `.env` name matches the
+  secret-suffix list (`*_TOKEN`, `*_AUTH`, `*_PASSWORD`, `*_KEY`).
+- `NemoClawConfig.load()` reads defaults + YAML overlay + env overrides with
+  the documented precedence.
+- `make run-local-sandbox` succeeds on a fresh sandbox; the startup log shows
+  `classification: SANDBOX` with all signals present.
+- A broken sandbox (e.g. `OPENSHELL_SANDBOX` manually unset) fails fast with
+  a structured `SandboxConfigurationError` instead of silently reverting to
+  local-dev defaults.
+- Coding agent process starts, connects to NMB, receives `task.assign`, runs
+  the M2a `AgentLoop` with the coding tool suite (file / search / bash / git
+  — the latter includes the host-allowlisted `git_clone` and `git_checkout`)
+  and the `SkillLoader`-discovered `skill` tool, sends `task.complete`.
 
 ### Phase 2 — Orchestrator delegation, NMB event loop, concurrency caps, and finalization
 
@@ -571,6 +983,19 @@ progress reporting, and robust handling.
 
 | Test | What it verifies |
 |------|-----------------|
+| Config YAML overlay | Missing file → dataclass defaults; partial file → unspecified keys keep defaults |
+| Config env-var precedence | Env var overrides YAML value for the same field |
+| Config unknown keys | Forward-compat: unknown top-level keys log a warning but don't raise |
+| Config secret isolation (loader) | Secret-like fields listed in the YAML are rejected with a clear error |
+| `gen_config.py` — empty `.env` | Resolved file byte-equals `defaults.yaml` (all category-B fields fail-closed) |
+| `gen_config.py` — populated `.env` | `coding.git_clone_allowed_hosts` in the resolved file matches the `.env` value |
+| `gen_config.py` — unknown key | Unrecognised `.env` keys are ignored (never appear in resolved output) |
+| `gen_config.py` — secret guard | An `.env` key matching `*_TOKEN`/`*_AUTH`/`*_PASSWORD`/`*_KEY` in the category-B allowlist → resolver fails with a clear error |
+| No hostname leak in public source | `git grep nvidia.com src/ -- ':!*.md'` returns zero matches outside of public SaaS URLs (`jirasw.nvidia.com`, `nvidia.atlassian.net`) |
+| Sandbox detection — LOCAL_DEV | No sandbox signals → classification `LOCAL_DEV` |
+| Sandbox detection — SANDBOX | All signals present → classification `SANDBOX` |
+| Sandbox detection — INCONSISTENT | Partial signals → `INCONSISTENT` + structured error |
+| Startup self-check | `INCONSISTENT` classification raises `SandboxConfigurationError` before config load |
 | Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion |
 | Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error |
 | NMB reliable send | Message persisted to disk before send; deleted after ack |
@@ -583,6 +1008,9 @@ progress reporting, and robust handling.
 
 | Test | What it verifies |
 |------|-----------------|
+| Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present |
+| Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects |
+| Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild |
 | Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` |
 | Coding agent end-to-end | Agent receives task, uses file tools, returns diff |
 | Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup |
@@ -613,7 +1041,13 @@ progress reporting, and robust handling.
 | NMB broker unavailability | Cannot communicate with sub-agent | Fail-open: detect broker down, surface error to user, retry on recovery |
 | Sub-agent infinite loop | Consumes tokens without progress | `max_tool_rounds` + TTL watchdog |
 | Large workspace clones | Slow setup, high storage | Shallow clones; NMB context for small tasks |
+| Arbitrary `git_clone` targets | Data exfiltration / supply-chain risk via sub-agent clones | Fail-closed host allowlist on the `git_clone` tool via `GIT_CLONE_ALLOWED_HOSTS` (M2a §4).  Empty allowlist disables the tool entirely; only explicitly listed hosts are reachable. |
+| Concurrent notes-file clobber | Two sub-agents sharing a workspace overwrite each other's working memory | `scratchpad` skill mandates filenames of the form `notes-<task-slug>-<agent-id>.md` with an `Owner:` header; the `Agent ID` is seeded by the runtime-metadata prompt layer so every agent gets a unique id.  Bare `notes.md` is explicitly forbidden by the skill. |
 | Credential leakage via notes file | Agent writes secrets | Notes-file sanitisation before return to orchestrator. *(M2b: same sandbox, so process-level isolation only. M3 adds kernel-level sandbox isolation.)* |
+| Silent sandbox-detection drift | App starts inside a broken sandbox, silently picks local-dev defaults, fails later in non-obvious ways (e.g. inference 403, audit written to wrong path) | Multi-signal `detect_runtime_environment()` + fail-fast `SandboxConfigurationError` on `INCONSISTENT`. Signals logged at every startup so drift is visible in the structured log. (§5.4) |
+| Non-secret config drift across sandboxes | Two deployments from the same image need different log levels / workspace roots / feature flags, but `openshell sandbox create` has no `--env` flag | File-based `/app/config.yaml` overlay with per-field env-var overrides (§5.3). Secrets stay on providers; non-secrets get a single, auditable configuration surface. |
+| Internal infrastructure leaked via public source | Category-B values (internal hostnames, host allowlists, infra URLs) inlined as `_SANDBOX_*` constants in `config.py` ship with every public `git push` | Public `config/defaults.yaml` holds only fail-closed placeholders for category-B fields. Real values live in gitignored `.env` and are merged into a gitignored `config/orchestrator.resolved.yaml` at build time by `scripts/gen_config.py` (same pattern as `gen_policy.py`). (§5.3.2 / §5.3.3) |
+| Accidental secret exposure via config YAML | An operator could copy a token into `defaults.yaml` or `gen_config.py` could inadvertently route a `.env` secret into the resolved YAML | `gen_config.py` maintains an explicit category-B allowlist of keys it will honour; any `.env` key outside the allowlist is ignored. Any `.env` key matching the secret suffix list (`*_TOKEN`, `*_AUTH`, `*_PASSWORD`, `*_KEY`) included in the allowlist is a hard error. Loader-side guard rejects any YAML key that maps to a known secret field. (§5.3.4) |
 
 ---
 
