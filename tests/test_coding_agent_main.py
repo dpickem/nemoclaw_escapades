@@ -186,6 +186,97 @@ class TestCliMode:
         # Phase 2's AuditBuffer will flush over NMB to the orchestrator's
         # single audit DB.  Assert the fake loop received ``audit=None``.
         assert captured["audit"] is None
+        # Regression: CLI mode must scope each run to a per-agent
+        # subdirectory so two concurrent invocations can't clobber
+        # each other's scratchpad / notes files.
+        import re
+
+        assert re.search(
+            rf"Workspace root: {re.escape(str(workspace))}/agent-[0-9a-f]{{8}}\b",
+            captured["system_prompt"],
+        ), (
+            "expected per-agent subdirectory of shape "
+            "``<workspace>/agent-<agent_id>`` in the system prompt, got: "
+            f"{captured['system_prompt']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cli_mode_per_agent_subdirectory_is_created(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two sub-agent invocations land in distinct workspace subdirs.
+
+        Enforces the §4.2 isolation invariant at the filesystem
+        level: even when operators run two CLI invocations with the
+        same ``--workspace`` base path (or both default to
+        ``config.coding.workspace_root``), the concrete tool-root
+        directories must diverge so scratchpad notes / edits don't
+        clobber each other.
+        """
+        created_dirs: list[Path] = []
+
+        class _FakeAgentLoop:
+            def __init__(self, *, tools: Any, **_: Any) -> None:
+                # ``tools`` is the real ``ToolRegistry`` — the file
+                # tools' workspace root lives behind it.  We don't
+                # need to introspect; the assertion is that the
+                # workspace mkdir inside ``_build_tool_registry``
+                # actually hit a unique path.  Just record that
+                # we got called.
+                created_dirs.append(Path(tools.names.__self__.__class__.__name__))
+
+            async def run(self, *, messages: list[Any], request_id: str) -> Any:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": "ok",
+                        "rounds": 1,
+                        "tool_calls_made": 0,
+                        "hit_safety_limit": False,
+                    },
+                )()
+
+        monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoop)
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        from nemoclaw_escapades.config import AppConfig
+
+        base = tmp_path / "ws"
+        config = AppConfig.load()
+
+        import logging
+
+        logger = logging.getLogger("test")
+        # First invocation.
+        await agent_main._run_cli_mode(
+            task_description="task one",
+            workspace_root=str(base),
+            config=config,
+            backend=_FakeBackend(),
+            logger=logger,
+        )
+        # Second invocation — same base, expect a different subdir.
+        await agent_main._run_cli_mode(
+            task_description="task two",
+            workspace_root=str(base),
+            config=config,
+            backend=_FakeBackend(),
+            logger=logger,
+        )
+        # Exactly two ``agent-<hex>`` subdirectories landed on disk.
+        subdirs = sorted(p for p in base.iterdir() if p.is_dir())
+        assert len(subdirs) == 2
+        for p in subdirs:
+            assert p.name.startswith("agent-")
+            assert len(p.name) == len("agent-") + 8  # _make_agent_id is 8 hex
+        # Distinct agent ids.
+        assert subdirs[0].name != subdirs[1].name
 
     @pytest.mark.asyncio
     async def test_run_task_never_passes_audit_even_when_config_enables_it(

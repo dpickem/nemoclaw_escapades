@@ -189,13 +189,25 @@ async def _run_cli_mode(
     stdout.  Useful for iterating locally and for the integration
     test.  Workspace defaults to ``config.coding.workspace_root`` if
     the caller doesn't pass one explicitly.
+
+    Each invocation gets its own ``agent-<agent_id>`` subdirectory
+    under the base workspace so two concurrent CLI runs (or a cron
+    job and an interactive session) don't clobber each other's
+    ``notes-<task-slug>-<agent-id>.md`` scratch files.  Matches the
+    design §4.2 isolation invariant: the sub-agent's ``agent_id``
+    appears in both the workspace path and the scratchpad filename.
     """
+    agent_id = _make_agent_id()
+    base_workspace = Path(
+        workspace_root or config.coding.workspace_root
+    ).expanduser()
+    per_agent_workspace = base_workspace / f"agent-{agent_id}"
     bundle = AgentSetupBundle(
         task_id=f"cli-{_make_agent_id()}",
-        agent_id=_make_agent_id(),
+        agent_id=agent_id,
         parent_agent_id="cli",
         task_description=task_description,
-        workspace_root=workspace_root or config.coding.workspace_root,
+        workspace_root=str(per_agent_workspace),
         source_type=SourceType.AGENT,
     )
     tools = _build_tool_registry(config, bundle)
