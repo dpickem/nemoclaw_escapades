@@ -149,7 +149,7 @@ class SkillLoader:
             self.skills[skill_id] = info
             logger.info(
                 "Discovered skill",
-                extra={"skill_id": skill_id, "name": name, "path": str(skill_file)},
+                extra={"skill_id": skill_id, "skill_name": name, "path": str(skill_file)},
             )
 
         logger.info("Skill scan complete", extra={"count": len(self.skills)})
