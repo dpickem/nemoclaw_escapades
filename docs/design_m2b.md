@@ -6,7 +6,7 @@
 >
 > **Successor:** [Milestone 3 — Review Agent](design.md#milestone-3--review-agent)
 >
-> **Last updated:** 2026-04-20
+> **Last updated:** 2026-04-21
 
 ---
 
@@ -192,6 +192,188 @@ After `task.complete` or timeout:
 2. Kill the sub-agent process.
 3. Clean up workspace directory.
 4. TTL watchdog ensures cleanup even if the orchestrator misses `task.complete`.
+
+### 4.4 Authenticated `git_clone` for Private Hosts
+
+> **Motivating user report:** A sandbox user running
+> `git clone https://gitlab.example.com/…` hit
+> `fatal: unable to access '…': CONNECT tunnel failed, response 403` even with
+> the `gitlab` network policy correctly applied (host allowed, port 443 full
+> access, `/usr/bin/git` on the binary allowlist); `curl` against the same
+> host returned 200.  See the
+> [Slack discussion](https://nvidia.slack.com/archives/C0AE9P50JVA/p1774387323428199)
+> for the full thread.  This is the concrete failure mode §4.4.1 describes.
+
+#### 4.4.1 Problem Statement
+
+M2a ships `git_clone` as part of the coding tool suite ([M2a §4 tools](design_m2a.md#4--coding-agent-tools)), scoped to a fail-closed host allowlist.  After this milestone's sandbox-image and policy delta (`git` binary installed, `/usr/bin/git` whitelisted for the `github` / `gitlab` / `gerrit` network policies) *unauthenticated* HTTPS clones work out of the box — the obvious case is a public `github.com` repo.
+
+Private hosts are the problem.  An internal GitLab (`gitlab.example.com`), a private Gerrit (`gerrit.example.com`), and a private GitHub repo all reject the clone with an HTTP 401 because git has no credentials to present.  We already hold the right credentials — `GITLAB_TOKEN`, `GERRIT_USERNAME`, and `GERRIT_HTTP_PASSWORD` are OpenShell providers, injected into the sandbox as *placeholder* env vars (e.g. `GITLAB_TOKEN=openshell:resolve:env:GITLAB_TOKEN`) that the L7 proxy substitutes for real values in the `Authorization` header at TLS termination.  Our REST tools consume those placeholders for free because *we* wrote the code that sets `Authorization: Bearer $GITLAB_TOKEN` on every request (`GitLabClient`, `JiraClient`, `GerritClient`, `ConfluenceClient`).
+
+Git doesn't have that hook.  Its credential sources are URL userinfo, credential helpers, `~/.git-credentials` / `.netrc`, and interactive prompts — none of which natively read an env var.  The placeholder sits in `$GITLAB_TOKEN`; git just doesn't know to look.  The four options below are three different *bridges* from "placeholder in env" → "`Authorization` header the proxy can substitute" (URL embedding, credential helper, SSH sidestep), plus a fourth that avoids the clone entirely.  Every option except C (SSH) composes with the existing provider flow; C is the only one that introduces a parallel credential channel.
+
+Two properties matter regardless of which bridge we pick:
+
+1. **No secret leakage into the filesystem image or the cloned repo's `.git/config`.**  Tokens baked into files survive container rebuilds, operator `git push`es, and audit-log captures.  The same URL that holds a harmless placeholder inside the sandbox holds the *real* token on the operator's host (where `$GITLAB_TOKEN` is the unwrapped value from `.env`, used by `make run-local-dev` and `scripts/test_auth.py`), so the leakage is not purely theoretical.
+2. **Reuse the existing provider / placeholder system where possible.**  We already hold `GITLAB_TOKEN` / `GERRIT_USERNAME` / `GERRIT_HTTP_PASSWORD` as OpenShell providers.  Adding a parallel credential channel for git — SSH keys mounted into the sandbox, a new secret store, a parallel rotation story — doubles the surface.  Options A and B satisfy this; C does not.
+
+#### 4.4.2 Option A — URL-embedded token
+
+Embed the token in the clone URL:
+
+```
+https://oauth2:${GITLAB_TOKEN}@gitlab.example.com/acme/demo-repo
+```
+
+**Pros.**  Zero new infrastructure — works today with the existing `GITLAB_TOKEN` provider.  Operator documentation only; no image changes.
+
+**Cons.**  Token leaks into:
+
+- The sandbox's process listing (`ps -ef` shows the full `git clone` command line).
+- The cloned repo's `.git/config` (git stores the auth URL verbatim as the remote `origin.url`).
+- Any error message or log line that echoes the URL.
+
+Leaked tokens are cheap to rotate, but the workflow is error-prone: every future `git pull` / `git push` inside the clone re-uses the embedded credential, so the exposure persists until the operator manually rewrites the remote URL.
+
+**Use case.**  A short-lived workaround.  `.env.example` can document it for developers who need to clone a specific private repo today; a `scratchpad`-style skill can surface it when the agent hits a 401.  Not the long-term answer.
+
+#### 4.4.3 Option B — Git credential helper (recommended long-term)
+
+Option B uses git's built-in [credential-helper protocol](https://git-scm.com/docs/gitcredentials) to hand the provider-injected placeholder to git.  Git then lands it in the `Authorization` header, where the L7 proxy can substitute the real value — *exactly the same substitution path* the REST tools use, just with a custom helper replacing the `Authorization: Bearer $TOKEN` line our Python clients set explicitly.
+
+**End-to-end flow.**  At image-build time, a short helper script (`git-credential-from-env`) lands in `/usr/local/bin` and `/etc/gitconfig` is configured to invoke it for every private host.  At runtime:
+
+1. Agent runs `git clone https://<host>/…`.
+2. git reads `/etc/gitconfig`, finds `credential.https://<host>.helper = !/usr/local/bin/git-credential-from-env`, execs the helper, and writes `host=<host>\n` (plus other request fields) to the helper's stdin.
+3. The helper reads `$GITLAB_TOKEN` / `$GERRIT_*` from its environment — which inside the sandbox hold the OpenShell placeholder strings (e.g. `openshell:resolve:env:GITLAB_TOKEN`), **not** the real secrets — and prints `username=…\npassword=<placeholder>\n` on stdout.
+4. git composes the HTTPS request with `Authorization: Basic base64("<user>:<placeholder>")` and sends it through `HTTPS_PROXY`.
+5. The L7 proxy terminates TLS, decodes the Basic header, matches the placeholder, substitutes the real token, re-encodes, and forwards the request to the origin.
+
+```mermaid
+sequenceDiagram
+    actor Agent as Coding agent
+    box Sandbox
+        participant Git as git
+        participant Helper as git-credential-from-env
+    end
+    participant Proxy as OpenShell L7 proxy
+    participant Host as Private host (gitlab.example.com)
+
+    Agent->>Git: git clone https://gitlab.example.com/...
+    Note over Git: ① reads /etc/gitconfig<br/>credential.gitlab.example.com.helper<br/>= !/usr/local/bin/git-credential-from-env
+    Git->>Helper: ② exec, writes "host=gitlab.example.com" to stdin
+    Note over Helper: ③ reads $GITLAB_TOKEN<br/>= "openshell:resolve:env:GITLAB_TOKEN"<br/>(placeholder — never the real PAT)
+    Helper-->>Git: stdout: username=oauth2,<br/>password=(placeholder)
+    Git->>Proxy: ④ HTTPS via HTTPS_PROXY<br/>Authorization: Basic b64("oauth2:(placeholder)")
+    Note over Proxy: ⑤ TLS-terminate, decode Basic,<br/>match (placeholder),<br/>swap in real PAT
+    Proxy->>Host: ⑥ HTTPS with real PAT in Authorization header
+    Host-->>Proxy: 200 OK
+    Proxy-->>Git: clone data streams back
+```
+
+The real PAT only ever lives on the OpenShell host (in the provider vault) and briefly inside the L7 proxy during substitution.  The sandbox — the helper, git, the Authorization header git composes — only ever handles the placeholder string.
+
+**The helper script** (implements steps ②–③):
+
+```bash
+# /usr/local/bin/git-credential-from-env  (bundled in the image)
+#!/bin/sh
+# Git invokes "git-credential-<name> get" and reads username / password
+# lines on stdout.  Host comes in on stdin as "host=<name>".
+[ "$1" = "get" ] || exit 0
+while IFS='=' read -r k v; do [ "$k" = host ] && host="$v"; done
+case "$host" in
+  gitlab.example.com)
+    printf 'username=oauth2\npassword=%s\n' "$GITLAB_TOKEN" ;;
+  gerrit.example.com)
+    printf 'username=%s\npassword=%s\n' "$GERRIT_USERNAME" "$GERRIT_HTTP_PASSWORD" ;;
+esac
+```
+
+**Image-build registration** (implements step ①):
+
+```dockerfile
+RUN git config --system \
+      credential.https://gitlab.example.com.helper \
+      '!/usr/local/bin/git-credential-from-env' \
+ && git config --system \
+      credential.https://gerrit.example.com.helper \
+      '!/usr/local/bin/git-credential-from-env'
+```
+
+**Pros.**
+
+- Token never lands in URLs, process listings, or repo configs — git asks the helper on demand, the helper reads `os.environ[…]`, the value exists in memory for one invocation.
+- Composes cleanly with OpenShell's provider flow: the proxy-injected `$GITLAB_TOKEN` is already in the sandbox env; the helper just reads it there.
+- Handles `git pull` / `git push` inside the cloned repo automatically once installed — no per-invocation plumbing from the agent.
+- Adding a new private host is a two-line change (one `case` arm in the helper + one `git config` line in the Dockerfile).
+
+**Cons.**
+
+- Requires a new executable in the image + a `RUN git config --system` block.  The helper path must be on the policy's `binaries` allowlist for the git-host network policies (git execs the helper to resolve credentials *before* it starts the HTTPS request).
+- Secret-exposure caveat: `printf` writes the password to the helper's stdout, which lives in pipe buffers and could in principle be captured.  This is strictly better than the URL-embedding case — the exposure is process-local, in-memory, and short-lived — but it's not zero.  Rotating providers still rotates all downstream usage cleanly.
+
+**Use case.**  The recommended long-term path for any host whose credentials already flow through an OpenShell provider.  Phase 2 implementation target.
+
+#### 4.4.4 Option C — SSH keys
+
+Install `openssh-client` in the image, mount an SSH private key plus a `known_hosts` file into `/sandbox/.ssh`, allow SSH egress to the git hosts (or leave it unmediated by the L7 proxy, since OpenShell doesn't do protocol-level SSH interception).
+
+**Pros.**  Matches most developers' intuition for "how do I clone a private repo."  SSH's authentication is independent of the HTTPS interception path, so TLS-termination quirks don't affect it.
+
+**Cons.**
+
+- SSH keys are coarser-grained than HTTPS tokens — most deployments don't scope SSH keys per-repo, so a leaked key exposes everything the key-owner can reach.
+- `known_hosts` pinning is annoying to maintain: the image either ships a static copy (brittle when the host rotates its host key) or disables host-key verification (undermines the point of pinning).
+- OpenShell's L7 proxy doesn't intercept SSH, so we lose the observability the HTTPS path gives us (no per-request audit, no credential-placeholder resolution).
+- Doesn't compose with the `GITLAB_TOKEN` provider — it's a second credential channel to provision, rotate, and audit.
+
+**Use case.**  Only pick this up if a host *requires* SSH (push restrictions that reject HTTPS tokens, repo mirrors that only expose SSH endpoints).  Not a general-purpose answer.
+
+#### 4.4.5 Option D — Host-side seed (no in-sandbox clone)
+
+For repos the operator already has checked out on their host, skip the clone entirely: copy the local working tree into the sandbox workspace at task-spawn time.  Conceptually:
+
+```make
+# Not yet implemented — sketch only.
+seed-workspace:
+    tar -c -C "$(HOST_REPO)" . \
+      | openshell sandbox exec -n $(SANDBOX_NAME) --no-tty -- \
+        tar -x -C /sandbox/workspace/$(notdir $(HOST_REPO))
+```
+
+The orchestrator / sub-agent then operates on the pre-populated workspace; it never needs to fetch or push if the task is strictly-local (code review, refactor, debugging).
+
+**Pros.**
+
+- Zero credential plumbing in the sandbox: the host already has whatever git / SSH / token configuration works there.  The sandbox doesn't need to know about authentication at all.
+- Works for any repo the operator can access on their machine — private mirrors, partially-merged branches, repos behind 2FA-protected hosts that don't tolerate automated tokens.
+- Snapshots the operator's exact working state (uncommitted edits, untracked files, stashes applied).  Useful for "review my current changes" workflows where the point *is* the uncommitted state.
+
+**Cons.**
+
+- **One-shot snapshot.**  `git pull` / `git push` inside the sandbox still need credentials; this option doesn't solve that, it only sidesteps the initial clone.  Paired with Option B when both are in play.
+- Doesn't compose with autonomous delegation.  The orchestrator would need a way to ask the host "do you have this repo locally? please tar it over," which is outside the current NMB protocol (host ↔ sandbox, not broker ↔ broker).
+- Large repos upload slowly and cost sandbox-side disk.  For tasks that only need a subset of the tree, a full copy is wasteful.
+- Host-side staleness: if the operator hasn't `git pull`'d lately, the sub-agent sees the state as of the last local pull, not HEAD on the remote.
+
+**Use case.**  Interactive developer workflows — "look at my current branch and suggest a refactor", "review the diff I have staged right now."  Complements Option B rather than replacing it: B handles the fetch path for autonomous / CI-driven work, D handles the "I already have this locally, use that" path for interactive work.
+
+#### 4.4.6 Comparison
+
+| Option | Secret-leak risk | Operator effort | Works for `git pull` / `push`? | Composes with provider system? |
+|--------|------------------|-----------------|-------------------------------|-------------------------------|
+| **A — URL token** | High — token in process listing, URL, and repo `.git/config` | Zero | Yes, but re-leaks on every fetch | Yes (reads `$GITLAB_TOKEN`) |
+| **B — Credential helper** | Low — in-memory, per-invocation | Image + Dockerfile + policy allowlist line | Yes, transparently | Yes (reads `$GITLAB_TOKEN` / `$GERRIT_*`) |
+| **C — SSH key** | Medium — key broader than per-repo tokens; `known_hosts` pinning fragile | Key provisioning + `openssh-client` + policy egress | Yes | No — separate credential channel |
+| **D — Host seed** | None (secrets stay on host) | Makefile target + sandbox-upload plumbing | **No** — pull/push still need auth | N/A |
+
+#### 4.4.7 Recommended Phasing
+
+- **Phase 1 (this milestone)** — document the problem and ship the unblocker.  Public-host clones work after the image + policy delta; private-host clones return a clear HTTP 401 instead of a confusing "tool missing" refusal.  `.env.example` documents Option A as a short-term workaround with the leakage caveat called out explicitly.
+- **Phase 2** — implement Option B (credential helper).  One shell script, two `git config --system` lines per host in the Dockerfile, one policy allowlist entry.  Handles the 90% case (authenticated clone + subsequent `pull` / `push`) without redesigning secret management.
+- **Phase 3+** — evaluate Option D (host seed) if interactive Slack workflows frequently reference an operator's local checkout.  Useful for developer UX, not urgent for autonomous delegation.
+- **Deferred** — Option C (SSH).  Only pick it up when a host surfaces that specifically *requires* SSH.
 
 ---
 
