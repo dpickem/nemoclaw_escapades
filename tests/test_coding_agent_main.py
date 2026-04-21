@@ -6,14 +6,15 @@ Exercises the §14 Phase-1 criterion:
     AgentLoop with the coding tool suite and the SkillLoader-discovered
     skill tool, sends [result].*
 
-The NMB-wired path is a Phase 2 follow-up.  The CLI path (``--task``)
-already exercises the same stack — config load, runtime self-check,
-AgentLoop assembly, coding tools, final text — so the test runs that
-path with a mock inference backend.
+The full Phase-2 receive-loop body is deferred, but the Phase-1
+CLI path (``--task``) and the NMB-mode *wiring* (connect, read
+config, close on shutdown) are both covered here with mock
+inference and a fake ``MessageBus``.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -243,6 +244,120 @@ class TestCliMode:
         )
         assert rc == 0
         assert captured["audit"] is None
+
+
+# ── NMB mode smoke test ─────────────────────────────────────────────
+
+
+class TestNmbMode:
+    """``--nmb`` mode wiring: connect, idle until shutdown, close.
+
+    Phase 1 ships the entrypoint skeleton (the receive-loop body is
+    a Phase 2 TODO).  These tests cover the wiring itself — reading
+    ``config.nmb`` values (not env), constructing ``MessageBus``
+    with the right args, calling ``connect_with_retry``, and
+    tearing down on shutdown.  Exercises the plumbing without
+    spinning up a real broker.
+    """
+
+    @pytest.mark.asyncio
+    async def test_nmb_mode_reads_broker_url_from_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The broker URL and sandbox ID come from ``config.nmb`` (not env)."""
+        captured: dict[str, Any] = {}
+
+        class _FakeBus:
+            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+                captured["broker_url"] = broker_url
+                captured["sandbox_id"] = sandbox_id
+
+            async def connect_with_retry(self) -> None:
+                captured["connected"] = True
+
+            async def close(self) -> None:
+                captured["closed"] = True
+
+        # Shadow the lazy ``from nemoclaw_escapades.nmb.client import
+        # MessageBus`` done inside ``_run_nmb_mode`` with our fake.
+        import nemoclaw_escapades.nmb.client as nmb_client_mod
+
+        monkeypatch.setattr(nmb_client_mod, "MessageBus", _FakeBus)
+
+        from nemoclaw_escapades.config import AppConfig
+
+        config = AppConfig()
+        config.nmb.broker_url = "ws://test-broker:1234"
+        config.nmb.sandbox_id = "pinned-sub-agent-id"
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        shutdown_event = asyncio.Event()
+        # Schedule shutdown immediately so the idle loop exits.
+        shutdown_event.set()
+        rc = await agent_main._run_nmb_mode(
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+            shutdown_event=shutdown_event,
+        )
+        assert rc == 0
+        assert captured["broker_url"] == "ws://test-broker:1234"
+        # Non-empty sandbox_id → used as-is (no ``coding-…`` prefix).
+        assert captured["sandbox_id"] == "pinned-sub-agent-id"
+        assert captured["connected"] is True
+        assert captured["closed"] is True
+
+    @pytest.mark.asyncio
+    async def test_nmb_mode_generates_sandbox_id_when_config_blank(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Empty ``config.nmb.sandbox_id`` → agent generates ``coding-<hex>``."""
+        captured: dict[str, Any] = {}
+
+        class _FakeBus:
+            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+                captured["sandbox_id"] = sandbox_id
+
+            async def connect_with_retry(self) -> None:
+                pass
+
+            async def close(self) -> None:
+                pass
+
+        import nemoclaw_escapades.nmb.client as nmb_client_mod
+
+        monkeypatch.setattr(nmb_client_mod, "MessageBus", _FakeBus)
+
+        from nemoclaw_escapades.config import AppConfig
+
+        config = AppConfig()
+        config.nmb.broker_url = "ws://test:1"
+        config.nmb.sandbox_id = ""  # explicit — agent should synthesise.
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        shutdown_event = asyncio.Event()
+        shutdown_event.set()
+        await agent_main._run_nmb_mode(
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+            shutdown_event=shutdown_event,
+        )
+        assert captured["sandbox_id"].startswith("coding-")
+        # ``_make_agent_id`` truncates to 8 hex chars.
+        assert len(captured["sandbox_id"]) == len("coding-") + 8
 
 
 # ── AgentSetupBundle round-trip ─────────────────────────────────────
