@@ -163,6 +163,70 @@ class TestSecretGuard:
             gen_config_mod.main()  # type: ignore[attr-defined]
         assert exc_info.value.code == 2
 
+    def test_username_suffix_is_blocked(
+        self,
+        sandbox_cwd: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        gen_config_mod: object,
+    ) -> None:
+        # Regression: HTTP Basic-auth usernames (``GERRIT_USERNAME``,
+        # ``CONFLUENCE_USERNAME``) are paired identity material and
+        # must not flow into shipping config even though they aren't
+        # strictly tokens.  A bad allowlist edit pointing at one must
+        # fail at resolver-entry time, before any .env reading.
+        monkeypatch.setattr(
+            gen_config_mod,
+            "_CATEGORY_B_KEYS",
+            {"GERRIT_USERNAME": "toolsets.gerrit.username"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            gen_config_mod.main()  # type: ignore[attr-defined]
+        assert exc_info.value.code == 2
+
+    @pytest.mark.parametrize(
+        ("env_var", "yaml_path"),
+        [
+            ("AWS_CREDENTIALS", "toolsets.aws.credentials"),
+            ("SESSION_COOKIE", "toolsets.session.cookie"),
+        ],
+    )
+    def test_defense_in_depth_suffixes_blocked(
+        self,
+        sandbox_cwd: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        gen_config_mod: object,
+        env_var: str,
+        yaml_path: str,
+    ) -> None:
+        # Defence in depth: ``_CREDENTIALS`` and ``_COOKIE`` aren't in
+        # use today but guard against future integrations whose naming
+        # doesn't otherwise match the list.
+        monkeypatch.setattr(
+            gen_config_mod,
+            "_CATEGORY_B_KEYS",
+            {env_var: yaml_path},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            gen_config_mod.main()  # type: ignore[attr-defined]
+        assert exc_info.value.code == 2
+
+    def test_secret_suffix_match_is_case_insensitive(
+        self,
+        sandbox_cwd: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        gen_config_mod: object,
+    ) -> None:
+        # Operators sometimes type env vars in lowercase out of habit
+        # (``gerrit_username=…``).  The guard must still catch it.
+        monkeypatch.setattr(
+            gen_config_mod,
+            "_CATEGORY_B_KEYS",
+            {"gerrit_username": "toolsets.gerrit.username"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            gen_config_mod.main()  # type: ignore[attr-defined]
+        assert exc_info.value.code == 2
+
 
 # ── No hostname leak ────────────────────────────────────────────────
 

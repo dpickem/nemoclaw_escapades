@@ -70,8 +70,24 @@ _CATEGORY_B_KEYS: dict[str, str] = {
 
 # Any ``.env`` key ending in one of these suffixes is *never* allowed into
 # the resolved YAML — even if it somehow ended up in ``_CATEGORY_B_KEYS``.
-# This is a defence-in-depth guard against accidental secret rotation into
-# file-based config.  Matching is case-insensitive.
+# Defence-in-depth guard against accidental secret rotation into file-based
+# config.  Matching is case-insensitive.
+#
+# A note on what's listed and what isn't:
+#
+# - ``_TOKEN`` / ``_KEY`` already cover their more specific variants
+#   (``_BOT_TOKEN``, ``_APP_TOKEN``, ``_USER_TOKEN``, ``_API_KEY``).
+#   The specific variants are kept explicit anyway — the list reads as
+#   intent, not minimal coverage, and redundancy costs nothing.
+# - ``_USERNAME`` is here because HTTP Basic auth usernames (e.g.
+#   ``GERRIT_USERNAME`` / ``CONFLUENCE_USERNAME``) are paired identity
+#   material that shouldn't land in shipping config even though they
+#   aren't strictly tokens.
+# - ``_CREDENTIALS`` / ``_COOKIE`` are defence in depth against future
+#   integrations whose naming doesn't match the list otherwise.
+# - We deliberately do *not* include ``_CERT`` — env vars like
+#   ``SSL_CERT_FILE`` point at filesystem paths, not secret contents,
+#   and blocking them would create legitimate false positives.
 _FORBIDDEN_KEY_SUFFIXES: tuple[str, ...] = (
     "_TOKEN",
     "_AUTH",
@@ -82,6 +98,9 @@ _FORBIDDEN_KEY_SUFFIXES: tuple[str, ...] = (
     "_BOT_TOKEN",
     "_APP_TOKEN",
     "_USER_TOKEN",
+    "_USERNAME",
+    "_CREDENTIALS",
+    "_COOKIE",
 )
 
 
