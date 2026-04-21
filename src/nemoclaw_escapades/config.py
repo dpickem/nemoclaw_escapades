@@ -642,30 +642,36 @@ class AppConfig:
 # ── YAML overlay ────────────────────────────────────────────────────
 
 # YAML top-level sections that map 1:1 to an ``AppConfig`` sub-config
-# field of the same name.  ``toolsets`` is handled separately because
-# it nests the per-service configs one level deeper in the YAML.
-_DIRECT_SECTIONS: dict[str, str] = {
-    "orchestrator": "orchestrator",
-    "agent_loop": "agent_loop",
-    "nmb": "nmb",
-    "log": "log",
-    "audit": "audit",
-    "coding": "coding",
-    "skills": "skills",
-}
+# field of the *same name*.  Tuple (not a dict) because the YAML key
+# always equals the attribute name today — a dict-shape mapping
+# would be an identity map.  If a future rename breaks the 1:1
+# invariant, turn this back into a ``dict[str, str]`` and add the
+# non-identity entries there.  ``toolsets`` is handled separately
+# because it nests the per-service configs one level deeper in the
+# YAML.
+_DIRECT_SECTIONS: tuple[str, ...] = (
+    "orchestrator",
+    "agent_loop",
+    "nmb",
+    "log",
+    "audit",
+    "coding",
+    "skills",
+)
 
-# YAML ``toolsets.<key>`` → ``AppConfig.<key>`` mapping.  The sub-
+# YAML ``toolsets.<name>`` → ``AppConfig.<name>`` mapping.  The sub-
 # configs live at the top level of ``AppConfig`` to keep call sites
 # short (``config.jira`` rather than ``config.toolsets.jira``); the
-# YAML groups them under ``toolsets`` for readability.
-_TOOLSET_SECTIONS: dict[str, str] = {
-    "jira": "jira",
-    "gitlab": "gitlab",
-    "gerrit": "gerrit",
-    "confluence": "confluence",
-    "slack_search": "slack_search",
-    "web_search": "web_search",
-}
+# YAML groups them under ``toolsets`` for readability.  Tuple again
+# — the per-service YAML key always equals the attribute name.
+_TOOLSET_SECTIONS: tuple[str, ...] = (
+    "jira",
+    "gitlab",
+    "gerrit",
+    "confluence",
+    "slack_search",
+    "web_search",
+)
 
 # Top-level YAML keys that the loader recognises but doesn't map to
 # an ``AppConfig`` field (yet).  Keeps forward-compat: unknown keys
@@ -728,10 +734,10 @@ def _apply_yaml_overlay(config: AppConfig, path: str | Path | None) -> None:
         )
 
     # Direct top-level sections.
-    for yaml_key, attr_name in _DIRECT_SECTIONS.items():
-        section = overlay.get(yaml_key)
+    for name in _DIRECT_SECTIONS:
+        section = overlay.get(name)
         if section is not None:
-            _apply_section(getattr(config, attr_name), section, f"{yaml_key}")
+            _apply_section(getattr(config, name), section, name)
 
     # Grouped toolset sections.
     toolsets = overlay.get("toolsets") or {}
@@ -741,13 +747,13 @@ def _apply_yaml_overlay(config: AppConfig, path: str | Path | None) -> None:
             extra={"path": str(yaml_path), "got": type(toolsets).__name__},
         )
     else:
-        for yaml_key, attr_name in _TOOLSET_SECTIONS.items():
-            section = toolsets.get(yaml_key)
+        for name in _TOOLSET_SECTIONS:
+            section = toolsets.get(name)
             if section is not None:
                 _apply_section(
-                    getattr(config, attr_name),
+                    getattr(config, name),
                     section,
-                    f"toolsets.{yaml_key}",
+                    f"toolsets.{name}",
                 )
 
     # Unknown top-level keys: log, but don't fail.  Forward-compat.
@@ -860,8 +866,21 @@ def _apply_env_overrides(config: AppConfig, *, in_sandbox: bool = False) -> None
         config.inference.api_key = key
     if model := os.environ.get("INFERENCE_MODEL"):
         config.inference.model = model
-        # Orchestrator shares the same model by default.
-        config.orchestrator.model = model
+        # Orchestrator historically shared ``INFERENCE_MODEL`` — but
+        # only as a convenience for the "everything at defaults"
+        # path.  If a YAML overlay set ``orchestrator.model`` to a
+        # specific value (or a later ``ORCHESTRATOR_MODEL`` env sets
+        # it), propagating ``INFERENCE_MODEL`` here would silently
+        # clobber that explicit choice.  Only update when the
+        # orchestrator is still at the dataclass default.
+        if config.orchestrator.model == DEFAULT_INFERENCE_MODEL:
+            config.orchestrator.model = model
+    if val := os.environ.get("ORCHESTRATOR_MODEL"):
+        # Explicit orchestrator-only override.  Wins over
+        # ``INFERENCE_MODEL``-induced propagation so operators can
+        # run the orchestrator on a different model from the
+        # inference backend's default.
+        config.orchestrator.model = val
     if val := os.environ.get("INFERENCE_TIMEOUT_S"):
         config.inference.timeout_s = int(val)
     if val := os.environ.get("INFERENCE_MAX_RETRIES"):

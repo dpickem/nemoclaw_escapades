@@ -64,6 +64,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_LOOP_COMPACTION_MODEL",
         "NMB_URL",
         "AGENT_SANDBOX_ID",
+        "ORCHESTRATOR_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -240,6 +241,59 @@ class TestYamlOverlay:
 
 
 # ── Env-var overrides ──────────────────────────────────────────────
+
+
+class TestInferenceModelPropagation:
+    """``INFERENCE_MODEL`` propagation to ``orchestrator.model``."""
+
+    def test_inference_model_propagates_when_orchestrator_is_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Backwards compat: with nothing else set, env propagates both."""
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("INFERENCE_MODEL", "azure/claude-test")
+        config = AppConfig.load()
+        assert config.inference.model == "azure/claude-test"
+        assert config.orchestrator.model == "azure/claude-test"
+
+    def test_inference_model_respects_yaml_orchestrator_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: YAML-set ``orchestrator.model`` isn't clobbered.
+
+        Previously the env var hook unconditionally overwrote both
+        fields, so an operator who deliberately pinned the orchestrator
+        to one model while switching the inference backend's default
+        (``INFERENCE_MODEL``) to another would see their pin silently
+        reverted.  Now ``orchestrator.model`` is updated only when
+        it's still at the dataclass default.
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "orchestrator:\n  model: pinned/orchestrator-model\n"
+        )
+        monkeypatch.setenv("INFERENCE_MODEL", "env/inference-model")
+        config = AppConfig.load(path=yaml_path)
+        # Inference still tracks ``INFERENCE_MODEL``.
+        assert config.inference.model == "env/inference-model"
+        # Orchestrator keeps the YAML pin.
+        assert config.orchestrator.model == "pinned/orchestrator-model"
+
+    def test_orchestrator_model_env_wins_over_propagation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``ORCHESTRATOR_MODEL`` gives operators an explicit escape hatch."""
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("INFERENCE_MODEL", "inference-env-model")
+        monkeypatch.setenv("ORCHESTRATOR_MODEL", "orchestrator-env-model")
+        config = AppConfig.load()
+        assert config.inference.model == "inference-env-model"
+        assert config.orchestrator.model == "orchestrator-env-model"
 
 
 class TestEnvOverrides:
