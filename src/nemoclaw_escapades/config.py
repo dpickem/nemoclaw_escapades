@@ -519,7 +519,13 @@ class AppConfig:
     Attributes:
         slack: Slack connector credentials.
         inference: Inference Hub connection parameters.
-        orchestrator: Agent loop parameters.
+        orchestrator: Orchestrator-facing prompt and history settings.
+        agent_loop: Reusable ``AgentLoop`` runtime knobs (tool-round
+            cap, continuation retries, compaction thresholds).  The
+            orchestrator merges ``model`` / ``temperature`` /
+            ``max_tokens`` from ``OrchestratorConfig`` when it builds
+            its loop; sub-agents use the ``AgentLoopConfig`` values
+            directly so they can be tuned independently.
         log: Logging settings.
         audit: Audit database settings.
         jira: Jira REST integration settings.
@@ -535,6 +541,7 @@ class AppConfig:
     slack: SlackConfig = field(default_factory=SlackConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    agent_loop: AgentLoopConfig = field(default_factory=AgentLoopConfig)
     log: LogConfig = field(default_factory=LogConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     jira: JiraConfig = field(default_factory=JiraConfig)
@@ -586,6 +593,7 @@ class AppConfig:
 # it nests the per-service configs one level deeper in the YAML.
 _DIRECT_SECTIONS: dict[str, str] = {
     "orchestrator": "orchestrator",
+    "agent_loop": "agent_loop",
     "log": "log",
     "audit": "audit",
     "coding": "coding",
@@ -607,16 +615,9 @@ _TOOLSET_SECTIONS: dict[str, str] = {
 
 # Top-level YAML keys that the loader recognises but doesn't map to
 # an ``AppConfig`` field (yet).  Keeps forward-compat: unknown keys
-# log a warning, known-but-unmapped keys stay silent.
-_RESERVED_YAML_KEYS: frozenset[str] = frozenset(
-    {
-        # ``AgentLoopConfig`` isn't a field on ``AppConfig`` today; the
-        # loop receives its config directly at construction.  Accepting
-        # the section here lets ``defaults.yaml`` document the knobs
-        # without the loader griping.
-        "agent_loop",
-    }
-)
+# log a warning, known-but-unmapped keys stay silent.  Empty for now
+# — every section in ``defaults.yaml`` corresponds to a real field.
+_RESERVED_YAML_KEYS: frozenset[str] = frozenset()
 
 
 def _resolve_yaml_path(path: str | Path | None) -> Path:
@@ -796,6 +797,25 @@ def _apply_env_overrides(config: AppConfig) -> None:
         config.orchestrator.temperature = float(val)
     if val := os.environ.get("MAX_TOKENS"):
         config.orchestrator.max_tokens = int(val)
+
+    # ── Agent loop ─────────────────────────────────────────────────
+    # Namespaced env vars so they don't collide with orchestrator-level
+    # knobs of the same name (``MAX_TOKENS`` belongs to the orchestrator
+    # prompting config; loop-runtime knobs use the ``AGENT_LOOP_`` prefix).
+    if val := os.environ.get("AGENT_LOOP_MAX_TOOL_ROUNDS"):
+        config.agent_loop.max_tool_rounds = int(val)
+    if val := os.environ.get("AGENT_LOOP_MAX_CONTINUATION_RETRIES"):
+        config.agent_loop.max_continuation_retries = int(val)
+    if val := os.environ.get("AGENT_LOOP_MICRO_COMPACTION_CHARS"):
+        config.agent_loop.micro_compaction_chars = int(val)
+    if val := os.environ.get("AGENT_LOOP_COMPACTION_THRESHOLD_CHARS"):
+        config.agent_loop.compaction_threshold_chars = int(val)
+    if val := os.environ.get("AGENT_LOOP_COMPACTION_COMPRESS_RATIO"):
+        config.agent_loop.compaction_compress_ratio = float(val)
+    if val := os.environ.get("AGENT_LOOP_COMPACTION_MIN_KEEP"):
+        config.agent_loop.compaction_min_keep = int(val)
+    if val := os.environ.get("AGENT_LOOP_COMPACTION_MODEL"):
+        config.agent_loop.compaction_model = val
 
     # ── Log ────────────────────────────────────────────────────────
     if val := os.environ.get("LOG_LEVEL"):

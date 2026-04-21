@@ -45,7 +45,7 @@ from nemoclaw_escapades.agent.types import AgentSetupBundle
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AgentLoopConfig, AppConfig, load_system_prompt
+from nemoclaw_escapades.config import AppConfig, load_system_prompt
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
@@ -109,6 +109,7 @@ async def _run_task(
     tools: ToolRegistry,
     identity_prompt: str,
     bundle: AgentSetupBundle,
+    config: AppConfig,
     audit: AuditDB | None,
     logger: object,
 ) -> str:
@@ -133,7 +134,13 @@ async def _run_task(
     loop = AgentLoop(
         backend=backend,
         tools=tools,
-        config=AgentLoopConfig(),
+        # Sub-agents use ``config.agent_loop`` directly — loop-runtime
+        # knobs (tool-round cap, compaction thresholds) come from YAML
+        # / env; prompt-level fields (model / temperature / max_tokens)
+        # live on the same dataclass and default to the shared inference
+        # defaults.  Operators can tune a sub-agent's model independently
+        # from the orchestrator's via the ``agent_loop.model`` YAML key.
+        config=config.agent_loop,
         audit=audit,
         # Sub-agents run inside their own sandbox / workspace, so auto-
         # approve writes — any external containment is provided by the
@@ -188,7 +195,7 @@ async def _run_cli_mode(
     tools = _build_tool_registry(config, bundle)
     identity = _load_coding_prompt()
     try:
-        content = await _run_task(backend, tools, identity, bundle, audit, logger)
+        content = await _run_task(backend, tools, identity, bundle, config, audit, logger)
     except Exception:  # pragma: no cover - surfaced in logs
         logger.error("Coding agent task failed", exc_info=True)  # type: ignore[attr-defined]
         return 1

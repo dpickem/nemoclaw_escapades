@@ -55,6 +55,13 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GITLAB_URL",
         "GITLAB_TOKEN",
         "GERRIT_URL",
+        "AGENT_LOOP_MAX_TOOL_ROUNDS",
+        "AGENT_LOOP_MAX_CONTINUATION_RETRIES",
+        "AGENT_LOOP_MICRO_COMPACTION_CHARS",
+        "AGENT_LOOP_COMPACTION_THRESHOLD_CHARS",
+        "AGENT_LOOP_COMPACTION_COMPRESS_RATIO",
+        "AGENT_LOOP_COMPACTION_MIN_KEEP",
+        "AGENT_LOOP_COMPACTION_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -204,19 +211,26 @@ class TestYamlOverlay:
         with pytest.raises(ValueError, match="must be a mapping"):
             AppConfig.load(path=yaml_path)
 
-    def test_agent_loop_section_silently_accepted(
+    def test_agent_loop_section_populates_config(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # ``agent_loop`` is reserved forward-compat — must not warn
-        # even though it doesn't populate an AppConfig field today.
+        # ``agent_loop`` is a first-class section: values from the YAML
+        # land on ``config.agent_loop`` and don't trigger the unknown-
+        # top-level-key warning.
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "agent_loop.yaml"
-        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 20\n")
+        yaml_path.write_text(
+            "agent_loop:\n"
+            "  max_tool_rounds: 20\n"
+            "  compaction_min_keep: 8\n"
+        )
         caplog.clear()
-        AppConfig.load(path=yaml_path)
+        config = AppConfig.load(path=yaml_path)
+        assert config.agent_loop.max_tool_rounds == 20
+        assert config.agent_loop.compaction_min_keep == 8
         assert not any(
             "Unknown top-level key" in r.message and "agent_loop" in str(r.__dict__)
             for r in caplog.records
@@ -258,6 +272,20 @@ class TestEnvOverrides:
         monkeypatch.setenv("NEMOCLAW_CONFIG_PATH", str(yaml_path))
         config = AppConfig.load()  # no path argument
         assert config.log.level == "DEBUG"
+
+    def test_agent_loop_env_overrides_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Same per-field precedence we verify elsewhere, applied to
+        # loop-runtime knobs.  YAML sets a value, env var wins.
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 20\n")
+        monkeypatch.setenv("AGENT_LOOP_MAX_TOOL_ROUNDS", "42")
+        config = AppConfig.load(path=yaml_path)
+        assert config.agent_loop.max_tool_rounds == 42
 
 
 # ── Secret validation ──────────────────────────────────────────────

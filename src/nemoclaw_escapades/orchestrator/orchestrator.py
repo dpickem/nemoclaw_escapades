@@ -52,6 +52,7 @@ buttons via the connector.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
@@ -117,6 +118,8 @@ class Orchestrator:
         self,
         backend: BackendBase,
         config: OrchestratorConfig,
+        *,
+        agent_loop: AgentLoopConfig | None = None,
         approval: ApprovalGate | None = None,
         tools: ToolRegistry | None = None,
         audit: AuditDB | None = None,
@@ -128,6 +131,13 @@ class Orchestrator:
             backend: Inference backend used for chat-completions calls.
             config: Orchestrator-level settings (model, temperature,
                 max tokens, system prompt path, history cap).
+            agent_loop: Reusable ``AgentLoop`` runtime knobs (tool-round
+                cap, continuation retries, compaction thresholds).
+                When ``None``, loop-runtime fields fall back to
+                ``AgentLoopConfig()`` defaults.  The orchestrator
+                always overrides ``model`` / ``temperature`` /
+                ``max_tokens`` on this config with the fields from
+                ``config`` so prompt-level settings stay in one place.
             approval: Gate consulted before executing write tools.
                 Defaults to ``WriteApproval`` (writes require user
                 confirmation via Approve / Deny buttons).
@@ -171,16 +181,29 @@ class Orchestrator:
         # It's only instantiated when tools are registered — without
         # tools, the orchestrator uses the simpler _inference_with_repair
         # path which doesn't support multi-turn tool calling.
+        #
+        # The loop config merges two sources: prompt-level fields
+        # (model / temperature / max_tokens) come from
+        # ``OrchestratorConfig`` so the orchestrator stays the source
+        # of truth for what it says to the model; runtime knobs (tool-
+        # round cap, continuation retries, compaction thresholds) come
+        # from ``AgentLoopConfig``.  When a caller doesn't supply
+        # ``agent_loop``, loop-runtime knobs fall back to dataclass
+        # defaults — preserving the pre-``agent_loop``-in-AppConfig
+        # behaviour for tests that build ``Orchestrator`` directly.
+        base_loop_cfg = agent_loop or AgentLoopConfig()
+        merged_loop_cfg = dataclasses.replace(
+            base_loop_cfg,
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
         self._agent_loop: AgentLoop | None = None
         if tools and len(tools) > 0:
             self._agent_loop = AgentLoop(
                 backend=backend,
                 tools=tools,
-                config=AgentLoopConfig(
-                    model=config.model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                ),
+                config=merged_loop_cfg,
                 audit=audit,
                 # Share the same approval gate so both the orchestrator's
                 # response-level check and the loop's tool-level check

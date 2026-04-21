@@ -133,6 +133,7 @@ async def main() -> None:
     orchestrator = Orchestrator(
         backend,
         config.orchestrator,
+        agent_loop=config.agent_loop,
         approval=WriteApproval(),
         tools=tools,
         audit=audit,
