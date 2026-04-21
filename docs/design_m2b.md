@@ -1062,24 +1062,24 @@ rendering (thinking indicator, step count, current tool).
 
 ### Phase 1 — Sandbox configuration layer + coding agent process
 
-| Task | Files |
-|------|-------|
-| Ship `config/defaults.yaml` (public-safe, no category-B values) | `config/defaults.yaml` |
-| Implement `scripts/gen_config.py` (mirrors `gen_policy.py`) with category-B allowlist and secret-field guard | `scripts/gen_config.py` |
-| Add `gen-config` Make target; make it a prerequisite of `setup-sandbox` | `Makefile` |
-| Gitignore `config/orchestrator.resolved.yaml` | `.gitignore` |
-| Dockerfile: `COPY config/orchestrator.resolved.yaml /app/config.yaml`; add `/app/config.yaml` to read-only filesystem policy | `docker/Dockerfile.orchestrator`, `policies/orchestrator.yaml` |
-| **Remove the public-repo leak**: delete `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`, `_SANDBOX_CODING_WORKSPACE_ROOT`, `_SANDBOX_SKILLS_DIR` constants from `config.py` | `src/nemoclaw_escapades/config.py` |
-| Implement `NemoClawConfig.load()` with YAML + env-var precedence | `src/nemoclaw_escapades/config.py` |
-| Remove `in_sandbox` branches for paths / host allowlists | `src/nemoclaw_escapades/config.py` |
-| Implement `detect_runtime_environment()` with multi-signal check | `src/nemoclaw_escapades/runtime.py` (new) |
-| Wire startup self-check in `main.py`; raise `SandboxConfigurationError` on `INCONSISTENT` | `src/nemoclaw_escapades/main.py` |
-| Unit tests for YAML overlay, env-var precedence, signal detection, `gen_config.py` resolver | `tests/test_config.py`, `tests/test_gen_config.py` |
-| Update `.env.example`: document category-B keys, remove references to `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` | `.env.example` |
-| Create sub-agent `__main__` entrypoint | `agent/__main__.py` |
-| Create `AgentSetupBundle` dataclass | `agent/types.py` |
-| Create coding agent system prompt template | `prompts/coding_agent.md` |
-| End-to-end test: agent process starts, handles task, returns result | `tests/integration/test_coding_agent.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Ship `config/defaults.yaml` (public-safe, no category-B values) | `config/defaults.yaml` | ✅ |
+| Implement `scripts/gen_config.py` (mirrors `gen_policy.py`) with category-B allowlist and secret-field guard | `scripts/gen_config.py` | ✅ (commits `7d8f0d2`, `9607192`) |
+| Add `gen-config` Make target; make it a prerequisite of `setup-sandbox` | `Makefile` | ✅ `Makefile:193, 200` |
+| Gitignore `config/orchestrator.resolved.yaml` | `.gitignore` | ✅ `.gitignore:199` |
+| Dockerfile: `COPY config/orchestrator.resolved.yaml /app/config.yaml`; add `/app/config.yaml` to read-only filesystem policy | `docker/Dockerfile.orchestrator`, `policies/orchestrator.yaml` | ✅ `Dockerfile.orchestrator:61`, `policies/orchestrator.yaml:43` |
+| **Remove the public-repo leak**: delete `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`, `_SANDBOX_CODING_WORKSPACE_ROOT`, `_SANDBOX_SKILLS_DIR` constants from `config.py` | `src/nemoclaw_escapades/config.py` | ✅ (commit `28c0041`) |
+| Implement `NemoClawConfig.load()` with YAML + env-var precedence | `src/nemoclaw_escapades/config.py` | ✅ `AppConfig.load()` |
+| Remove `in_sandbox` branches for paths / host allowlists | `src/nemoclaw_escapades/config.py` | ✅ (paths flow through YAML overlay; the remaining sandbox-vs-local-dev branches in `_apply_env_overrides` / `_check_required_secrets` now take a :class:`RuntimeEnvironment` argument from `AppConfig.load(env=…)` rather than re-reading `OPENSHELL_SANDBOX` — one source of truth per process) |
+| Implement `detect_runtime_environment()` with multi-signal check | `src/nemoclaw_escapades/runtime.py` (new) | ✅ `runtime.py::detect_runtime_environment` |
+| Wire startup self-check in `main.py`; raise `SandboxConfigurationError` on `INCONSISTENT` | `src/nemoclaw_escapades/main.py` | ✅ `main.py:63-68` (and `agent/__main__.py:303-305` for the sub-agent) |
+| Unit tests for YAML overlay, env-var precedence, signal detection, `gen_config.py` resolver | `tests/test_config.py`, `tests/test_gen_config.py` | ✅ `tests/test_config.py`, `tests/test_gen_config.py`, `tests/test_runtime.py` |
+| Update `.env.example`: document category-B keys, remove references to `_SANDBOX_GIT_CLONE_ALLOWED_HOSTS` | `.env.example` | ✅ |
+| Create sub-agent `__main__` entrypoint | `agent/__main__.py` | ✅ (commit `c238f73`) |
+| Create `AgentSetupBundle` dataclass | `agent/types.py` | ✅ `agent/types.py::AgentSetupBundle` |
+| Create coding agent system prompt template | `prompts/coding_agent.md` | ✅ |
+| End-to-end test: agent process starts, handles task, returns result | `tests/test_coding_agent_main.py` | ✅ `tests/test_coding_agent_main.py::TestCliMode` (CLI path assembles AgentLoop + coding tool suite, runs with a mock backend, returns content); NMB mode wiring smoke-tested in `::TestNmbMode` |
 
 **Exit criteria:**
 
@@ -1105,52 +1105,52 @@ rendering (thinking indicator, step count, current tool).
 
 ### Phase 2 — Orchestrator delegation, NMB event loop, concurrency caps, and finalization
 
-| Task | Files |
-|------|-------|
-| Create `delegate_task` tool for the orchestrator | `tools/delegation.py` |
-| Implement spawn → workspace setup → `task.assign` flow | `orchestrator/delegation.py` |
-| Implement per-agent `asyncio.Semaphore` concurrency control | `orchestrator/delegation.py` |
-| Implement `max_spawn_depth` and `max_children_per_agent` limits | `orchestrator/delegation.py` |
-| Implement NMB event loop (`start_nmb_listener`, event dispatch) | `orchestrator/orchestrator.py` |
-| Implement finalization tools (`present_work_to_user`, `push_and_create_pr`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py` |
-| Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `orchestrator/orchestrator.py` |
-| Implement `AuditBuffer` with NMB-batched flush + JSONL fallback | `agent/audit_buffer.py` |
-| Integration test: orchestrator → coding agent → result → finalize | `tests/integration/test_delegation.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Create `delegate_task` tool for the orchestrator | `tools/delegation.py` | ⏳ Pending |
+| Implement spawn → workspace setup → `task.assign` flow | `orchestrator/delegation.py` | ⏳ Pending |
+| Implement per-agent `asyncio.Semaphore` concurrency control | `orchestrator/delegation.py` | ⏳ Pending |
+| Implement `max_spawn_depth` and `max_children_per_agent` limits | `orchestrator/delegation.py` | ⏳ Pending |
+| Implement NMB event loop (`start_nmb_listener`, event dispatch) | `orchestrator/orchestrator.py` | ⏳ Pending |
+| Implement finalization tools (`present_work_to_user`, `push_and_create_pr`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py` | ⏳ Pending |
+| Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `orchestrator/orchestrator.py` | ⏳ Pending |
+| Implement `AuditBuffer` with NMB-batched flush + JSONL fallback | `agent/audit_buffer.py` | ⏳ Pending |
+| Integration test: orchestrator → coding agent → result → finalize | `tests/integration/test_delegation.py` | ⏳ Pending |
 
 **Exit criteria:** Orchestrator delegates coding tasks, collects results, runs
 finalization. Concurrency caps enforced. Audit flush works via NMB and fallback.
 
 ### Phase 3 — At-least-once NMB delivery
 
-| Task | Files |
-|------|-------|
-| Implement reliable send (persist → send → ack → delete) | `nmb/reliable_send.py` |
-| Implement NMB crash recovery (replay pending on startup) | `nmb/broker.py` |
-| Tests for reliable send and crash recovery | `tests/test_reliable_send.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Implement reliable send (persist → send → ack → delete) | `nmb/reliable_send.py` | ⏳ Pending |
+| Implement NMB crash recovery (replay pending on startup) | `nmb/broker.py` | ⏳ Pending |
+| Tests for reliable send and crash recovery | `tests/test_reliable_send.py` | ⏳ Pending |
 
 **Exit criteria:** Critical messages (`task.complete`, `audit.flush`) survive
 broker crashes and are replayed on restart.
 
 ### Phase 4 — `ToolSearch` meta-tool + basic cron
 
-| Task | Files |
-|------|-------|
-| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` |
-| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` |
-| Implement `CronWorker` with hardcoded operational jobs | `orchestrator/cron.py` |
-| Implement TTL watchdog, stale-session cleanup, health check jobs | `orchestrator/cron.py` |
-| Tests for `ToolSearch`, cron execution | `tests/test_tool_search.py`, `tests/test_cron.py` |
+| Task | Files | Status |
+|------|-------|--------|
+| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
+| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
+| Implement `CronWorker` with hardcoded operational jobs | `orchestrator/cron.py` | ⏳ Pending |
+| Implement TTL watchdog, stale-session cleanup, health check jobs | `orchestrator/cron.py` | ⏳ Pending |
+| Tests for `ToolSearch`, cron execution | `tests/test_tool_search.py`, `tests/test_cron.py` | ⏳ Pending |
 
 **Exit criteria:** Non-core tools discoverable via `ToolSearch`. Prompt tokens
 decrease 40%+ with enterprise tools. Operational cron jobs run on schedule.
 
 ### Phase 5 — Polish, hardening, and gaps document
 
-| Task | Files |
-|------|-------|
-| Progress relaying to Slack | `orchestrator/delegation.py` |
-| File tool edge case hardening (symlinks, binary files, encoding) | `tools/files.py` |
-| Create `docs/DEFERRED.md` — features punted from M2b | `docs/DEFERRED.md` |
+| Task | Files | Status |
+|------|-------|--------|
+| Progress relaying to Slack | `orchestrator/delegation.py` | ⏳ Pending |
+| File tool edge case hardening (symlinks, binary files, encoding) | `tools/files.py` | ⏳ Pending |
+| Create `docs/DEFERRED.md` — features punted from M2b | `docs/DEFERRED.md` | ⏳ Pending |
 
 **Exit criteria:** Production-quality delegation with cleanup guarantees,
 progress reporting, and robust handling.
@@ -1161,55 +1161,55 @@ progress reporting, and robust handling.
 
 ### 16.1 Unit Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| Config YAML overlay | Missing file → dataclass defaults; partial file → unspecified keys keep defaults |
-| Config env-var precedence | Env var overrides YAML value for the same field |
-| Config unknown keys | Forward-compat: unknown top-level keys log a warning but don't raise |
-| Config secret isolation (loader) | Secret-like fields listed in the YAML are rejected with a clear error |
-| `gen_config.py` — empty `.env` | Resolved file byte-equals `defaults.yaml` (all category-B fields fail-closed) |
-| `gen_config.py` — populated `.env` | `coding.git_clone_allowed_hosts` in the resolved file matches the `.env` value |
-| `gen_config.py` — unknown key | Unrecognised `.env` keys are ignored (never appear in resolved output) |
-| `gen_config.py` — secret guard | An `.env` key matching `*_TOKEN`/`*_AUTH`/`*_PASSWORD`/`*_KEY` in the category-B allowlist → resolver fails with a clear error |
-| No hostname leak in public source | `git grep nvidia.com src/ -- ':!*.md'` returns zero matches outside of public SaaS URLs (`jirasw.nvidia.com`, `nvidia.atlassian.net`) |
-| Sandbox detection — LOCAL_DEV | No sandbox signals → classification `LOCAL_DEV` |
-| Sandbox detection — SANDBOX | All signals present → classification `SANDBOX` |
-| Sandbox detection — INCONSISTENT | Partial signals → `INCONSISTENT` + structured error |
-| Startup self-check | `INCONSISTENT` classification raises `SandboxConfigurationError` before config load |
-| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion |
-| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error |
-| NMB reliable send | Message persisted to disk before send; deleted after ack |
-| NMB crash recovery | Pending messages replayed on broker startup |
-| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt |
-| Finalization tools | Each tool produces correct output with mock sandbox/git |
-| Cron scheduling | Jobs fire at correct intervals; missed jobs caught up |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| Config YAML overlay | Missing file → dataclass defaults; partial file → unspecified keys keep defaults | ✅ `tests/test_config.py::TestYamlOverlay` |
+| Config env-var precedence | Env var overrides YAML value for the same field | ✅ `tests/test_config.py::TestEnvOverrides` |
+| Config unknown keys | Forward-compat: unknown top-level keys log a warning but don't raise | ✅ `tests/test_config.py::TestYamlOverlay::test_unknown_top_level_key_logs_warning_but_loads`, `::test_unknown_field_in_known_section_logs_warning` |
+| Config secret isolation (loader) | Secret-like fields listed in the YAML are rejected with a clear error | ✅ `tests/test_config.py::TestSecretValidation` |
+| `gen_config.py` — empty `.env` | Resolved file byte-equals `defaults.yaml` (all category-B fields fail-closed) | ✅ `tests/test_gen_config.py::TestResolverHappyPath` |
+| `gen_config.py` — populated `.env` | `coding.git_clone_allowed_hosts` in the resolved file matches the `.env` value | ✅ `tests/test_gen_config.py::TestResolverHappyPath` |
+| `gen_config.py` — unknown key | Unrecognised `.env` keys are ignored (never appear in resolved output) | ✅ `tests/test_gen_config.py::TestResolverHappyPath` |
+| `gen_config.py` — secret guard | An `.env` key matching `*_TOKEN`/`*_AUTH`/`*_PASSWORD`/`*_KEY` in the category-B allowlist → resolver fails with a clear error | ✅ `tests/test_gen_config.py::TestSecretGuard` |
+| No hostname leak in public source | `git grep nvidia.com src/ -- ':!*.md'` returns zero matches outside of public SaaS URLs (`jirasw.nvidia.com`, `nvidia.atlassian.net`) | ✅ `tests/test_gen_config.py::TestNoHostnameLeak` |
+| Sandbox detection — LOCAL_DEV | No sandbox signals → classification `LOCAL_DEV` | ✅ `tests/test_runtime.py::TestClassification` |
+| Sandbox detection — SANDBOX | All signals present → classification `SANDBOX` | ✅ `tests/test_runtime.py::TestClassification` |
+| Sandbox detection — INCONSISTENT | Partial signals → `INCONSISTENT` + structured error | ✅ `tests/test_runtime.py::TestClassification` |
+| Startup self-check | `INCONSISTENT` classification raises `SandboxConfigurationError` before config load | ✅ `tests/test_runtime.py::TestSandboxConfigurationError` |
+| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ⏳ Pending (Phase 2) |
+| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 2) |
+| NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 3) |
+| NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 3) |
+| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ⏳ Pending (Phase 4) |
+| Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 2) |
+| Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 4) |
 
 ### 16.2 Integration Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present |
-| Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects |
-| Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild |
-| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` |
-| Coding agent end-to-end | Agent receives task, uses file tools, returns diff |
-| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup |
-| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` |
-| Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] |
-| Iteration flow | User feedback → `re_delegate` → same agent → updated result |
-| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently |
-| NMB at-least-once delivery | Kill broker after persist, restart, verify replay |
-| Audit NMB flush + fallback | Tool calls arrive via NMB batch and/or JSONL fallback |
-| TTL watchdog | Watchdog fires → sub-agent process killed → workspace cleaned |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present | ⏳ Pending (manual smoke; no automated integration coverage yet) |
+| Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects | ⏳ Pending |
+| Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild | ⏳ Pending |
+| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — NMB transport lifecycle covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; `task.assign`/`task.complete` await Phase 2 |
+| Coding agent end-to-end | Agent receives task, uses file tools, returns diff | ⏳ Pending |
+| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ⏳ Pending (Phase 2) |
+| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ⏳ Pending (Phase 2) |
+| Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] | ⏳ Pending (Phase 2) |
+| Iteration flow | User feedback → `re_delegate` → same agent → updated result | ⏳ Pending (Phase 2) |
+| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ⏳ Pending (Phase 2) |
+| NMB at-least-once delivery | Kill broker after persist, restart, verify replay | ⏳ Pending (Phase 3) |
+| Audit NMB flush + fallback | Tool calls arrive via NMB batch and/or JSONL fallback | ⏳ Pending (Phase 2) |
+| TTL watchdog | Watchdog fires → sub-agent process killed → workspace cleaned | ⏳ Pending (Phase 4) |
 
 ### 16.3 Safety Tests
 
-| Test | What it verifies |
-|------|-----------------|
-| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` |
-| Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` |
-| No recursive delegation | Coding agent cannot spawn sub-agents |
-| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context |
+| Test | What it verifies | Status |
+|------|-----------------|--------|
+| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | ⏳ Pending (Phase 2) |
+| Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` | ✅ `tests/test_file_tools.py::TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `::test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` (M2a) |
+| No recursive delegation | Coding agent cannot spawn sub-agents | ⏳ Pending (Phase 2) |
+| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 2) |
 
 ---
 
