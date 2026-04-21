@@ -489,6 +489,32 @@ class SkillsConfig:
 
 
 @dataclass
+class NmbClientConfig:
+    """Configuration for the NMB client (sub-agent / orchestrator side).
+
+    Separate from :class:`BrokerConfig` which owns the broker
+    *server*-side settings (bind host/port, queue caps, audit DB
+    path).  These fields are what a *client* needs to connect:
+    where the broker lives and what sandbox identity to announce.
+
+    Attributes:
+        broker_url: WebSocket URL the client connects to.  Inside an
+            OpenShell sandbox this is normally ``ws://messages.local:9876``
+            — the gateway proxies it.  Overridable for local-dev runs
+            that stand up their own broker.
+        sandbox_id: Identifier this client announces to the broker in
+            ``sandbox.ready`` / ``task.complete`` / etc.  Empty string
+            means the agent generates an id at startup (one per
+            process invocation); set explicitly to pin the identity
+            across restarts (useful for cron-style jobs or sub-agents
+            whose work survives a restart).
+    """
+
+    broker_url: str = DEFAULT_NMB_URL
+    sandbox_id: str = ""
+
+
+@dataclass
 class AuditConfig:
     """Configuration for the SQLite audit database.
 
@@ -526,6 +552,11 @@ class AppConfig:
             ``max_tokens`` from ``OrchestratorConfig`` when it builds
             its loop; sub-agents use the ``AgentLoopConfig`` values
             directly so they can be tuned independently.
+        nmb: NMB client settings — broker URL and sandbox identity.
+            Category-A non-secret config that must not be plumbed
+            through raw ``os.environ`` inside the sandbox (the whole
+            point of §5.3 is that non-secret config flows through the
+            YAML overlay, not ad-hoc env vars).
         log: Logging settings.
         audit: Audit database settings.
         jira: Jira REST integration settings.
@@ -542,6 +573,7 @@ class AppConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     agent_loop: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+    nmb: NmbClientConfig = field(default_factory=NmbClientConfig)
     log: LogConfig = field(default_factory=LogConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     jira: JiraConfig = field(default_factory=JiraConfig)
@@ -594,6 +626,7 @@ class AppConfig:
 _DIRECT_SECTIONS: dict[str, str] = {
     "orchestrator": "orchestrator",
     "agent_loop": "agent_loop",
+    "nmb": "nmb",
     "log": "log",
     "audit": "audit",
     "coding": "coding",
@@ -797,6 +830,17 @@ def _apply_env_overrides(config: AppConfig) -> None:
         config.orchestrator.temperature = float(val)
     if val := os.environ.get("MAX_TOKENS"):
         config.orchestrator.max_tokens = int(val)
+
+    # ── NMB client ─────────────────────────────────────────────────
+    # Historically ``agent/__main__.py`` read ``NMB_URL`` /
+    # ``AGENT_SANDBOX_ID`` directly from the env.  That pattern is
+    # exactly what §5.3 retires for non-secret config — the values
+    # now flow through ``/app/config.yaml`` (``nmb:`` section) with
+    # per-field env overrides preserved for local dev.
+    if val := os.environ.get("NMB_URL"):
+        config.nmb.broker_url = val
+    if val := os.environ.get("AGENT_SANDBOX_ID"):
+        config.nmb.sandbox_id = val
 
     # ── Agent loop ─────────────────────────────────────────────────
     # Namespaced env vars so they don't collide with orchestrator-level

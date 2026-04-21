@@ -62,6 +62,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_LOOP_COMPACTION_COMPRESS_RATIO",
         "AGENT_LOOP_COMPACTION_MIN_KEEP",
         "AGENT_LOOP_COMPACTION_MODEL",
+        "NMB_URL",
+        "AGENT_SANDBOX_ID",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -286,6 +288,41 @@ class TestEnvOverrides:
         monkeypatch.setenv("AGENT_LOOP_MAX_TOOL_ROUNDS", "42")
         config = AppConfig.load(path=yaml_path)
         assert config.agent_loop.max_tool_rounds == 42
+
+    def test_nmb_section_populates_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "nmb:\n"
+            "  broker_url: ws://broker.example:9999\n"
+            "  sandbox_id: sub-42\n"
+        )
+        config = AppConfig.load(path=yaml_path)
+        assert config.nmb.broker_url == "ws://broker.example:9999"
+        assert config.nmb.sandbox_id == "sub-42"
+
+    def test_nmb_env_overrides_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``NMB_URL`` / ``AGENT_SANDBOX_ID`` are the same env var names
+        # the sub-agent used to read directly; they now route through
+        # the config loader as per-field overrides.
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "nmb:\n  broker_url: ws://yaml.example:1\n  sandbox_id: yaml-id\n"
+        )
+        monkeypatch.setenv("NMB_URL", "ws://env.example:2")
+        monkeypatch.setenv("AGENT_SANDBOX_ID", "env-id")
+        config = AppConfig.load(path=yaml_path)
+        assert config.nmb.broker_url == "ws://env.example:2"
+        assert config.nmb.sandbox_id == "env-id"
 
 
 # ── Secret validation ──────────────────────────────────────────────

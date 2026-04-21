@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import signal
 import sys
 import uuid
@@ -233,8 +232,13 @@ async def _run_nmb_mode(
     # cost when NMB isn't being used.
     from nemoclaw_escapades.nmb.client import MessageBus  # noqa: PLC0415
 
-    broker_url = os.environ.get("NMB_URL", "ws://messages.local:9876")
-    agent_id = os.environ.get("AGENT_SANDBOX_ID") or f"coding-{_make_agent_id()}"
+    # Every field comes from ``config.nmb`` — the raw-env-var reads
+    # this used to do (``NMB_URL``, ``AGENT_SANDBOX_ID``) are now
+    # per-field env *overrides* on the dataclass, applied during
+    # ``AppConfig.load``.  That keeps non-secret config flowing
+    # through the YAML overlay inside the sandbox (design §5.3).
+    broker_url = config.nmb.broker_url
+    agent_id = config.nmb.sandbox_id or f"coding-{_make_agent_id()}"
     logger.info(  # type: ignore[attr-defined]
         "Connecting to NMB broker",
         extra={"broker_url": broker_url, "agent_id": agent_id},
