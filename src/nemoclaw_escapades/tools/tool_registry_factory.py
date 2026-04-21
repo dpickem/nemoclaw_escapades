@@ -106,10 +106,11 @@ def build_full_tool_registry(
         register_web_search_tools(registry, config.web_search)
 
     # ── Coding agent tools (file/search/bash/git) ──────────────────
-    # Default-OFF — the coding tools mutate the filesystem and run
-    # shell commands, so they must be explicitly opted in via
-    # ``CODING_AGENT_ENABLED=true``.  Reuses the shared helper so the
-    # composition stays in one place.
+    # Default-ON — the coding tools are the orchestrator's core
+    # capability.  Writes are still gated by the write-approval flow,
+    # and ``git_clone`` stays fail-closed until an allowlist is
+    # provided via ``GIT_CLONE_ALLOWED_HOSTS``.  Opt out with
+    # ``CODING_AGENT_ENABLED=false``.
     if config.coding.enabled:
         workspace_root = str(Path(config.coding.workspace_root).expanduser())
         Path(workspace_root).mkdir(parents=True, exist_ok=True)

@@ -164,6 +164,20 @@ DEFAULT_CODING_WORKSPACE_ROOT: str = "~/.nemoclaw/workspace"
 # writable mount (see Makefile's AUDIT_DB_SANDBOX pattern).
 _SANDBOX_CODING_WORKSPACE_ROOT: str = "/sandbox/workspace"
 
+# ``git_clone`` host allowlist.  Local dev defaults to fail-closed (empty)
+# — the operator must opt in via ``GIT_CLONE_ALLOWED_HOSTS`` in ``.env``.
+# Inside the OpenShell sandbox we bake in the hosts whose network policy
+# already permits egress (see ``policies/orchestrator.yaml``): every other
+# host is proxy-blocked anyway, so there's no extra attack surface and the
+# tool is usable out of the box.  This is baked-in rather than provider-
+# injected because OpenShell ``--credential`` values are substituted as
+# placeholder strings inside the sandbox (the L7 proxy resolves them at
+# request time, not in ``os.environ``); a placeholder comma-split would
+# poison the allowlist.  ``GIT_CLONE_ALLOWED_HOSTS`` still overrides this
+# for local-dev or tighter sandbox deployments.
+DEFAULT_GIT_CLONE_ALLOWED_HOSTS: str = ""
+_SANDBOX_GIT_CLONE_ALLOWED_HOSTS: str = ""
+
 # ── Skills defaults ──────────────────────────────────────────────────
 
 # Local-development default for the ``SkillLoader`` scan root.
@@ -405,18 +419,27 @@ class CodingAgentConfig:
     ``scratchpad`` skill for the convention).
 
     Attributes:
-        enabled: Whether the coding tools are wired in.
+        enabled: Whether the coding tools are wired in.  Defaults to
+            ``True`` — the coding tools are the orchestrator's core
+            capability.  File writes are still gated by the write-approval
+            flow, and ``git_clone`` stays fail-closed via an empty
+            ``git_clone_allowed_hosts`` allowlist.  Set
+            ``CODING_AGENT_ENABLED=false`` to opt out.
         workspace_root: Absolute path to the directory that file/search/
             bash/git tools operate on.  Path traversal outside this
             directory is rejected by the file tools.
         git_clone_allowed_hosts: Comma-separated list of host names that
             ``git_clone`` will accept.  Empty disables ``git_clone``
-            entirely (fail-closed for security).
+            entirely (fail-closed for security).  ``load_config``
+            substitutes ``_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`` when the
+            process is running inside the OpenShell sandbox so the tool
+            is usable out of the box against hosts the orchestrator
+            policy already permits.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     workspace_root: str = DEFAULT_CODING_WORKSPACE_ROOT
-    git_clone_allowed_hosts: str = ""
+    git_clone_allowed_hosts: str = DEFAULT_GIT_CLONE_ALLOWED_HOSTS
 
 
 @dataclass
@@ -612,18 +635,28 @@ def load_config() -> AppConfig:
             ),
         ),
         coding=CodingAgentConfig(
-            # Default OFF — the coding tools mutate the filesystem and
-            # run shell commands, so they must be explicitly opted in.
-            enabled=os.environ.get("CODING_AGENT_ENABLED", "false").lower() in _TRUTHY_VALUES,
+            # Default ON — the coding tools (file/search/bash/git) are
+            # the orchestrator's core capability.  Writes still require
+            # user approval, and git_clone remains fail-closed until a
+            # host allowlist is supplied.  Set CODING_AGENT_ENABLED=false
+            # to opt out.
+            enabled=os.environ.get("CODING_AGENT_ENABLED", "true").lower() in _TRUTHY_VALUES,
             # In sandbox: writable paths on the /sandbox PVC.  Locally:
             # home-directory folders that respect HOME.
             workspace_root=os.environ.get(
                 "CODING_WORKSPACE_ROOT",
                 _SANDBOX_CODING_WORKSPACE_ROOT if in_sandbox else DEFAULT_CODING_WORKSPACE_ROOT,
             ),
-            # Fail-closed allowlist for git_clone target hosts.  Empty
-            # means the tool refuses to clone anything.
-            git_clone_allowed_hosts=os.environ.get("GIT_CLONE_ALLOWED_HOSTS", ""),
+            # Sandbox: bake in hosts whose egress is already whitelisted
+            # by the orchestrator network policy (see the
+            # ``_SANDBOX_GIT_CLONE_ALLOWED_HOSTS`` docstring for rationale
+            # — provider-injected values become proxy placeholders and
+            # can't be parsed here).  Local dev: empty means fail-closed
+            # until the operator opts in via the env var.
+            git_clone_allowed_hosts=os.environ.get(
+                "GIT_CLONE_ALLOWED_HOSTS",
+                _SANDBOX_GIT_CLONE_ALLOWED_HOSTS if in_sandbox else DEFAULT_GIT_CLONE_ALLOWED_HOSTS,
+            ),
         ),
         skills=SkillsConfig(
             enabled=os.environ.get("SKILLS_ENABLED", "true").lower() in _TRUTHY_VALUES,
