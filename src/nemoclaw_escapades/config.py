@@ -28,11 +28,14 @@ import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from nemoclaw_escapades.observability.logging import get_logger
+
+if TYPE_CHECKING:
+    from nemoclaw_escapades.runtime import RuntimeEnvironment
 
 logger = get_logger("config")
 
@@ -586,7 +589,12 @@ class AppConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> AppConfig:
+    def load(
+        cls,
+        path: str | Path | None = None,
+        *,
+        env: RuntimeEnvironment | None = None,
+    ) -> AppConfig:
         """Load configuration from dataclass defaults + YAML overlay + env vars.
 
         The three sources combine in the precedence documented at the
@@ -603,6 +611,18 @@ class AppConfig:
         Args:
             path: Optional YAML path override.  Takes precedence over
                 ``NEMOCLAW_CONFIG_PATH`` and :data:`_DEFAULT_YAML_PATH`.
+            env: Runtime classification from
+                :func:`nemoclaw_escapades.runtime.detect_runtime_environment`.
+                Used to gate the two remaining sandbox-vs-local-dev
+                branches — inference backfill on missing base URL and
+                relaxing the secrets requirement when the proxy
+                supplies them.  When ``None``, the loader falls back to
+                the same single-signal ``OPENSHELL_SANDBOX`` env-var
+                check the legacy code used (preserves backwards compat
+                for tests that pre-date the multi-signal detector).
+                New call sites should pass the already-detected
+                classification so there's exactly one source of truth
+                for "am I in a sandbox" per process.
 
         Returns:
             A fully populated ``AppConfig``.
@@ -611,10 +631,11 @@ class AppConfig:
             ValueError: If required secrets are missing, or if the
                 YAML at *path* is malformed.
         """
+        in_sandbox = _env_is_sandbox(env)
         config = cls()
         _apply_yaml_overlay(config, path)
-        _apply_env_overrides(config)
-        _check_required_secrets(config)
+        _apply_env_overrides(config, in_sandbox=in_sandbox)
+        _check_required_secrets(config, in_sandbox=in_sandbox)
         return config
 
 
@@ -780,7 +801,23 @@ def _apply_section(sub_config: Any, values: dict[str, Any], path_for_log: str) -
 # ── Env overrides ────────────────────────────────────────────────────
 
 
-def _apply_env_overrides(config: AppConfig) -> None:
+def _env_is_sandbox(env: RuntimeEnvironment | None) -> bool:
+    """Resolve "am I in the sandbox" for loader branching.
+
+    Prefers the caller-supplied :class:`RuntimeEnvironment` (the
+    multi-signal detector's result — what ``main.py`` and
+    ``agent/__main__.py`` pass in).  Falls back to the legacy single-
+    signal ``OPENSHELL_SANDBOX`` env-var check when the caller hasn't
+    supplied one, which keeps pre-existing tests that use
+    ``monkeypatch.setenv("OPENSHELL_SANDBOX", "1")`` working unchanged.
+    """
+    if env is not None:
+        from nemoclaw_escapades.runtime import RuntimeEnvironment  # noqa: PLC0415
+        return env is RuntimeEnvironment.SANDBOX
+    return bool(os.environ.get("OPENSHELL_SANDBOX"))
+
+
+def _apply_env_overrides(config: AppConfig, *, in_sandbox: bool = False) -> None:
     """Apply environment-variable overrides on top of *config*.
 
     Mutates *config* in place.  For each env var that is non-empty
@@ -788,15 +825,24 @@ def _apply_env_overrides(config: AppConfig) -> None:
     field on *config* is overwritten.  Env vars trump YAML, matching
     the documented precedence.
 
-    The one piece of sandbox-aware branching remaining in config
-    loading: ``INFERENCE_HUB_BASE_URL`` is backfilled with
-    :data:`SANDBOX_INFERENCE_BASE_URL` inside the OpenShell sandbox
-    when neither the env var nor the YAML supplies a value.  This
-    isn't a category-B leak — ``inference.local`` is the proxy-side
-    endpoint the sandbox always talks to, irrespective of
-    deployment.
+    In practice this runs in both local-dev and sandbox modes — inside
+    the sandbox most of these env vars are OpenShell-provider-injected
+    placeholder strings that the L7 proxy resolves at HTTP-request
+    time.  Either way the loader treats the raw string the same.
+
+    The one piece of sandbox-aware branching: ``INFERENCE_HUB_BASE_URL``
+    is backfilled with :data:`SANDBOX_INFERENCE_BASE_URL` inside the
+    sandbox when neither the env var nor the YAML supplies a value.
+    This isn't a category-B leak — ``inference.local`` is the
+    proxy-side endpoint the sandbox always talks to, irrespective
+    of deployment.
+
+    Args:
+        config: ``AppConfig`` instance to mutate.
+        in_sandbox: Whether the process is running inside an OpenShell
+            sandbox (as resolved by :func:`_env_is_sandbox`).  Used
+            only for the inference-URL backfill.
     """
-    in_sandbox = bool(os.environ.get("OPENSHELL_SANDBOX"))
 
     # ── Slack (required secrets) ───────────────────────────────────
     if bot := os.environ.get("SLACK_BOT_TOKEN"):
@@ -952,21 +998,33 @@ def _apply_env_overrides(config: AppConfig) -> None:
 # ── Validation ──────────────────────────────────────────────────────
 
 
-def _check_required_secrets(config: AppConfig) -> None:
+def _check_required_secrets(config: AppConfig, *, in_sandbox: bool = False) -> None:
     """Ensure required secrets are present.
 
     Slack bot + app tokens are required in every environment.
     Inference API key and base URL are required for local dev; inside
     the sandbox, ``inference.local`` resolution + proxy-injected key
     make both optional from the app's perspective (the proxy supplies
-    them).
+    them at HTTP-request time).
+
+    Env-var-based secret handling is primarily a *local-dev* concern:
+    in local dev ``make run-local-dev`` exports ``.env`` into the
+    shell, and the app reads real tokens from ``os.environ``.  Inside
+    the sandbox, every secret env var holds an OpenShell-provider
+    placeholder string that the L7 proxy resolves at request time —
+    the app only ever sees the placeholder, never the real secret.
+
+    Args:
+        config: ``AppConfig`` to validate.
+        in_sandbox: Whether the process is running inside an OpenShell
+            sandbox (from :func:`_env_is_sandbox`).  Relaxes the
+            Inference Hub requirement when True.
 
     Raises:
         ValueError: If any required secret is missing.  Message lists
             all missing keys so the operator sees the full set in one
             pass.
     """
-    in_sandbox = bool(os.environ.get("OPENSHELL_SANDBOX"))
     missing: list[str] = []
     if not config.slack.bot_token:
         missing.append("SLACK_BOT_TOKEN")

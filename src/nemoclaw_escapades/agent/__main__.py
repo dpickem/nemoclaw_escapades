@@ -325,7 +325,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
     if runtime.classification is RuntimeEnvironment.INCONSISTENT:
         raise SandboxConfigurationError(runtime)
 
-    config = AppConfig.load()
+    # Thread the detected env into the loader so its sandbox-vs-local
+    # branches (inference backfill, secrets relaxation) use the same
+    # classification as the self-check above — no second source of
+    # truth for "am I in a sandbox".
+    config = AppConfig.load(env=runtime.classification)
     setup_logging(level=config.log.level, log_file=config.log.log_file)
     logger = get_logger("agent.main")
     logger.info(

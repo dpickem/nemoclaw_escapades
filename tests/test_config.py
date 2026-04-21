@@ -352,3 +352,51 @@ class TestSecretValidation:
         config = AppConfig.load()
         # Sandbox backfill fires because env is empty and in_sandbox.
         assert config.inference.base_url == "https://inference.local/v1"
+
+    def test_env_argument_overrides_openshell_sandbox_env_var(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``env=SANDBOX`` unlocks sandbox branches even without the env var.
+
+        Regression: before this path was threaded, the loader read
+        ``OPENSHELL_SANDBOX`` directly and could disagree with the
+        multi-signal detector.  Now a caller-supplied
+        :class:`RuntimeEnvironment` is the source of truth.
+        """
+        from nemoclaw_escapades.runtime import RuntimeEnvironment
+
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
+        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
+        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
+        # Without env=..., the loader would treat this as LOCAL_DEV
+        # and refuse to start (missing INFERENCE_HUB_*).  With env
+        # passed in, the sandbox branch relaxes that requirement and
+        # the inference URL gets backfilled.
+        config = AppConfig.load(env=RuntimeEnvironment.SANDBOX)
+        assert config.inference.base_url == "https://inference.local/v1"
+
+    def test_env_argument_local_dev_requires_inference_hub(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``env=LOCAL_DEV`` keeps the strict secrets requirement.
+
+        Mirror of the test above from the other side: even with the
+        ``OPENSHELL_SANDBOX`` env var set (stale from a prior shell),
+        an explicit ``env=LOCAL_DEV`` forces the strict local-dev
+        validation.
+        """
+        from nemoclaw_escapades.runtime import RuntimeEnvironment
+
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+        # OPENSHELL_SANDBOX stale in the shell — with the old single-
+        # signal check this would wrongly enable sandbox mode.
+        monkeypatch.setenv("OPENSHELL_SANDBOX", "1")
+        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
+        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
+        with pytest.raises(ValueError, match="INFERENCE_HUB"):
+            AppConfig.load(env=RuntimeEnvironment.LOCAL_DEV)
