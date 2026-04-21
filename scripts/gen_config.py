@@ -47,7 +47,14 @@ from typing import Any
 
 import yaml
 
-# Committed base — public-safe, no category-B values.
+# Committed base — public-safe, no category-B values.  Paths below
+# are **cwd-relative**, matching the existing ``scripts/gen_policy.py``
+# convention: the Makefile always runs from the repo root, and the
+# unit tests chdir into a ``tmp_path`` that mirrors the repo layout
+# (see ``tests/test_gen_config.py::sandbox_cwd``).  Standalone
+# invocations from somewhere other than the repo root produce a
+# clear ``Error: config/defaults.yaml not found`` and exit non-zero
+# rather than silently misbehaving.
 BASE_CONFIG: Path = Path("config/defaults.yaml")
 
 # Resolved output — gitignored; ``COPY``'d into the sandbox image as
@@ -88,6 +95,10 @@ _CATEGORY_B_KEYS: dict[str, str] = {
 # - We deliberately do *not* include ``_CERT`` — env vars like
 #   ``SSL_CERT_FILE`` point at filesystem paths, not secret contents,
 #   and blocking them would create legitimate false positives.
+# - We deliberately do *not* include ``_URL`` — the resolver exists
+#   to route category-B values like ``GITLAB_URL`` / ``GERRIT_URL``
+#   into the YAML at build time.  Blocking them would break the
+#   primary happy path this script is for.
 _FORBIDDEN_KEY_SUFFIXES: tuple[str, ...] = (
     "_TOKEN",
     "_AUTH",

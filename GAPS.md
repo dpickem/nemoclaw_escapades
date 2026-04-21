@@ -4,7 +4,7 @@
 > reference systems. Each item is sourced from a deep dive or design document,
 > assigned a target milestone, and tracked through implementation.
 >
-> **Last updated:** 2026-04-21
+> **Last updated:** 2026-04-22
 
 ## Status Legend
 
@@ -39,6 +39,7 @@
 | Tool result truncation | BYOO §5.1 `ContextGuard._truncate_large_tool_results` | M2a P3 | **Designed** | Cap tool result content at configurable char limit (tutorial uses 10K). Micro-compaction tier — no API call needed. Promoted from M3 to M2a. |
 | Per-tool error isolation | BYOO §3.2 | M2a | **Designed** | Exceptions caught per-tool and returned as error strings in the tool message. The loop never crashes from a tool failure. |
 | Git identity pre-configured in sandbox image | Sandbox bring-up (observed) | M2b P1 | **Planned** | `docker/Dockerfile.orchestrator` installs `git` for the coding agent's `git_commit` / `git_clone` / `git_checkout` tools, but never sets `user.email` / `user.name`. Any agent-driven commit fails with `*** Please tell me who you are`; operators have been running `git config user.email nemoclaw@agent.bot && git config user.name "NemoClaw Agent"` by hand on every fresh sandbox. Bake a default identity into the image via `RUN git config --system` so commits work out of the box; seeded `.gitconfig` per workspace can still override for tasks that need a specific author. |
+| Policy hostnames in public source | Review of M2b P1 | M2b P2 | **Planned** | `design_m2b.md` §5.3 retired hostname leaks from `config.py` via the `gen_config.py` resolver, but `policies/orchestrator.yaml` still ships internal NVIDIA hostnames (`gitlab-master.nvidia.com`, `git-av.nvidia.com`) inline in the committed base policy. Apply the same public-base + private-overlay pattern here: move the host entries to `.env` (category B), let `scripts/gen_policy.py` merge them into `policies/orchestrator.resolved.yaml` at build time. Mirrors the existing `allowed_ips` handling. |
 
 ## 2  Context Management
 

@@ -200,9 +200,7 @@ After `task.complete` or timeout:
 > `fatal: unable to access '…': CONNECT tunnel failed, response 403` even with
 > the `gitlab` network policy correctly applied (host allowed, port 443 full
 > access, `/usr/bin/git` on the binary allowlist); `curl` against the same
-> host returned 200.  See the
-> [Slack discussion](https://nvidia.slack.com/archives/C0AE9P50JVA/p1774387323428199)
-> for the full thread.  This is the concrete failure mode §4.4.1 describes.
+> host returned 200.  This is the concrete failure mode §4.4.1 describes.
 
 #### 4.4.1 Problem Statement
 

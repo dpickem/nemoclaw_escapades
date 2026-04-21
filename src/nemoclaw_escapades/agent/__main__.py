@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import signal
 import sys
 import uuid
@@ -108,7 +109,7 @@ async def _run_task(
     identity_prompt: str,
     bundle: AgentSetupBundle,
     config: AppConfig,
-    logger: object,
+    logger: logging.Logger,
 ) -> str:
     """Run one task end-to-end and return the final assistant text.
 
@@ -160,7 +161,7 @@ async def _run_task(
         messages=list(messages),
         request_id=bundle.task_id,
     )
-    logger.info(  # type: ignore[attr-defined]
+    logger.info(
         "Coding agent task completed",
         extra={
             "task_id": bundle.task_id,
@@ -181,7 +182,7 @@ async def _run_cli_mode(
     workspace_root: str | None,
     config: AppConfig,
     backend: BackendBase,
-    logger: object,
+    logger: logging.Logger,
 ) -> int:
     """Run a single task from a CLI arg and print the result.
 
@@ -215,7 +216,7 @@ async def _run_cli_mode(
     try:
         content = await _run_task(backend, tools, identity, bundle, config, logger)
     except Exception:  # pragma: no cover - surfaced in logs
-        logger.error("Coding agent task failed", exc_info=True)  # type: ignore[attr-defined]
+        logger.error("Coding agent task failed", exc_info=True)
         return 1
     print(content)
     return 0
@@ -224,7 +225,7 @@ async def _run_cli_mode(
 async def _run_nmb_mode(
     config: AppConfig,
     backend: BackendBase,
-    logger: object,
+    logger: logging.Logger,
     shutdown_event: asyncio.Event,
 ) -> int:
     """Connect to NMB and handle ``task.assign`` messages.
@@ -251,7 +252,7 @@ async def _run_nmb_mode(
     # through the YAML overlay inside the sandbox (design §5.3).
     broker_url = config.nmb.broker_url
     agent_id = config.nmb.sandbox_id or f"coding-{_make_agent_id()}"
-    logger.info(  # type: ignore[attr-defined]
+    logger.info(
         "Connecting to NMB broker",
         extra={"broker_url": broker_url, "agent_id": agent_id},
     )
