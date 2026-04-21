@@ -4,7 +4,7 @@
 > reference systems. Each item is sourced from a deep dive or design document,
 > assigned a target milestone, and tracked through implementation.
 >
-> **Last updated:** 2026-04-14
+> **Last updated:** 2026-04-21
 
 ## Status Legend
 
@@ -38,6 +38,7 @@
 | Streaming tool execution | Claude Code `query()` async generator | M6+ | **Deferred** | Tools execute *during* the model's streaming response, not after. Single biggest latency improvement available. Requires refactoring `AgentLoop` to async generator pattern. |
 | Tool result truncation | BYOO §5.1 `ContextGuard._truncate_large_tool_results` | M2a P3 | **Designed** | Cap tool result content at configurable char limit (tutorial uses 10K). Micro-compaction tier — no API call needed. Promoted from M3 to M2a. |
 | Per-tool error isolation | BYOO §3.2 | M2a | **Designed** | Exceptions caught per-tool and returned as error strings in the tool message. The loop never crashes from a tool failure. |
+| Git identity pre-configured in sandbox image | Sandbox bring-up (observed) | M2b P1 | **Planned** | `docker/Dockerfile.orchestrator` installs `git` for the coding agent's `git_commit` / `git_clone` / `git_checkout` tools, but never sets `user.email` / `user.name`. Any agent-driven commit fails with `*** Please tell me who you are`; operators have been running `git config user.email nemoclaw@agent.bot && git config user.name "NemoClaw Agent"` by hand on every fresh sandbox. Bake a default identity into the image via `RUN git config --system` so commits work out of the box; seeded `.gitconfig` per workspace can still override for tasks that need a specific author. |
 
 ## 2  Context Management
 
