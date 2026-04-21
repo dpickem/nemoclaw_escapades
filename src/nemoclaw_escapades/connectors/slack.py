@@ -82,6 +82,34 @@ _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 # Reusable Block Kit divider block.
 DIVIDER: dict[str, str] = {"type": "divider"}
 
+# Slack ``message`` event subtypes we silently drop.  Deliberately an
+# *explicit deny-list* (not "any subtype is not None"): Slack ships
+# many subtypes that still represent real user content — e.g.
+# ``file_share``, ``thread_broadcast``, ``me_message`` — and dropping
+# those can strand a thread-reply event and cause the orchestrator to
+# build an empty history.  If Slack adds a new bot-loop-triggering
+# subtype, add it here explicitly.
+_IGNORED_MESSAGE_SUBTYPES: frozenset[str] = frozenset(
+    {
+        # Bot-loop triggers — our own ``chat_update`` on the thinking
+        # placeholder produces ``message_changed``; our own
+        # ``chat_postMessage`` can echo back as ``bot_message``.
+        "bot_message",
+        "message_changed",
+        "message_deleted",
+        # Channel lifecycle — not user content.
+        "channel_join",
+        "channel_leave",
+        "group_join",
+        "group_leave",
+        "channel_topic",
+        "channel_purpose",
+        "channel_name",
+        "channel_archive",
+        "channel_unarchive",
+    }
+)
+
 # ── Markdown → Slack mrkdwn conversion ─────────────────────────────
 
 
@@ -320,7 +348,25 @@ class SlackConnector(ConnectorBase):
             event:  Raw Slack event dict.
             client: Slack ``AsyncWebClient`` injected by Bolt.
         """
-        if self._should_ignore(event):
+        # Log the raw Slack event shape *before* filtering so we can
+        # diagnose missing ``thread_ts``, unexpected subtypes, or
+        # duplicate deliveries.  Cheap — just a handful of fields.
+        would_ignore = self._should_ignore(event)
+        logger.info(
+            "Slack event received",
+            extra={
+                "event_type": event.get("type"),
+                "subtype": event.get("subtype"),
+                "ts": event.get("ts"),
+                "thread_ts": event.get("thread_ts"),
+                "channel": event.get("channel"),
+                "channel_type": event.get("channel_type"),
+                "user": event.get("user"),
+                "has_bot_id": bool(event.get("bot_id")),
+                "would_ignore": would_ignore,
+            },
+        )
+        if would_ignore:
             return
         request = self._normalize(event)
         logger.info(
@@ -530,11 +576,17 @@ class SlackConnector(ConnectorBase):
     def _should_ignore(self, event: dict[str, Any]) -> bool:
         """Return ``True`` if this event should be silently dropped.
 
-        Only processes events with no ``subtype`` (normal user messages).
-        All subtypes — ``bot_message``, ``message_changed``,
-        ``message_deleted``, etc. — are dropped.  This prevents infinite
-        loops where the bot's own ``chat_update`` calls generate
-        ``message_changed`` events that trigger reprocessing.
+        Drops events whose ``subtype`` is in ``_IGNORED_MESSAGE_SUBTYPES``
+        — primarily ``message_changed``/``message_deleted``/``bot_message``,
+        which the bot generates for itself whenever it updates the
+        thinking placeholder — plus channel lifecycle events that
+        aren't user content.
+
+        Intentionally does **not** drop on "any subtype is non-null":
+        Slack uses subtypes for many legitimate user messages
+        (``file_share``, ``thread_broadcast``, ``me_message``, …), and
+        dropping those would strand the matching thread-reply event
+        and make the orchestrator see an empty conversation.
 
         As a defense-in-depth measure, also drops events with a
         ``bot_id`` field or matching the bot's own user ID.
@@ -545,7 +597,8 @@ class SlackConnector(ConnectorBase):
         Returns:
             ``True`` to skip the event, ``False`` to process it.
         """
-        if event.get("subtype") is not None:
+        subtype = event.get("subtype")
+        if subtype is not None and subtype in _IGNORED_MESSAGE_SUBTYPES:
             return True
         if event.get("bot_id"):
             return True
