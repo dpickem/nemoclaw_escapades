@@ -1079,7 +1079,7 @@ rendering (thinking indicator, step count, current tool).
 | Create sub-agent `__main__` entrypoint | `agent/__main__.py` | ✅ (commit `c238f73`) |
 | Create `AgentSetupBundle` dataclass | `agent/types.py` | ✅ `agent/types.py::AgentSetupBundle` |
 | Create coding agent system prompt template | `prompts/coding_agent.md` | ✅ |
-| End-to-end test: agent process starts, handles task, returns result | `tests/test_coding_agent_main.py` | ✅ `tests/test_coding_agent_main.py::TestCliMode` (CLI path assembles AgentLoop + coding tool suite, runs with a mock backend, returns content); NMB mode wiring smoke-tested in `::TestNmbMode` |
+| End-to-end test: agent process starts, handles task, returns result | `tests/test_integration_coding_agent.py`, `tests/test_coding_agent_main.py` | ✅ subprocess-level: `tests/test_integration_coding_agent.py` spawns `python -m nemoclaw_escapades.agent --task ...` against a local OpenAI-format mock and asserts the assistant reply reaches stdout.  Function-level: `tests/test_coding_agent_main.py::TestCliMode` covers the same assembly path with a fake `AgentLoop`; `::TestNmbMode` smoke-tests the NMB wiring (receive-loop body itself is Phase 2). |
 
 **Exit criteria:**
 
