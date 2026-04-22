@@ -17,6 +17,7 @@ from nemoclaw_escapades.config import (
     DEFAULT_GIT_CLONE_ALLOWED_HOSTS,
     DEFAULT_SKILLS_DIR,
     AppConfig,
+    load_dotenv_if_present,
 )
 
 
@@ -474,6 +475,75 @@ class TestEnvOverrides:
 
 
 # ── Secret validation ──────────────────────────────────────────────
+
+
+class TestDotenvLoader:
+    """``load_dotenv_if_present`` wires ``.env`` into ``os.environ``.
+
+    Regression: running ``python -m nemoclaw_escapades{,.agent}``
+    directly (outside ``make run-local-dev``) used to fail with
+    "Missing required environment variables: INFERENCE_HUB_API_KEY /
+    SLACK_BOT_TOKEN" because the entrypoints read ``os.environ``
+    without first loading the operator's ``.env``.  The helper's
+    job is to close that gap on the entrypoint side without changing
+    the test-friendly ``AppConfig.load`` (tests control their env
+    explicitly via ``monkeypatch``).
+    """
+
+    def test_loads_env_file_from_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``.env`` in CWD populates ``os.environ``."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
+        (tmp_path / ".env").write_text("INFERENCE_HUB_API_KEY=from-dotenv\n")
+
+        loaded = load_dotenv_if_present()
+
+        assert loaded is True
+        import os
+
+        assert os.environ.get("INFERENCE_HUB_API_KEY") == "from-dotenv"
+
+    def test_missing_dotenv_is_not_an_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No ``.env`` → ``False`` + no side effects.
+
+        This is the CI / OSS-consumer / subprocess-test case.  The
+        subprocess integration tests run in a ``tmp_path`` cwd
+        specifically so the loader no-ops.
+        """
+        monkeypatch.chdir(tmp_path)
+        assert not (tmp_path / ".env").exists()
+        assert load_dotenv_if_present() is False
+
+    def test_shell_env_wins_over_dotenv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``override=False`` preserves the documented precedence.
+
+        Shell-exported vars beat the ``.env`` file — same rule as
+        ``AppConfig.load``'s env-wins-over-YAML precedence.
+        Operators can still ``INFERENCE_HUB_API_KEY=foo make
+        run-local-dev`` to override what's in ``.env`` without
+        editing the file.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "from-shell")
+        (tmp_path / ".env").write_text("INFERENCE_HUB_API_KEY=from-dotenv\n")
+
+        load_dotenv_if_present()
+
+        import os
+
+        assert os.environ["INFERENCE_HUB_API_KEY"] == "from-shell"
 
 
 class TestSecretValidation:

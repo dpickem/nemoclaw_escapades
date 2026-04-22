@@ -215,6 +215,56 @@ DEFAULT_SKILLS_DIR: str = "skills"
 # is the correct behaviour for local-dev (no YAML shipped).
 _DEFAULT_YAML_PATH: Path = Path("/app/config.yaml")
 
+# ── Local-dev .env loader ───────────────────────────────────────────
+
+
+def load_dotenv_if_present(path: str | Path = ".env") -> bool:
+    """Load environment variables from a ``.env`` file if one exists.
+
+    Entrypoints (``main.py``, ``agent/__main__.py``) call this once at
+    startup so ``python -m nemoclaw_escapades{,.agent}`` picks up the
+    operator's credentials without requiring them to source ``.env``
+    manually or go through ``make run-local-dev``.  Non-precedence-
+    changing: ``override=False`` means a shell-exported var still
+    wins, matching the documented precedence (shell env > YAML >
+    dataclass defaults).
+
+    The file is looked up *only* at the supplied path (defaults to
+    ``.env`` in the current working directory).  We deliberately skip
+    ``python-dotenv``'s default upward search so this doesn't
+    accidentally hoover up a parent directory's ``.env`` — the tool
+    either loads the operator's project ``.env`` (when run from the
+    repo root, as the Makefile and standalone operators both do) or
+    no-ops when no local file exists (CI / OSS consumers / tests).
+
+    Inside the OpenShell sandbox there's no ``.env`` file — every
+    secret comes from provider-injected env vars set by the gateway.
+    ``load_dotenv_if_present`` is therefore a no-op in sandbox mode,
+    which is the correct behaviour.
+
+    Args:
+        path: ``.env`` file path, resolved relative to the current
+            working directory when given as a string.
+
+    Returns:
+        ``True`` if the file was found and loaded, ``False`` if
+        missing.  Return value is informational — callers don't need
+        to branch on it.
+    """
+    dotenv_path = Path(path)
+    if not dotenv_path.is_file():
+        return False
+    # Local import so the module stays importable without the dep
+    # (e.g. in the sandbox image, where ``python-dotenv`` is a
+    # transitive dep via the package install and always present —
+    # but we still keep the import lazy in case a future trimmed
+    # image drops it).
+    from dotenv import load_dotenv  # noqa: PLC0415
+
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+    return True
+
+
 # ── Misc ─────────────────────────────────────────────────────────────
 
 _TRUTHY_VALUES: frozenset[str] = frozenset({"true", "1", "yes"})

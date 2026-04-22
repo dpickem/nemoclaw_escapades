@@ -44,7 +44,7 @@ from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, Source
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AppConfig, load_system_prompt
+from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present, load_system_prompt
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
@@ -333,6 +333,14 @@ async def _async_main(argv: list[str] | None = None) -> int:
     §13.
     """
     args = _parse_args(argv)
+
+    # Pick up ``.env`` at the current working directory so
+    # ``python -m nemoclaw_escapades.agent --task ...`` finds the
+    # operator's ``INFERENCE_HUB_*`` credentials without requiring a
+    # shell-level ``export``.  Idempotent + ``override=False`` so
+    # shell-set vars still win.  No-op inside the sandbox (no
+    # ``.env`` file shipped) and in tests that run from a ``tmp_path``.
+    load_dotenv_if_present()
 
     runtime = detect_runtime_environment()
     if runtime.classification is RuntimeEnvironment.INCONSISTENT:

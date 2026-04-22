@@ -40,7 +40,7 @@ from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AppConfig
+from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
@@ -54,6 +54,17 @@ from nemoclaw_escapades.tools.tool_registry_factory import build_full_tool_regis
 
 
 async def main() -> None:
+    # Pick up ``.env`` at the current working directory so
+    # ``python -m nemoclaw_escapades`` (and ``make run-local-dev``
+    # behind it) finds the operator's ``SLACK_*`` / ``INFERENCE_HUB_*``
+    # credentials without requiring a shell-level ``export``.
+    # Idempotent + ``override=False`` so shell-set vars still win
+    # (preserves the documented precedence: shell env > YAML >
+    # dataclass defaults).  No-op inside the sandbox — no ``.env``
+    # ships with the image; every secret is an OpenShell-provider
+    # placeholder injected by the gateway.
+    load_dotenv_if_present()
+
     # ── 0. Runtime self-check ─────────────────────────────────────
     # Evaluate sandbox signals *before* config loading so a broken
     # deployment (OpenShell version drift, gateway misconfigured,
