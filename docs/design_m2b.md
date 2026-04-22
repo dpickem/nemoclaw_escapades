@@ -662,6 +662,40 @@ GIT_CLONE_ALLOWED_HOSTS=url1.nvidia.com,url2.nvidia.com,github.com
   starts with the allowlist honoured, no `_SANDBOX_*` constant in public code.
 - Local-dev path is unchanged — env vars still flow through `NemoClawConfig.load()`.
 
+#### 5.3.9 Policy-file Resolver (same pattern, different file)
+
+The committed `policies/orchestrator.yaml` used to carry internal
+hostnames (`gitlab-master.nvidia.com`, `git-av.nvidia.com`) inline
+under `network_policies.gitlab.endpoints[0].host` and
+`network_policies.gerrit.endpoints[0].host`.  Same category-B leak
+class as the `config.py` constants above — different file, identical
+resolver pattern:
+
+- Base policy ships with `host: ""` placeholders (public-safe).
+- `scripts/gen_policy.py` reads `.env`'s `GITLAB_URL` / `GERRIT_URL`,
+  extracts the hostname via `urllib.parse.urlparse`, and substitutes
+  into the matching network_policy at build time. The same env vars
+  already drive `gen_config.py`'s `toolsets.{gitlab,gerrit}.url`, so
+  operators don't maintain the hostname twice.
+- Substitution runs *before* the existing `allowed_ips` injection so
+  the SSRF-bypass matcher sees the final host.
+- An empty `.env` leaves the placeholders in place — OpenShell
+  rejects an empty-host endpoint at apply time, which is the correct
+  fail-closed posture for an OSS consumer.  Malformed URLs without a
+  scheme also fall through (detected via `urlparse`) and are treated
+  as missing.
+
+Mapping table lives next to `_CATEGORY_B_KEYS` in `gen_config.py` for
+symmetry:
+
+```python
+# scripts/gen_policy.py
+_POLICY_HOST_SUBSTITUTIONS: dict[str, str] = {
+    "GITLAB_URL": "gitlab",
+    "GERRIT_URL": "gerrit",
+}
+```
+
 ### 5.4 Sandbox Detection and Startup Self-Check
 
 #### 5.4.1 Problem Statement
@@ -1171,7 +1205,7 @@ progress reporting, and robust handling.
 | `gen_config.py` — populated `.env` | `coding.git_clone_allowed_hosts` in the resolved file matches the `.env` value | ✅ `tests/test_gen_config.py::TestResolverHappyPath` |
 | `gen_config.py` — unknown key | Unrecognised `.env` keys are ignored (never appear in resolved output) | ✅ `tests/test_gen_config.py::TestResolverHappyPath` |
 | `gen_config.py` — secret guard | An `.env` key matching `*_TOKEN`/`*_AUTH`/`*_PASSWORD`/`*_KEY` in the category-B allowlist → resolver fails with a clear error | ✅ `tests/test_gen_config.py::TestSecretGuard` |
-| No hostname leak in public source | `git grep nvidia.com src/ -- ':!*.md'` returns zero matches outside of public SaaS URLs (`jirasw.nvidia.com`, `nvidia.atlassian.net`) | ✅ `tests/test_gen_config.py::TestNoHostnameLeak` |
+| No hostname leak in public source | `git grep nvidia.com src/ -- ':!*.md'` returns zero matches outside of public SaaS URLs (`jirasw.nvidia.com`, `nvidia.atlassian.net`) | ✅ `tests/test_gen_config.py::TestNoHostnameLeak` (config layer), `tests/test_gen_policy.py::TestNoHostnameLeak` (policy layer) — both paired so any regression on either file fails CI |
 | Sandbox detection — LOCAL_DEV | No sandbox signals → classification `LOCAL_DEV` | ✅ `tests/test_runtime.py::TestClassification` |
 | Sandbox detection — SANDBOX | All signals present → classification `SANDBOX` | ✅ `tests/test_runtime.py::TestClassification` |
 | Sandbox detection — INCONSISTENT | Partial signals → `INCONSISTENT` + structured error | ✅ `tests/test_runtime.py::TestClassification` |
