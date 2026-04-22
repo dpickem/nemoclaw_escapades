@@ -345,6 +345,34 @@ class TestInferenceModelPropagation:
         assert config.inference.model == "env/inference-model"
         # Orchestrator keeps the YAML pin.
         assert config.orchestrator.model == "pinned/orchestrator-model"
+        # Sub-agent tracks the shared inference baseline, not the
+        # orchestrator's YAML pin — per the "orchestrator-only" contract
+        # that ``ORCHESTRATOR_MODEL`` documents for the env-var twin.
+        assert config.agent_loop.model == "env/inference-model"
+
+    def test_orchestrator_model_env_does_not_leak_to_agent_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: ``ORCHESTRATOR_MODEL`` is orchestrator-only.
+
+        ``.env.example`` documents ``ORCHESTRATOR_MODEL`` as pinning
+        "the orchestrator to a specific model while the rest of the
+        inference backend defaults to INFERENCE_MODEL."  Without this
+        guard, ``_sync_agent_loop_prompting_fields`` would pull from
+        ``config.orchestrator.model`` (which holds the pin) and the
+        sub-agent would silently run on the orchestrator's private
+        model instead of the shared inference baseline.  Fix:
+        ``model`` syncs from ``config.inference.model``.
+        """
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("INFERENCE_MODEL", "fast-model")
+        monkeypatch.setenv("ORCHESTRATOR_MODEL", "smart-model")
+        config = AppConfig.load()
+        assert config.inference.model == "fast-model"
+        assert config.orchestrator.model == "smart-model"
+        # The regression: sub-agent must stay on the shared baseline.
+        assert config.agent_loop.model == "fast-model"
 
     def test_orchestrator_model_env_wins_over_propagation(
         self,
@@ -357,6 +385,9 @@ class TestInferenceModelPropagation:
         config = AppConfig.load()
         assert config.inference.model == "inference-env-model"
         assert config.orchestrator.model == "orchestrator-env-model"
+        # Sub-agent follows the inference baseline, not the
+        # orchestrator's ``ORCHESTRATOR_MODEL`` override.
+        assert config.agent_loop.model == "inference-env-model"
 
 
 class TestEnvOverrides:

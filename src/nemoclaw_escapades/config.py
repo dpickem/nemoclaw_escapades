@@ -1026,37 +1026,54 @@ def _apply_env_overrides(config: AppConfig, *, in_sandbox: bool = False) -> None
 
 
 def _sync_agent_loop_prompting_fields(config: AppConfig) -> None:
-    """Propagate orchestrator prompting fields to ``agent_loop`` defaults.
+    """Propagate shared prompting defaults to ``agent_loop``.
 
     Sub-agents receive ``config.agent_loop`` as-is (see
     ``agent/__main__.py::_run_task``), so any prompting field left at
     its dataclass default would silently override an operator-set
     ``INFERENCE_MODEL`` / ``TEMPERATURE`` / ``MAX_TOKENS``.  That's a
-    silent mismatch: the orchestrator runs on the new model, the
+    silent mismatch: the orchestrator runs on the new setting, the
     sub-agent on the old one.
 
     This helper closes the gap.  For each of the three shared
-    prompting fields (``model`` / ``temperature`` / ``max_tokens``),
-    if ``config.agent_loop.<field>`` is still at its dataclass default
-    it's set to ``config.orchestrator.<field>``.  YAML-set
-    ``agent_loop.<field>`` values *differ* from the default and are
-    therefore preserved — the sub-agent can still be pinned to a
-    different model / temperature / token budget.
+    prompting fields, if ``config.agent_loop.<field>`` is still at its
+    dataclass default it's overwritten with the intended baseline.
+    YAML-set ``agent_loop.<field>`` values *differ* from the default
+    and are therefore preserved — the sub-agent can still be pinned to
+    a different model / temperature / token budget.
+
+    **Source of each field** (subtle but important):
+
+    - ``model`` — reads from ``config.inference.model`` (the backend
+      baseline set by ``INFERENCE_MODEL``), **not** from
+      ``config.orchestrator.model``.  The orchestrator can be pinned
+      to a different model via ``ORCHESTRATOR_MODEL`` (which
+      ``.env.example`` documents as "orchestrator-only"); sub-agents
+      stay on the shared inference baseline unless YAML
+      ``agent_loop.model`` pins them otherwise.
+    - ``temperature`` / ``max_tokens`` — read from
+      ``config.orchestrator.*`` because ``InferenceConfig`` has no
+      analogous fields.  The ``TEMPERATURE`` / ``MAX_TOKENS`` env
+      vars are intended as global sampling / budget knobs (no
+      ``INFERENCE_TEMPERATURE`` / ``ORCHESTRATOR_TEMPERATURE``
+      variants exist), so propagating the orchestrator's value to
+      the sub-agent matches operator intent.
 
     Runs after :func:`_apply_env_overrides` so env vars flow through
-    ``orchestrator`` first and then get propagated here.  The
-    orchestrator itself additionally applies its own prompting fields
-    at ``AgentLoop`` construction time (see
-    ``orchestrator/orchestrator.py::Orchestrator.__init__``) — that's
-    a defensive measure, not a duplicate: the orchestrator's loop
-    always tracks ``OrchestratorConfig`` regardless of ``agent_loop``.
+    the source fields first.  The orchestrator itself additionally
+    applies its own prompting fields at ``AgentLoop`` construction
+    time (see ``orchestrator/orchestrator.py::Orchestrator.__init__``)
+    — that's a defensive measure, not a duplicate: the orchestrator's
+    loop always tracks ``OrchestratorConfig`` regardless of
+    ``agent_loop``.
 
     Args:
         config: Mutated in place.  Only ``config.agent_loop`` changes.
     """
     defaults = AgentLoopConfig()
     if config.agent_loop.model == defaults.model:
-        config.agent_loop.model = config.orchestrator.model
+        # Inference baseline, not orchestrator — see docstring.
+        config.agent_loop.model = config.inference.model
     if config.agent_loop.temperature == defaults.temperature:
         config.agent_loop.temperature = config.orchestrator.temperature
     if config.agent_loop.max_tokens == defaults.max_tokens:
