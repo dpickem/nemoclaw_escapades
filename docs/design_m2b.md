@@ -6,7 +6,7 @@
 >
 > **Successor:** [Milestone 3 — Review Agent](design.md#milestone-3--review-agent)
 >
-> **Last updated:** 2026-04-21
+> **Last updated:** 2026-04-22
 
 ---
 
@@ -1176,6 +1176,10 @@ progress reporting, and robust handling.
 | Sandbox detection — SANDBOX | All signals present → classification `SANDBOX` | ✅ `tests/test_runtime.py::TestClassification` |
 | Sandbox detection — INCONSISTENT | Partial signals → `INCONSISTENT` + structured error | ✅ `tests/test_runtime.py::TestClassification` |
 | Startup self-check | `INCONSISTENT` classification raises `SandboxConfigurationError` before config load | ✅ `tests/test_runtime.py::TestSandboxConfigurationError` |
+| AppConfig prompting-field sync | `INFERENCE_MODEL` / `TEMPERATURE` / `MAX_TOKENS` propagate from `config.orchestrator` to `config.agent_loop` unless YAML pins the latter; `ORCHESTRATOR_MODEL` provides an orchestrator-only override | ✅ `tests/test_config.py::TestInferenceModelPropagation` |
+| AgentLoop + NMB config sections | YAML `agent_loop:` / `nmb:` populate the matching `AppConfig` fields; env-var overrides win per-field | ✅ `tests/test_config.py::TestYamlOverlay::test_agent_loop_section_populates_config`, `::TestEnvOverrides::test_agent_loop_env_overrides_yaml`, `::TestEnvOverrides::test_nmb_section_populates_config`, `::TestEnvOverrides::test_nmb_env_overrides_yaml` |
+| Sub-agent workspace isolation | Each sub-agent invocation lands in a distinct `<base>/agent-<hex>` subdirectory so concurrent runs can't clobber each other's scratchpad / notes | ✅ `tests/test_coding_agent_main.py::TestCliMode::test_cli_mode_per_agent_subdirectory_is_created` |
+| Sub-agent tool surface (enforcement-by-construction) | Sub-agent registry excludes `git_commit`; orchestrator retains it for finalisation | ✅ `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit`, `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface` |
 | Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ⏳ Pending (Phase 2) |
 | Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 2) |
 | NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 3) |
@@ -1191,7 +1195,7 @@ progress reporting, and robust handling.
 | Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present | 🟡 Manual smoke only — the positive path needs a real OpenShell sandbox so `/sandbox`, `/app/src`, and `inference.local` DNS resolve.  Automation would require mocking OpenShell itself, out of scope for unit / integration tests.  The runtime classifier logic is fully covered at the unit level (`tests/test_runtime.py::TestClassification`); operators verify the end-to-end wiring with `make run-local-sandbox`. |
 | Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_inconsistent_runtime_fails_fast` — spawns `python -m nemoclaw_escapades.agent` with an env mix the multi-signal detector classifies `INCONSISTENT`; asserts non-zero exit and `SandboxConfigurationError` + `refusing to start` on stderr, before any config load or I/O. |
 | Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_honours_yaml_deployment_override` — custom YAML via `NEMOCLAW_CONFIG_PATH` directs the sub-agent's workspace root without a rebuild; asserts the per-agent subdir lands under the YAML-supplied path. |
-| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — NMB transport lifecycle covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; `task.assign`/`task.complete` await Phase 2 |
+| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — (a) NMB wire-level transport covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent-side connect / close wiring (reads broker URL + sandbox id from `config.nmb`, calls `connect_with_retry`, closes on shutdown) covered by `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body awaits Phase 2 |
 | Coding agent end-to-end | Agent receives task, uses file tools, returns diff | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call` — subprocess + stateful OpenAI-format mock serves a `write_file` tool_call then a terminating reply; assertions: file lands on disk inside the per-agent workspace, final reply reaches stdout. |
 | Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ⏳ Pending (Phase 2) |
 | Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ⏳ Pending (Phase 2) |
@@ -1206,7 +1210,7 @@ progress reporting, and robust handling.
 
 | Test | What it verifies | Status |
 |------|-----------------|--------|
-| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | ⏳ Pending (Phase 2) |
+| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | 🟡 Partial — Phase 1 enforces by *construction*: `create_coding_tool_registry` deliberately omits `git_commit` (orchestrator-only, per §7.1), so the sub-agent's `ToolRegistry` has no entry the model could invoke.  Covered by `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit` and `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Phase 2 will add a runtime allow-list check for the broader "tool_surface"-as-policy story (e.g. orchestrator-granted per-task tool restrictions). |
 | Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` | ✅ `tests/test_file_tools.py::TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `::test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` (M2a) |
 | No recursive delegation | Coding agent cannot spawn sub-agents | ⏳ Pending (Phase 2) |
 | Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 2) |
