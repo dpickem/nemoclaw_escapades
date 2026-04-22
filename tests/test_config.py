@@ -257,6 +257,69 @@ class TestInferenceModelPropagation:
         assert config.inference.model == "azure/claude-test"
         assert config.orchestrator.model == "azure/claude-test"
 
+    def test_inference_model_propagates_to_agent_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: ``INFERENCE_MODEL`` reaches ``config.agent_loop.model``.
+
+        Sub-agents consume ``config.agent_loop`` directly (see
+        ``agent/__main__.py::_run_task``).  Before
+        ``_sync_agent_loop_prompting_fields`` existed, an operator-set
+        ``INFERENCE_MODEL`` moved ``orchestrator.model`` but left
+        ``agent_loop.model`` stuck at ``DEFAULT_INFERENCE_MODEL`` — the
+        orchestrator ran on the new model while the sub-agent silently
+        ran on the old one.  Now the two stay in lockstep.
+        """
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("INFERENCE_MODEL", "azure/claude-test")
+        config = AppConfig.load()
+        assert config.orchestrator.model == "azure/claude-test"
+        assert config.agent_loop.model == "azure/claude-test"
+
+    def test_temperature_and_max_tokens_propagate_to_agent_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same propagation covers the other two shared prompting fields."""
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("TEMPERATURE", "0.33")
+        monkeypatch.setenv("MAX_TOKENS", "12345")
+        config = AppConfig.load()
+        assert config.orchestrator.temperature == 0.33
+        assert config.orchestrator.max_tokens == 12345
+        # Sub-agents inherit via the post-env sync.
+        assert config.agent_loop.temperature == 0.33
+        assert config.agent_loop.max_tokens == 12345
+
+    def test_agent_loop_yaml_pin_survives_orchestrator_propagation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """YAML-set ``agent_loop.*`` wins over the orchestrator sync.
+
+        Enables the "run sub-agents on a different model" story: the
+        operator pins ``agent_loop.model`` explicitly and it's not
+        overwritten by the INFERENCE_MODEL-induced propagation to
+        the orchestrator.
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "orchestrator:\n  model: orch-model\n"
+            "agent_loop:\n"
+            "  model: sub-agent-model\n"
+            "  temperature: 0.1\n"
+            "  max_tokens: 500\n"
+        )
+        config = AppConfig.load(path=yaml_path)
+        assert config.orchestrator.model == "orch-model"
+        # agent_loop fields differ from defaults → not synced.
+        assert config.agent_loop.model == "sub-agent-model"
+        assert config.agent_loop.temperature == 0.1
+        assert config.agent_loop.max_tokens == 500
+
     def test_inference_model_respects_yaml_orchestrator_override(
         self,
         tmp_path: Path,

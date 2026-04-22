@@ -550,11 +550,18 @@ class AppConfig:
         inference: Inference Hub connection parameters.
         orchestrator: Orchestrator-facing prompt and history settings.
         agent_loop: Reusable ``AgentLoop`` runtime knobs (tool-round
-            cap, continuation retries, compaction thresholds).  The
-            orchestrator merges ``model`` / ``temperature`` /
-            ``max_tokens`` from ``OrchestratorConfig`` when it builds
-            its loop; sub-agents use the ``AgentLoopConfig`` values
-            directly so they can be tuned independently.
+            cap, continuation retries, compaction thresholds) and
+            prompting fields (``model`` / ``temperature`` /
+            ``max_tokens``).  ``AppConfig.load`` propagates the
+            orchestrator's prompting fields into the matching
+            ``agent_loop`` fields unless those are explicitly pinned
+            in YAML — so ``INFERENCE_MODEL`` (and friends) reach
+            sub-agents automatically, and operators who want a
+            sub-agent on a different model just set
+            ``agent_loop.model`` in YAML.  The orchestrator
+            additionally re-overrides these three fields with its
+            own at loop-construction time so its loop always tracks
+            ``OrchestratorConfig`` regardless of ``agent_loop``.
         nmb: NMB client settings — broker URL and sandbox identity.
             Category-A non-secret config that must not be plumbed
             through raw ``os.environ`` inside the sandbox (the whole
@@ -635,6 +642,7 @@ class AppConfig:
         config = cls()
         _apply_yaml_overlay(config, path)
         _apply_env_overrides(config, in_sandbox=in_sandbox)
+        _sync_agent_loop_prompting_fields(config)
         _check_required_secrets(config, in_sandbox=in_sandbox)
         return config
 
@@ -1012,6 +1020,47 @@ def _apply_env_overrides(config: AppConfig, *, in_sandbox: bool = False) -> None
         config.skills.enabled = val.lower() in _TRUTHY_VALUES
     if val := os.environ.get("SKILLS_DIR"):
         config.skills.skills_dir = val
+
+
+# ── Inter-section sync ──────────────────────────────────────────────
+
+
+def _sync_agent_loop_prompting_fields(config: AppConfig) -> None:
+    """Propagate orchestrator prompting fields to ``agent_loop`` defaults.
+
+    Sub-agents receive ``config.agent_loop`` as-is (see
+    ``agent/__main__.py::_run_task``), so any prompting field left at
+    its dataclass default would silently override an operator-set
+    ``INFERENCE_MODEL`` / ``TEMPERATURE`` / ``MAX_TOKENS``.  That's a
+    silent mismatch: the orchestrator runs on the new model, the
+    sub-agent on the old one.
+
+    This helper closes the gap.  For each of the three shared
+    prompting fields (``model`` / ``temperature`` / ``max_tokens``),
+    if ``config.agent_loop.<field>`` is still at its dataclass default
+    it's set to ``config.orchestrator.<field>``.  YAML-set
+    ``agent_loop.<field>`` values *differ* from the default and are
+    therefore preserved — the sub-agent can still be pinned to a
+    different model / temperature / token budget.
+
+    Runs after :func:`_apply_env_overrides` so env vars flow through
+    ``orchestrator`` first and then get propagated here.  The
+    orchestrator itself additionally applies its own prompting fields
+    at ``AgentLoop`` construction time (see
+    ``orchestrator/orchestrator.py::Orchestrator.__init__``) — that's
+    a defensive measure, not a duplicate: the orchestrator's loop
+    always tracks ``OrchestratorConfig`` regardless of ``agent_loop``.
+
+    Args:
+        config: Mutated in place.  Only ``config.agent_loop`` changes.
+    """
+    defaults = AgentLoopConfig()
+    if config.agent_loop.model == defaults.model:
+        config.agent_loop.model = config.orchestrator.model
+    if config.agent_loop.temperature == defaults.temperature:
+        config.agent_loop.temperature = config.orchestrator.temperature
+    if config.agent_loop.max_tokens == defaults.max_tokens:
+        config.agent_loop.max_tokens = config.orchestrator.max_tokens
 
 
 # ── Validation ──────────────────────────────────────────────────────
