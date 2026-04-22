@@ -205,14 +205,16 @@ def _clean_subprocess_env(
     """Build a minimal env dict for the sub-agent subprocess.
 
     Replaces the parent's environment entirely so stray vars from the
-    developer's shell / ``.env`` don't leak into the test.
+    developer's shell / ``.env`` don't leak into the test.  Slack
+    tokens are deliberately *absent* — the sub-agent runs without
+    Slack (``AppConfig.load(require_slack=False)``), and omitting
+    them here doubles as a regression check that the sub-agent never
+    starts depending on them.
     """
     env: dict[str, str] = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(home),
         "PYTHONPATH": str(_repo_root() / "src"),
-        "SLACK_BOT_TOKEN": "test-bot",
-        "SLACK_APP_TOKEN": "test-app",
         "INFERENCE_HUB_API_KEY": "test-key",
         "INFERENCE_HUB_BASE_URL": mock_inference_url,
         "INFERENCE_TIMEOUT_S": "5",

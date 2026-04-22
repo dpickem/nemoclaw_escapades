@@ -342,7 +342,15 @@ async def _async_main(argv: list[str] | None = None) -> int:
     # branches (inference backfill, secrets relaxation) use the same
     # classification as the self-check above — no second source of
     # truth for "am I in a sandbox".
-    config = AppConfig.load(env=runtime.classification)
+    #
+    # ``require_slack=False`` because the sub-agent never connects to
+    # Slack: CLI mode prints to stdout, NMB mode talks to the broker.
+    # Without this opt-out, a developer running ``python -m
+    # nemoclaw_escapades.agent --task ...`` on a machine with no
+    # Slack configuration would hit a misleading "SLACK_BOT_TOKEN /
+    # SLACK_APP_TOKEN missing" error during config load.  The
+    # orchestrator's ``main.py`` keeps the default (``require_slack=True``).
+    config = AppConfig.load(env=runtime.classification, require_slack=False)
     setup_logging(level=config.log.level, log_file=config.log.log_file)
     logger = get_logger("agent.main")
     logger.info(

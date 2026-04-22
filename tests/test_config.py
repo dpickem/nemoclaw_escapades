@@ -526,6 +526,48 @@ class TestSecretValidation:
         config = AppConfig.load(env=RuntimeEnvironment.SANDBOX)
         assert config.inference.base_url == "https://inference.local/v1"
 
+    def test_sub_agent_path_does_not_require_slack_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: ``require_slack=False`` skips the Slack check.
+
+        The coding sub-agent never touches Slack — CLI mode prints to
+        stdout and NMB mode talks to the broker — so requiring
+        ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its startup path
+        makes ``python -m nemoclaw_escapades.agent --task ...`` fail
+        on any machine whose ``.env`` isn't fully configured for the
+        orchestrator.  ``AppConfig.load(require_slack=False)`` opts
+        out of that check while keeping the inference-secret
+        validation untouched.
+        """
+        # Inference secrets present; Slack ones deliberately absent.
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
+        monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://x")
+        # Must not raise.
+        config = AppConfig.load(require_slack=False)
+        assert config.slack.bot_token == ""
+        assert config.slack.app_token == ""
+        assert config.inference.api_key == "k"
+
+    def test_sub_agent_path_still_validates_inference_in_local_dev(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``require_slack=False`` is about *Slack only* — inference
+        is still required in local dev.  Regression guard so a future
+        edit doesn't accidentally broaden the opt-out.
+        """
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
+        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
+        with pytest.raises(ValueError, match="INFERENCE_HUB"):
+            AppConfig.load(require_slack=False)
+
     def test_env_argument_local_dev_requires_inference_hub(
         self,
         monkeypatch: pytest.MonkeyPatch,

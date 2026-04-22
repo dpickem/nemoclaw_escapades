@@ -601,6 +601,7 @@ class AppConfig:
         path: str | Path | None = None,
         *,
         env: RuntimeEnvironment | None = None,
+        require_slack: bool = True,
     ) -> AppConfig:
         """Load configuration from dataclass defaults + YAML overlay + env vars.
 
@@ -630,6 +631,16 @@ class AppConfig:
                 New call sites should pass the already-detected
                 classification so there's exactly one source of truth
                 for "am I in a sandbox" per process.
+            require_slack: Whether Slack tokens must be present in env.
+                Defaults to ``True`` for the orchestrator's
+                ``main.py`` — it opens a Slack connection and can't
+                function without them.  Sub-agents (``agent/__main__``)
+                pass ``False`` because they never touch Slack (CLI
+                mode prints to stdout; NMB mode talks to the broker).
+                Without this opt-out, a developer running
+                ``python -m nemoclaw_escapades.agent --task ...`` on
+                a machine with no Slack config would hit a misleading
+                "missing SLACK_BOT_TOKEN" error during config load.
 
         Returns:
             A fully populated ``AppConfig``.
@@ -643,7 +654,9 @@ class AppConfig:
         _apply_yaml_overlay(config, path)
         _apply_env_overrides(config, in_sandbox=in_sandbox)
         _sync_agent_loop_prompting_fields(config)
-        _check_required_secrets(config, in_sandbox=in_sandbox)
+        _check_required_secrets(
+            config, in_sandbox=in_sandbox, require_slack=require_slack
+        )
         return config
 
 
@@ -1083,14 +1096,26 @@ def _sync_agent_loop_prompting_fields(config: AppConfig) -> None:
 # ── Validation ──────────────────────────────────────────────────────
 
 
-def _check_required_secrets(config: AppConfig, *, in_sandbox: bool = False) -> None:
+def _check_required_secrets(
+    config: AppConfig,
+    *,
+    in_sandbox: bool = False,
+    require_slack: bool = True,
+) -> None:
     """Ensure required secrets are present.
 
-    Slack bot + app tokens are required in every environment.
-    Inference API key and base URL are required for local dev; inside
-    the sandbox, ``inference.local`` resolution + proxy-injected key
-    make both optional from the app's perspective (the proxy supplies
-    them at HTTP-request time).
+    Not every component needs every secret.  The two classes of
+    requirements the callers choose between:
+
+    - **Slack tokens** — the orchestrator's ``SlackConnector`` needs
+      them.  The coding sub-agent never touches Slack (CLI mode
+      prints to stdout; NMB mode talks to the broker), so it opts
+      out via ``require_slack=False``.
+    - **Inference Hub key + base URL** — every component that calls
+      the inference backend needs them in local dev.  Inside the
+      sandbox, ``inference.local`` resolution + proxy-injected key
+      make both optional (the proxy supplies them at HTTP-request
+      time), which is why ``in_sandbox`` gates this branch.
 
     Env-var-based secret handling is primarily a *local-dev* concern:
     in local dev ``make run-local-dev`` exports ``.env`` into the
@@ -1104,6 +1129,12 @@ def _check_required_secrets(config: AppConfig, *, in_sandbox: bool = False) -> N
         in_sandbox: Whether the process is running inside an OpenShell
             sandbox (from :func:`_env_is_sandbox`).  Relaxes the
             Inference Hub requirement when True.
+        require_slack: Whether Slack bot + app tokens are required.
+            Defaults to ``True`` for the orchestrator.  Sub-agents
+            pass ``False`` — they never open a Slack connection, so
+            requiring the tokens would block ``python -m
+            nemoclaw_escapades.agent --task ...`` on a developer
+            machine that hasn't configured Slack at all.
 
     Raises:
         ValueError: If any required secret is missing.  Message lists
@@ -1111,10 +1142,11 @@ def _check_required_secrets(config: AppConfig, *, in_sandbox: bool = False) -> N
             pass.
     """
     missing: list[str] = []
-    if not config.slack.bot_token:
-        missing.append("SLACK_BOT_TOKEN")
-    if not config.slack.app_token:
-        missing.append("SLACK_APP_TOKEN")
+    if require_slack:
+        if not config.slack.bot_token:
+            missing.append("SLACK_BOT_TOKEN")
+        if not config.slack.app_token:
+            missing.append("SLACK_APP_TOKEN")
     if not in_sandbox:
         if not config.inference.api_key:
             missing.append("INFERENCE_HUB_API_KEY")
