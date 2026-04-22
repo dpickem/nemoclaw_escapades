@@ -192,6 +192,10 @@ class TestCodingToolRegistry:
         orchestrator owns finalisation and composes commits via its
         ``push_and_create_pr`` tool.  Sub-agents describe changes
         and report back; they don't write to repo history directly.
+
+        ``skill`` is also absent when no ``skill_loader`` is supplied
+        — the separate test below covers that path.  Tests and other
+        callers that want a pure coding surface rely on this default.
         """
         reg = create_coding_tool_registry(str(workspace))
         names = set(reg.names)
@@ -207,6 +211,41 @@ class TestCodingToolRegistry:
         assert "git_checkout" in names
         assert "git_clone" in names
         assert "git_commit" not in names
+        assert "skill" not in names  # no skill_loader → no skill tool
+
+    def test_factory_registers_skill_when_loader_provided(
+        self,
+        workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Regression: ``skill_loader`` argument wires the ``skill`` tool.
+
+        Before this was added, ``create_coding_tool_registry`` only
+        registered file/search/bash/git — but the sub-agent's system
+        prompt (``prompts/coding_agent.md``) tells the model to call
+        ``skill("scratchpad")`` for multi-round tasks.  Without the
+        tool in the registry, the model would hallucinate the call
+        and waste rounds on "unknown tool" errors.
+        """
+        from nemoclaw_escapades.agent.skill_loader import SkillLoader
+
+        # Build a skills dir with a single minimal skill so the
+        # loader discovers something and ``register_skill_tool``
+        # actually adds the tool (it's a no-op when the loader is
+        # empty).
+        skills_dir = tmp_path / "skills" / "scratchpad"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nid: scratchpad\n---\nScratchpad content.\n"
+        )
+
+        loader = SkillLoader(str(tmp_path / "skills"))
+        assert "scratchpad" in loader.available_ids
+
+        reg = create_coding_tool_registry(str(workspace), skill_loader=loader)
+        assert "skill" in reg.names
+        # Coding tools still there — skill is additive, not replacing.
+        assert {"read_file", "write_file", "bash", "git_diff"}.issubset(set(reg.names))
 
 
 # ── Output truncation ─────────────────────────────────────────────────

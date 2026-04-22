@@ -45,6 +45,7 @@ def create_coding_tool_registry(
     workspace_root: str,
     *,
     git_clone_allowed_hosts: str = "",
+    skill_loader: SkillLoader | None = None,
 ) -> ToolRegistry:
     """Create a registry with just the coding sub-agent's tools.
 
@@ -57,11 +58,26 @@ def create_coding_tool_registry(
     commit path would create two write sources against the same
     repository state and bypass the orchestrator's review gate.
 
+    When a ``skill_loader`` is supplied (and has discovered at least
+    one ``SKILL.md``), the dynamic ``skill(<id>)`` tool is also
+    registered.  This is how the sub-agent's system prompt's
+    "load ``scratchpad`` skill" instruction actually works — without
+    the loader, the model would try to invoke a tool that doesn't
+    exist in its registry, wasting rounds on "unknown tool" errors.
+
     Args:
         workspace_root: Absolute path to the workspace directory.
             All file/search/git/bash tools are rooted here.
         git_clone_allowed_hosts: Comma/space-separated hostnames that
             ``git_clone`` accepts.  Empty disables ``git_clone``.
+        skill_loader: Optional pre-scanned ``SkillLoader``.  When
+            supplied, ``register_skill_tool`` adds a ``skill`` tool
+            whose parameter enum lists every discovered skill id.
+            Passing ``None`` omits the tool entirely — used by tests
+            and any caller that deliberately wants a pure coding
+            surface.  ``register_skill_tool`` is itself a no-op when
+            the loader has zero skills, so a never-populated
+            ``skills/`` directory doesn't produce a broken tool.
 
     Returns:
         A fully populated ``ToolRegistry`` ready for injection into
@@ -74,6 +90,8 @@ def create_coding_tool_registry(
         git_clone_allowed_hosts=git_clone_allowed_hosts,
         include_git_commit=False,
     )
+    if skill_loader is not None:
+        register_skill_tool(registry, skill_loader)
     return registry
 
 

@@ -41,6 +41,7 @@ from pathlib import Path
 from nemoclaw_escapades.agent.approval import AutoApproval
 from nemoclaw_escapades.agent.loop import AgentLoop
 from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, SourceType
+from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
@@ -89,17 +90,34 @@ def _build_tool_registry(config: AppConfig, bundle: AgentSetupBundle) -> ToolReg
     """Build the sub-agent's coding tool registry.
 
     Unlike the orchestrator's ``build_full_tool_registry`` this is a
-    *focused* surface — only the coding suite, no service tools.
-    That's the whole point of delegation: give the sub-agent the
-    tools it actually needs and nothing else.  Fewer tools in the
-    prompt → better selection accuracy (BYOO tutorial §9.2 — same
-    rationale as the ``ToolSearch`` meta-tool coming in Phase 4).
+    *focused* surface — only the coding suite and the ``skill`` tool,
+    no service tools.  That's the whole point of delegation: give the
+    sub-agent the tools it actually needs and nothing else.  Fewer
+    tools in the prompt → better selection accuracy (BYOO tutorial
+    §9.2 — same rationale as the ``ToolSearch`` meta-tool coming in
+    Phase 4).
+
+    The ``skill`` tool specifically is load-bearing: the coding
+    sub-agent's system prompt (``prompts/coding_agent.md``) instructs
+    the model to call ``skill("scratchpad")`` for any task spanning
+    more than three tool rounds.  Without the tool registered, the
+    model would hallucinate the call and waste rounds on "unknown
+    tool" errors.  ``register_skill_tool`` is a no-op when the
+    skills directory is empty, so this is safe to wire
+    unconditionally when skills are enabled.
     """
     workspace_root = str(Path(bundle.workspace_root).expanduser())
     Path(workspace_root).mkdir(parents=True, exist_ok=True)
+
+    skill_loader: SkillLoader | None = None
+    if config.skills.enabled:
+        skills_dir = str(Path(config.skills.skills_dir).expanduser())
+        skill_loader = SkillLoader(skills_dir)
+
     return create_coding_tool_registry(
         workspace_root,
         git_clone_allowed_hosts=config.coding.git_clone_allowed_hosts,
+        skill_loader=skill_loader,
     )
 
 

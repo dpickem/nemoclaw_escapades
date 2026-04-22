@@ -179,6 +179,12 @@ class TestCliMode:
         assert "read_file" in captured["tool_names"]
         assert "write_file" in captured["tool_names"]
         assert "bash" in captured["tool_names"]
+        # Regression: ``skill`` is registered when skills are enabled
+        # so the system prompt's ``skill("scratchpad")`` instruction
+        # resolves to a real tool.  The repo ships skills in the
+        # default ``skills/`` directory that ``SkillLoader`` picks
+        # up unchanged by the test.
+        assert "skill" in captured["tool_names"]
         # The prompt carries the task description and workspace.
         assert "write README" in captured["user_prompt"]
         assert str(workspace) in captured["system_prompt"]
@@ -199,6 +205,65 @@ class TestCliMode:
             "``<workspace>/agent-<agent_id>`` in the system prompt, got: "
             f"{captured['system_prompt']!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_skill_tool_omitted_when_skills_disabled(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``config.skills.enabled=False`` leaves ``skill`` unregistered.
+
+        Opt-out escape hatch for callers / tests that want a pure
+        coding surface.  Without this test, a future refactor that
+        unconditionally wires the ``skill`` tool (say, for
+        "consistency") would break the opt-out silently.
+        """
+        captured: dict[str, Any] = {}
+
+        class _FakeAgentLoop:
+            def __init__(self, *, tools: Any, **_: Any) -> None:
+                captured["tool_names"] = tools.names
+
+            async def run(self, *, messages: list[Any], request_id: str) -> Any:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": "ok",
+                        "rounds": 1,
+                        "tool_calls_made": 0,
+                        "hit_safety_limit": False,
+                    },
+                )()
+
+        monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoop)
+        monkeypatch.setenv("SKILLS_ENABLED", "false")
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        from nemoclaw_escapades.config import AppConfig
+
+        workspace = tmp_path / "ws"
+        config = AppConfig.load()
+        assert config.skills.enabled is False
+
+        import logging
+
+        await agent_main._run_cli_mode(
+            task_description="noop",
+            workspace_root=str(workspace),
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        # Coding tools still there — skills disabled is additive-only.
+        assert "read_file" in captured["tool_names"]
+        assert "bash" in captured["tool_names"]
+        # But skill tool is absent — the opt-out worked.
+        assert "skill" not in captured["tool_names"]
 
     @pytest.mark.asyncio
     async def test_cli_mode_per_agent_subdirectory_is_created(
