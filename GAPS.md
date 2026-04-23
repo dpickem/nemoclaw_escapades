@@ -4,13 +4,13 @@
 > reference systems. Each item is sourced from a deep dive or design document,
 > assigned a target milestone, and tracked through implementation.
 >
-> **Last updated:** 2026-04-14
+> **Last updated:** 2026-04-23
 
 ## Status Legend
 
 | Status | Meaning |
 |--------|---------|
-| **Done** | Implemented and merged |
+| ✅ **Done** | Implemented and merged |
 | **Designed** | Design exists in a doc; implementation not started |
 | **Planned** | Identified as needed; no detailed design yet |
 | **Deferred** | Explicitly pushed to a later milestone |
@@ -32,35 +32,37 @@
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| `@tool` decorator with auto-schema | BYOO `tools/base.py` | M2a | **Done** | Decorator generates JSON Schema from type hints + docstrings; all `ToolSpec` metadata supported as kwargs. Implemented in `tools/registry.py`. All coding tools (files, search, bash, git) migrated. |
+| `@tool` decorator with auto-schema | BYOO `tools/base.py` | M2a | ✅ **Done** | Decorator generates JSON Schema from type hints + docstrings; all `ToolSpec` metadata supported as kwargs. Implemented in `tools/registry.py`. All coding tools (files, search, bash, git) migrated. |
 | Consistent `@tool` usage across all tools | BYOO `tools/base.py` | M2b+ | **Planned** | Enterprise tools (Jira, GitLab, Gerrit, Confluence, Slack) still use the verbose `ToolSpec(...)` constructor with hand-written `input_schema` dicts. Migrate to `@tool` decorator for single source of truth — description, parameters, and schema all derived from the function's docstring and type annotations. |
-| Concurrent tool execution | BYOO §3.2, Claude Code, Hermes | M2a P1 | **Designed** | Default to concurrent via `asyncio.gather`; `is_concurrency_safe=False` flag for write tools that mutate shared state. |
+| Concurrent tool execution | BYOO §3.2, Claude Code, Hermes | M2a P1 | ✅ **Done** | `AgentLoop` dispatches tool calls via `asyncio.gather` when every call's spec carries `is_concurrency_safe=True`; a single `False` on any call demotes the whole round to sequential dispatch.  Implemented in `agent/loop.py`; flag lives on `tools/registry.py::ToolSpec` and is `False` for every write tool (`write_file`, `edit_file`, `git_commit`, `git_checkout`, `git_clone`, `bash`). |
 | Streaming tool execution | Claude Code `query()` async generator | M6+ | **Deferred** | Tools execute *during* the model's streaming response, not after. Single biggest latency improvement available. Requires refactoring `AgentLoop` to async generator pattern. |
-| Tool result truncation | BYOO §5.1 `ContextGuard._truncate_large_tool_results` | M2a P3 | **Designed** | Cap tool result content at configurable char limit (tutorial uses 10K). Micro-compaction tier — no API call needed. Promoted from M3 to M2a. |
-| Per-tool error isolation | BYOO §3.2 | M2a | **Designed** | Exceptions caught per-tool and returned as error strings in the tool message. The loop never crashes from a tool failure. |
+| Tool result truncation | BYOO §5.1 `ContextGuard._truncate_large_tool_results` | M2a P3 | ✅ **Done** | Two-layer truncation: (a) per-tool `max_result_chars` enforced by `ToolRegistry.execute` caps each tool's output immediately; (b) `ContextCompactor` micro-compacts tool results above `micro_compaction_chars` (default 10K) before each inference call.  No API call; zero cost path. |
+| Per-tool error isolation | BYOO §3.2 | M2a | ✅ **Done** | `AgentLoop` wraps every `ToolRegistry.execute` call in `try/except`; exceptions are caught, logged, and returned as `is_error=True` tool messages to the model.  The loop never crashes from a tool failure and the model gets enough context to recover or report the failure. |
+| Git identity pre-configured in sandbox image | Sandbox bring-up (observed) | M2b P1 | **Planned** | `docker/Dockerfile.orchestrator` installs `git` for the coding agent's `git_commit` / `git_clone` / `git_checkout` tools, but never sets `user.email` / `user.name`. Any agent-driven commit fails with `*** Please tell me who you are`; operators have been running `git config user.email nemoclaw@agent.bot && git config user.name "NemoClaw Agent"` by hand on every fresh sandbox. Bake a default identity into the image via `RUN git config --system` so commits work out of the box; seeded `.gitconfig` per workspace can still override for tasks that need a specific author. |
+| Policy hostnames in public source | Review of M2b P1 | M2b P1 | ✅ **Done** | `scripts/gen_policy.py` now extracts the hostname from `.env`'s `GITLAB_URL` / `GERRIT_URL` and substitutes it into `policies/orchestrator.yaml`'s `host: ""` placeholders at build time.  Same public-base + private-overlay pattern as `gen_config.py`; same env vars already consumed by the REST-tool configs so operators don't maintain the hostname twice.  Covered by `tests/test_gen_policy.py`. |
 
 ## 2  Context Management
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| Two-tier context compaction | Claude Code `compact/`, BYOO §5 | M2a P3 | **Designed** | Micro-compaction (tool result truncation, no API call) and full compaction (LLM summary + session roll). Promoted from M3 to M2a. Session memory (key-fact cache) deferred to M5. |
-| Session-rolling compaction | BYOO §5.2 `ContextGuard.compact_and_roll` | M2a P3 | **Designed** | Create new session, copy LLM-generated summary + tail messages, update routing cache. Cleaner than mutating the existing session in place. |
-| Cache-aware system prompt | Claude Code `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | M2a P3 | **Designed** | Split system prompt into static prefix (cached) + dynamic suffix (per-turn). Reduces cost by ~90% on subsequent turns via provider prompt caching. |
-| Prompt cache break detection | Claude Code `promptCacheBreakDetection.ts` | M2a P3 | **Designed** | Monitor whether the system prompt's static prefix changed between turns; log warnings when cache effectiveness drops. |
+| Two-tier context compaction | Claude Code `compact/`, BYOO §5 | M2a P3 | ✅ **Done** | `agent/compaction.py::ContextCompactor` wires both tiers into `AgentLoop`: micro (synchronous char-cap on individual tool results) and full (LLM-summary of oldest `compress_ratio` fraction of messages once total chars exceed `compaction_threshold_chars`).  Tunable per-agent via `config.agent_loop.*` knobs.  Session memory (key-fact cache) remains M5. |
+| Session-rolling compaction | BYOO §5.2 `ContextGuard.compact_and_roll` | M2a P3 | ✅ **Done** | `ContextCompactor.compact()` produces a summary + keeps the `min_keep` most recent messages verbatim, then returns the compacted message list as the new "session" for subsequent rounds.  Tool-call-id → name map is preserved across rounds via `register_tool_call` so summaries read as `[Tool result (read_file)]` rather than opaque ids. |
+| Cache-aware system prompt | Claude Code `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | M2a P3 | ✅ **Done** | `agent/prompt_builder.py::CACHE_BOUNDARY_MARKER` splits the system prompt into a static prefix (identity + task context) and a dynamic suffix (runtime metadata + channel hint).  Providers that honour the marker (Anthropic / Claude) cache the prefix across turns; others ignore it harmlessly. |
+| Prompt cache break detection | Claude Code `promptCacheBreakDetection.ts` | M2a P3 | **Designed** | Monitor whether the system prompt's static prefix changed between turns; log warnings when cache effectiveness drops.  `CACHE_BOUNDARY_MARKER` is in place (see above); the active per-turn comparison + warning is the piece that remains. |
 
 ## 3  Prompt Construction
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| Layered PromptBuilder | BYOO §10.1, tutorial step 13 | M2a P3 | **Designed** | Five-layer system prompt: identity (AGENT.md) → soul (personality) → bootstrap (agents + crons) → runtime (agent ID, timestamp) → channel hint. |
-| Channel hint in system prompt | BYOO §10.2 `PromptBuilder._build_channel_hint` | M2a P3 | **Designed** | Sub-agents receive a hint indicating whether they respond to a user, a parent agent, or a cron trigger. Essential for correct behavioral framing. |
+| Layered PromptBuilder | BYOO §10.1, tutorial step 13 | M2a P3 | ✅ **Done** | `agent/prompt_builder.py::LayeredPromptBuilder` assembles a four-layer system prompt (identity → task-context → runtime-metadata → channel-hint) with the cache boundary between the first two and the last two.  Five-layer "soul" / bootstrap layers from BYOO were merged into task-context; no functional loss vs. the reference design. |
+| Channel hint in system prompt | BYOO §10.2 `PromptBuilder._build_channel_hint` | M2a P3 | ✅ **Done** | `LayeredPromptBuilder._channel_hint(source_type)` emits dedicated hint text for `SourceType.AGENT` (sub-agent replying to parent) and `SourceType.CRON` (proactive task), and falls through to "You are responding to a user via {source}." for platform names like `slack`.  Sub-agent uses it via `AgentSetupBundle.source_type`. |
 
 ## 4  Skills & Progressive Loading
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| Basic `SKILL.md` loading | BYOO §6 `create_skill_tool`, tutorial step 02 | M2a P3 | **Designed** | Single `skill` tool with enum of available skill IDs. Loads skill content and injects into the conversation. Promoted from M6 to M2a. |
-| `ToolSearch` meta-tool | Claude Code `ToolSearchTool`, Hermes progressive disclosure | M2b P4 | **Designed** | Core tools always in prompt; non-core tools discoverable on demand via natural-language search. Reduces prompt token count by 40%+ when enterprise tools are present. |
+| Basic `SKILL.md` loading | BYOO §6 `create_skill_tool`, tutorial step 02 | M2a P3 | ✅ **Done** | `agent/skill_loader.py::SkillLoader` scans `skills.skills_dir` at startup for `SKILL.md` files; `tools/skill.py::register_skill_tool` wires a single `skill(<id>)` tool whose parameter enum contains every discovered id, and whose handler returns the skill content for the agent to follow.  Currently ships the `scratchpad` skill. |
+| `ToolSearch` meta-tool | Claude Code `ToolSearchTool`, Hermes progressive disclosure | M2b P4 | **Designed** | Core tools always in prompt; non-core tools discoverable on demand via natural-language search. Reduces prompt token count by 40%+ when enterprise tools are present. **Validated in production 2026-04-23**: with all 75 tools registered, each turn's prompt is ≈10.8K tokens of which ~95% is system prompt + tool schema and ~5% is conversation history. The model starts treating short follow-up replies as standalone greetings (e.g. "just a generic placeholder" following "what kind of test?" got interpreted as a null-intent message rather than "a generic placeholder test file") — the history is present in the message list, but the tool-definition block dominates attention. Progressive disclosure reclaims context budget for the actual conversation. Partial mitigation added in `prompts/system_prompt.md` ("Conversation continuity" section) nudges the model to read history first; the real fix is still this entry. |
 | `batch` skill pattern | Claude Code bundled skill | M2b+ | **Planned** | Research → decompose → distribute across worktree agents → verify → track. Essential for large multi-file tasks. |
 | `verify` skill pattern | Claude Code bundled skill | M2b+ | **Planned** | "Prove it works" workflow: run the app, check CLI output, validate behavior rather than static reasoning. |
 | Progressive skill disclosure | Hermes Level 0/1/2 | M6 | **Planned** | As skill count grows, layer discovery: Level 0 (always loaded), Level 1 (loaded on mention), Level 2 (loaded on explicit request). |
@@ -109,7 +111,7 @@
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
 | Three-layer memory | Hermes, design.md §M5 | M5 | **Planned** | Working memory (in-session scratchpad), user memory (Honcho for modeling and personalization), knowledge memory (SecondBrain for durable knowledge capture and retrieval). |
-| File-based working memory via `scratchpad` skill | BYOO §15 step 17; Claude Code `CLAW.md` convention | M2a | **Done** | Agents manage their own working-memory file using ordinary `read_file`/`write_file`/`edit_file` tools. The `scratchpad` skill (`skills/scratchpad/SKILL.md`) documents the naming convention and section structure. No dedicated class, no dedicated tools, no prompt-layer injection — the agent loads the skill when it decides notes are warranted. |
+| File-based working memory via `scratchpad` skill | BYOO §15 step 17; Claude Code `CLAW.md` convention | M2a | ✅ **Done** | Agents manage their own working-memory file using ordinary `read_file`/`write_file`/`edit_file` tools. The `scratchpad` skill (`skills/scratchpad/SKILL.md`) documents the naming convention and section structure. No dedicated class, no dedicated tools, no prompt-layer injection — the agent loads the skill when it decides notes are warranted. |
 | Passive memory extraction | Claude Code `extractMemories` | M5 | **Planned** | Automatically extract key facts (user preferences, project conventions, recurring patterns) from every conversation without explicit user action. |
 | Team memory sync | Claude Code `teamMemorySync/` | M5+ | **Planned** | Shared memory across agent teams. Relevant when multiple sub-agents collaborate on related tasks. |
 
@@ -117,7 +119,7 @@
 
 | Feature | Source | Target | Status | Description |
 |---------|--------|--------|--------|-------------|
-| Channel ABC | BYOO §12.1 `Channel(ABC, Generic[T])` | M1 | **Designed** | Abstract base with `run`, `reply`, `is_allowed`, `stop`. NemoClaw's `ConnectorBase` ABC maps to this pattern. |
+| Channel ABC | BYOO §12.1 `Channel(ABC, Generic[T])` | M1 | ✅ **Done** | `connectors/base.py::ConnectorBase(ABC)` with `start` / `stop` lifecycle and a pluggable `MessageHandler` — platform-neutral surface the orchestrator handler binds to.  `SlackConnector` is the only concrete subclass today; future Teams / CLI connectors plug into the same interface. |
 | First-message session binding | BYOO §12.3 | M2b+ | **Planned** | First non-CLI platform message sets `default_delivery_source` in runtime config. Ensures all outbound events (including cron responses) are delivered to the correct platform. Relevant for Slack thread → sub-agent binding. |
 | EventSource namespace registry | BYOO §4.4 `EventSource._namespace` + `from_string` | M2b+ | **Planned** | Each event source has a `_namespace` (e.g. `telegram`, `slack`) and a serialization format `namespace:identifier`. Reference for NemoClaw's connector type system. |
 
@@ -184,3 +186,16 @@ Remaining consideration not yet promoted:
 | Feature | Current Target | Tutorial Step | Consideration |
 |---------|---------------|---------------|---------------|
 | Proactive messaging | M6 | Step 14 (Phase 3) | Tutorial builds this in the multi-agent phase. The proactive tick enables periodic health checks and sandbox cleanup even before self-learning. Consider M2b or M3. |
+
+---
+
+## 16  PR #13 Review Follow-ups (M2b P1)
+
+Unresolved review threads on [PR #13 — M2b Phase 1](https://github.com/dpickem/nemoclaw_escapades/pull/13).  The PR merges as-is to unblock M2b P2; every item below lands together in a single direct follow-up PR.  Delete this section once the follow-up merges.
+
+| Task | Source | Target | Status | Description |
+|------|--------|--------|--------|-------------|
+| Single source of truth for config | [PR #13](https://github.com/dpickem/nemoclaw_escapades/pull/13) (4 threads) | M2b P2 | **Planned** | Collapse the yaml-plus-env-vars override system.  `.env` holds only secrets (tokens, API keys); `config/orchestrator.yaml` holds every non-secret knob (`LOG_LEVEL`, `LOG_FILE`, `SYSTEM_PROMPT_PATH`, `MAX_THREAD_HISTORY`, `AGENT_LOOP_*`, etc.).  Delete the ~200-line env-var overlay block in `config.py` ([r3128435771](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128435771)); drop the matching entries from `.env.example` ([r3128401847](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128401847), [r3128412295](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128412295)); replace the monolithic loader with dedicated `create_orchestrator_config()` / `create_coding_agent_config()` builder functions ([r3128463528](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128463528)). |
+| Drop local mode entirely | [PR #13](https://github.com/dpickem/nemoclaw_escapades/pull/13) (3 threads) | M2b P2 | **Planned** | OpenShell sandbox is the only supported runtime ([r3128470121](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128470121)).  Remove the `LOCAL_DEV` / `SANDBOX` branching in `config.py`, delete the `_env_is_sandbox` helper and the local-dev inference backfill, and simplify secret validation to "required secrets must be present, full stop" ([r3119256300](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3119256300), [r3119284540](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3119284540)).  Local development still works via the sandbox path (`make setup-sandbox`). |
+| Trim verbose explanatory comments | [PR #13](https://github.com/dpickem/nemoclaw_escapades/pull/13) (2 threads) | M2b P2 | **Planned** | Over-explained comment blocks in `runtime.py` — around `_SIGNAL_APP_SRC_PRESENT` at L44-48 ([r3128426741](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128426741)) and `_BENIGN_LOCAL_ENV_SIGNALS` at L74-96 ([r3128427329](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128427329)) — cut to one or two lines each.  (Partially moot under the "drop local mode" task, but trim what remains regardless since the signal detector stays.) |
+| Hoist inline constants to file top | [PR #13](https://github.com/dpickem/nemoclaw_escapades/pull/13) (2 threads) | M2b P2 | **Planned** | Module-level globals drift mid-file.  Move `APPROVAL_ACTION_APPROVE` / `APPROVAL_ACTION_DENY` (`models/types.py` L125-131) into the top-of-module constants block ([r3128365122](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128365122)).  Promote `self._ERROR_WINDOW_S` / `self._ERROR_MAX_PER_WINDOW` in `SlackConnector.__init__` to module-level constants alongside the other Slack consts at the top of `connectors/slack.py` ([r3128439569](https://github.com/dpickem/nemoclaw_escapades/pull/13#discussion_r3128439569)). |

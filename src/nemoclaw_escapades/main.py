@@ -40,24 +40,66 @@ from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import load_config
+from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
+from nemoclaw_escapades.runtime import (
+    RuntimeEnvironment,
+    SandboxConfigurationError,
+    detect_runtime_environment,
+)
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import build_full_tool_registry
 
 
 async def main() -> None:
+    # Pick up ``.env`` at the current working directory so
+    # ``python -m nemoclaw_escapades`` (and ``make run-local-dev``
+    # behind it) finds the operator's ``SLACK_*`` / ``INFERENCE_HUB_*``
+    # credentials without requiring a shell-level ``export``.
+    # Idempotent + ``override=False`` so shell-set vars still win
+    # (preserves the documented precedence: shell env > YAML >
+    # dataclass defaults).  No-op inside the sandbox — no ``.env``
+    # ships with the image; every secret is an OpenShell-provider
+    # placeholder injected by the gateway.
+    load_dotenv_if_present()
+
+    # ── 0. Runtime self-check ─────────────────────────────────────
+    # Evaluate sandbox signals *before* config loading so a broken
+    # deployment (OpenShell version drift, gateway misconfigured,
+    # sandbox env vars leaked into a local shell) fails fast with a
+    # structured diagnostic instead of silently booting with the
+    # wrong defaults.
+    runtime = detect_runtime_environment()
+    if runtime.classification is RuntimeEnvironment.INCONSISTENT:
+        # Logging isn't configured yet (we haven't loaded config); emit
+        # via the detector's own logger, which uses whatever the root
+        # handler defaults to.  That's fine for a fatal startup error.
+        raise SandboxConfigurationError(runtime)
+
     # ── 1. Configuration ──────────────────────────────────────────
-    # Reads env vars / .env into typed dataclasses.  Inside an
-    # OpenShell sandbox, credentials are proxy placeholders resolved
-    # at HTTP-request time — the config layer never sees real secrets.
-    config = load_config()
+    # Dataclass defaults → YAML overlay (``/app/config.yaml`` in the
+    # sandbox, absent locally) → env vars.  Inside the sandbox,
+    # credentials are L7-proxy placeholders resolved at HTTP-request
+    # time — the config layer never sees real secrets.
+    #
+    # The already-computed ``runtime`` classification is threaded in
+    # so the loader and the self-check share one view of "am I in a
+    # sandbox" (replaces the old per-function ``OPENSHELL_SANDBOX``
+    # env-var checks).
+    config = AppConfig.load(env=runtime.classification)
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
     logger = get_logger("main")
-    logger.info("Starting NemoClaw agent loop")
+    logger.info(
+        "Starting NemoClaw agent loop",
+        extra={
+            "runtime_classification": runtime.classification.value,
+            "runtime_signals_present": list(runtime.signals_present),
+            "runtime_signals_missing": list(runtime.signals_missing),
+        },
+    )
 
     # ── 2. Inference backend ──────────────────────────────────────
     backend = InferenceHubBackend(config.inference)
@@ -107,6 +149,7 @@ async def main() -> None:
     orchestrator = Orchestrator(
         backend,
         config.orchestrator,
+        agent_loop=config.agent_loop,
         approval=WriteApproval(),
         tools=tools,
         audit=audit,

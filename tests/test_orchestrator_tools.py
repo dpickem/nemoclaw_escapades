@@ -513,6 +513,172 @@ class TestWriteApprovalGate:
         assert not any(isinstance(b, ActionBlock) for b in resp.blocks)
         assert len(backend.calls) == 2
 
+    async def test_stale_approve_click_is_suppressed(
+        self,
+        write_tool_registry: ToolRegistry,
+        orchestrator_config: OrchestratorConfig,
+    ) -> None:
+        """Click Approve with no pending approval → suppressed response.
+
+        Regression: previously this posted "No pending write operation
+        found for this thread." into the channel, which the user sees
+        as noise when they accidentally double-click Approve or click
+        an old button after a newer prompt superseded it.
+        """
+        backend = ToolMockBackend()
+        orch = Orchestrator(
+            backend,
+            orchestrator_config,
+            approval=WriteApproval(),
+            tools=write_tool_registry,
+        )
+        approve_req = _make_approval_action_request(APPROVAL_ACTION_APPROVE)
+        resp = await orch.handle(approve_req)
+        assert resp.suppress_post is True
+        assert resp.blocks == []
+        # No inference call — we didn't even engage the agent loop.
+        assert len(backend.calls) == 0
+
+    async def test_stale_deny_click_is_suppressed(
+        self,
+        write_tool_registry: ToolRegistry,
+        orchestrator_config: OrchestratorConfig,
+    ) -> None:
+        """Click Deny with no pending approval → suppressed response."""
+        backend = ToolMockBackend()
+        orch = Orchestrator(
+            backend,
+            orchestrator_config,
+            approval=WriteApproval(),
+            tools=write_tool_registry,
+        )
+        deny_req = _make_approval_action_request(APPROVAL_ACTION_DENY)
+        resp = await orch.handle(deny_req)
+        assert resp.suppress_post is True
+        assert resp.blocks == []
+        assert len(backend.calls) == 0
+
+    async def test_cascading_approve_returns_new_approval_prompt(
+        self,
+        write_tool_registry: ToolRegistry,
+        orchestrator_config: OrchestratorConfig,
+        sample_request: NormalizedRequest,
+    ) -> None:
+        """Approve → model triggers a second write → second approval prompt.
+
+        This is the cascading-approval flow — the most subtle state
+        transition in the approval lifecycle:
+
+        1. User message triggers a write → prompt #1 saved, buttons
+           rendered.
+        2. User clicks Approve → orchestrator resumes the loop.
+        3. Post-approval, the model calls *another* write tool →
+           ``WriteApprovalError`` → prompt #2 is saved and rendered.
+
+        The expected outcome: ``handle(approve)`` returns a response
+        whose blocks contain another Approve button (so the Slack
+        connector's ``_is_approval_prompt`` triggers the "supersede
+        prior, record new live" branch).  Guards the pending-state
+        machinery against regressions when the lifecycle helper on
+        the connector side is refactored.
+        """
+        backend = ToolMockBackend()
+        # Turn 1: model requests write #1 (triggers first approval).
+        backend.add_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                ToolCall(
+                    id="call_w1",
+                    name="jira_create_issue",
+                    arguments='{"project_key": "PROJ", "summary": "first"}',
+                ),
+            ],
+        )
+        # Turn 2 (post-approval resume): model requests write #2
+        # (cascading — triggers the second approval).
+        backend.add_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                ToolCall(
+                    id="call_w2",
+                    name="jira_create_issue",
+                    arguments='{"project_key": "PROJ", "summary": "second"}',
+                ),
+            ],
+        )
+        orch = Orchestrator(
+            backend,
+            orchestrator_config,
+            approval=WriteApproval(),
+            tools=write_tool_registry,
+        )
+        # Step 1: produce prompt #1.
+        await orch.handle(sample_request)
+        thread_key = sample_request.thread_ts or sample_request.request_id
+        assert thread_key in orch._pending_approvals
+        first_pending = orch._pending_approvals[thread_key]
+
+        # Step 2+3: approve → cascading second approval.
+        approve_req = _make_approval_action_request(
+            APPROVAL_ACTION_APPROVE,
+            thread_ts=sample_request.thread_ts or "",
+        )
+        resp = await orch.handle(approve_req)
+
+        # Reply is a fresh approval prompt (second Approve button
+        # present), not a text reply or a suppress.
+        assert resp.suppress_post is False
+        assert any(
+            isinstance(block, ActionBlock)
+            and any(btn.action_id == APPROVAL_ACTION_APPROVE for btn in block.actions)
+            for block in resp.blocks
+        ), "expected cascading response to include a new Approve button"
+        # Pending state is the *second* pending (first was consumed).
+        assert thread_key in orch._pending_approvals
+        second_pending = orch._pending_approvals[thread_key]
+        assert second_pending is not first_pending
+        assert second_pending.tool_calls[0].id == "call_w2"
+
+    async def test_valid_deny_still_posts_confirmation(
+        self,
+        write_tool_registry: ToolRegistry,
+        orchestrator_config: OrchestratorConfig,
+        sample_request: NormalizedRequest,
+    ) -> None:
+        """Baseline: a Deny click with a real pending approval posts the usual
+        cancellation message (suppress_post stays False).  Guards against an
+        overzealous stale-click path accidentally silencing real user actions.
+        """
+        backend = ToolMockBackend()
+        backend.add_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                ToolCall(
+                    id="call_w1",
+                    name="jira_create_issue",
+                    arguments='{"project_key": "PROJ", "summary": "live"}',
+                ),
+            ],
+        )
+        orch = Orchestrator(
+            backend,
+            orchestrator_config,
+            approval=WriteApproval(),
+            tools=write_tool_registry,
+        )
+        await orch.handle(sample_request)
+        deny_req = _make_approval_action_request(
+            APPROVAL_ACTION_DENY,
+            thread_ts=sample_request.thread_ts or "",
+        )
+        resp = await orch.handle(deny_req)
+        assert resp.suppress_post is False
+        assert isinstance(resp.blocks[0], TextBlock)
+        assert "cancelled" in resp.blocks[0].text.lower()
+
     async def test_new_message_clears_stale_pending_approval(
         self,
         write_tool_registry: ToolRegistry,

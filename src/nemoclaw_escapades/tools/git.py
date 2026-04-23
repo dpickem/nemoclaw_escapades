@@ -22,6 +22,7 @@ typically don't have).
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,6 +48,44 @@ _GIT_CLONE_TIMEOUT_S: int = 300
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
+def _build_git_env() -> dict[str, str]:
+    """Build the env dict git inherits, with a ``GIT_SSL_CAINFO`` backfill.
+
+    OpenShell's L7 proxy terminates TLS inside the sandbox and presents
+    a cert signed by OpenShell's internal CA.  Python / curl trust it
+    because they read ``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE`` — env
+    vars pointing at the OpenShell CA bundle that OpenShell injects.
+    Git, however, has its own env-var namespace; it reads
+    ``GIT_SSL_CAINFO`` / ``GIT_SSL_CAPATH`` and otherwise falls back to
+    the Debian system trust store, which does **not** include the
+    OpenShell CA.
+
+    Without this backfill, every in-sandbox ``git clone`` / ``fetch``
+    fails with ``SSL_ERROR_UNKNOWN_ROOT_CA`` and the model has to work
+    around by invoking ``bash`` with ``GIT_SSL_NO_VERIFY=1`` — effective
+    but disables cert verification entirely, which is worse than
+    trusting the right CA.
+
+    Semantics:
+
+    - Starts from ``os.environ.copy()`` so git inherits everything
+      else (proxy config, ``PATH``, user env vars) unchanged.
+    - If ``GIT_SSL_CAINFO`` is already set in the operator's env,
+      leaves it alone — explicit operator override wins.
+    - Otherwise, if ``SSL_CERT_FILE`` or ``REQUESTS_CA_BUNDLE`` is
+      set, uses that as git's trust bundle.
+    - No-op in local dev (neither env var is set), so this doesn't
+      change anything outside the sandbox.
+    """
+    env = os.environ.copy()
+    if "GIT_SSL_CAINFO" in env:
+        return env
+    ca_bundle = env.get("SSL_CERT_FILE") or env.get("REQUESTS_CA_BUNDLE")
+    if ca_bundle:
+        env["GIT_SSL_CAINFO"] = ca_bundle
+    return env
+
+
 async def _run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_S) -> str:
     """Run a git command and return its output.
 
@@ -66,6 +105,7 @@ async def _run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_root,
+            env=_build_git_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
@@ -260,16 +300,27 @@ def _make_git_clone(workspace_root: str, allowed_hosts: frozenset[str]) -> ToolS
     Args:
         workspace_root: Working directory that contains the clone.
         allowed_hosts: Set of URL host names the clone accepts.  Empty
-            means the tool is disabled (fail-closed).
+            means the tool is disabled (fail-closed).  The set is
+            baked into the tool's model-visible description so Claude
+            doesn't have to guess whether a URL is permitted — an
+            opaque "operator-configured allowlist" phrasing triggers
+            safety reasoning that occasionally causes the model to
+            refuse listed tools claiming they "don't exist".
     """
+    if allowed_hosts:
+        hosts_note = f"Approved hosts: {', '.join(sorted(allowed_hosts))}.  "
+    else:
+        hosts_note = (
+            "This tool is DISABLED on this deployment (no hosts approved) — any "
+            "call will be rejected.  "
+        )
 
     @tool(
         "git_clone",
         (
             "Clone a remote git repository into a subdirectory of the workspace.  "
-            "Requires the remote host to be in the operator-configured allowlist "
-            "(``GIT_CLONE_ALLOWED_HOSTS``).  Paths are rooted in the workspace; "
-            "relative ``..`` in ``dest`` is rejected."
+            f"{hosts_note}"
+            "Paths are rooted in the workspace; relative ``..`` in ``dest`` is rejected."
         ),
         {
             "type": "object",
@@ -390,8 +441,10 @@ def register_git_tools(
     registry: ToolRegistry,
     workspace_root: str,
     git_clone_allowed_hosts: str = "",
+    *,
+    include_commit: bool = True,
 ) -> None:
-    """Register git tools (diff, commit, log, checkout, clone).
+    """Register git tools (diff, log, checkout, clone, optionally commit).
 
     Args:
         registry: The tool registry to populate.
@@ -399,9 +452,18 @@ def register_git_tools(
         git_clone_allowed_hosts: Comma/space-separated hostnames that
             ``git_clone`` accepts.  Empty disables ``git_clone``
             (fail-closed for security).
+        include_commit: When ``True`` (default), registers ``git_commit``
+            alongside the other tools.  The orchestrator-side registry
+            keeps this on because the orchestrator is the component
+            that finalises work (``push_and_create_pr`` composes
+            ``git_commit`` under the hood).  Sub-agents pass ``False``:
+            per design §7.1 they describe their changes and let the
+            orchestrator assemble the commit, so ``git_commit`` is
+            not part of their surface.
     """
     registry.register(_make_git_diff(workspace_root))
-    registry.register(_make_git_commit(workspace_root))
+    if include_commit:
+        registry.register(_make_git_commit(workspace_root))
     registry.register(_make_git_log(workspace_root))
     registry.register(_make_git_checkout(workspace_root))
     allowed = _parse_allowed_hosts(git_clone_allowed_hosts)

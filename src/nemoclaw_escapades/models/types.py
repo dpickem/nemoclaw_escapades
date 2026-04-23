@@ -113,6 +113,22 @@ class RichResponse:
     #: Set when the orchestrator is returning a classified failure to the user
     #: (connectors may use this for rate limiting instead of parsing message text).
     error_category: ErrorCategory | None = None
+    #: When ``True``, the connector does **not** post this response to the
+    #: platform.  The thinking placeholder, if any, is still cleaned up.
+    #: Used for stale-click no-ops — e.g. the user clicks an Approve button
+    #: on an approval prompt that has already been consumed or superseded.
+    #: Posting a reply in that case adds noise ("No pending write operation
+    #: found for this thread.") without adding information.
+    suppress_post: bool = False
+
+
+# Platform-neutral action IDs for the Approve / Deny buttons attached to
+# write-approval prompts.  Lives in ``models`` so connectors can detect
+# approval interactions (to apply button-lifecycle UI updates) without
+# importing from ``orchestrator`` — preserves the one-way dependency
+# (``orchestrator`` → ``models``, ``connectors`` → ``models``).
+APPROVAL_ACTION_APPROVE: str = "approve_write"
+APPROVAL_ACTION_DENY: str = "deny_write"
 
 
 # ---------------------------------------------------------------------------

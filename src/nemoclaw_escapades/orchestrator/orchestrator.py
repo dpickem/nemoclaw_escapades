@@ -52,6 +52,7 @@ buttons via the connector.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, WriteApproval
@@ -62,6 +63,8 @@ from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import AgentLoopConfig, OrchestratorConfig, load_system_prompt
 from nemoclaw_escapades.connectors.base import StatusCallback
 from nemoclaw_escapades.models.types import (
+    APPROVAL_ACTION_APPROVE,
+    APPROVAL_ACTION_DENY,
     ActionBlock,
     ActionButton,
     ErrorCategory,
@@ -87,12 +90,6 @@ if TYPE_CHECKING:
     from nemoclaw_escapades.audit.db import AuditDB
 
 logger = get_logger("orchestrator")
-
-# Slack ``action_id`` values attached to the Approve / Deny buttons
-# rendered by ``_build_approval_response``.  The connector routes
-# button clicks back to ``handle()`` keyed on these IDs.
-APPROVAL_ACTION_APPROVE = "approve_write"
-APPROVAL_ACTION_DENY = "deny_write"
 
 
 class Orchestrator:
@@ -121,6 +118,8 @@ class Orchestrator:
         self,
         backend: BackendBase,
         config: OrchestratorConfig,
+        *,
+        agent_loop: AgentLoopConfig | None = None,
         approval: ApprovalGate | None = None,
         tools: ToolRegistry | None = None,
         audit: AuditDB | None = None,
@@ -132,6 +131,13 @@ class Orchestrator:
             backend: Inference backend used for chat-completions calls.
             config: Orchestrator-level settings (model, temperature,
                 max tokens, system prompt path, history cap).
+            agent_loop: Reusable ``AgentLoop`` runtime knobs (tool-round
+                cap, continuation retries, compaction thresholds).
+                When ``None``, loop-runtime fields fall back to
+                ``AgentLoopConfig()`` defaults.  The orchestrator
+                always overrides ``model`` / ``temperature`` /
+                ``max_tokens`` on this config with the fields from
+                ``config`` so prompt-level settings stay in one place.
             approval: Gate consulted before executing write tools.
                 Defaults to ``WriteApproval`` (writes require user
                 confirmation via Approve / Deny buttons).
@@ -175,16 +181,29 @@ class Orchestrator:
         # It's only instantiated when tools are registered — without
         # tools, the orchestrator uses the simpler _inference_with_repair
         # path which doesn't support multi-turn tool calling.
+        #
+        # The loop config merges two sources: prompt-level fields
+        # (model / temperature / max_tokens) come from
+        # ``OrchestratorConfig`` so the orchestrator stays the source
+        # of truth for what it says to the model; runtime knobs (tool-
+        # round cap, continuation retries, compaction thresholds) come
+        # from ``AgentLoopConfig``.  When a caller doesn't supply
+        # ``agent_loop``, loop-runtime knobs fall back to dataclass
+        # defaults — preserving the pre-``agent_loop``-in-AppConfig
+        # behaviour for tests that build ``Orchestrator`` directly.
+        base_loop_cfg = agent_loop or AgentLoopConfig()
+        merged_loop_cfg = dataclasses.replace(
+            base_loop_cfg,
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
         self._agent_loop: AgentLoop | None = None
         if tools and len(tools) > 0:
             self._agent_loop = AgentLoop(
                 backend=backend,
                 tools=tools,
-                config=AgentLoopConfig(
-                    model=config.model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                ),
+                config=merged_loop_cfg,
                 audit=audit,
                 # Share the same approval gate so both the orchestrator's
                 # response-level check and the loop's tool-level check
@@ -537,11 +556,22 @@ class Orchestrator:
             a new approval prompt if a cascading write was detected.
         """
         # Pop atomically — if the user double-clicks Approve, the second
-        # click gets the "no pending" message instead of re-executing.
+        # click finds no pending approval and we return a suppressed
+        # response so the connector silently drops it instead of posting
+        # a confusing "No pending write operation" reply.
         pending = self._pending_approvals.pop(thread_key, None)
         if not pending:
-            return self._shape_response(
-                request, "No pending write operation found for this thread."
+            logger.info(
+                "Stale Approve click — no pending approval",
+                extra={
+                    "request_id": request.request_id,
+                    "thread_key": thread_key,
+                },
+            )
+            return RichResponse(
+                channel_id=request.channel_id,
+                thread_ts=request.thread_ts,
+                suppress_post=True,
             )
 
         if self._agent_loop is None:
@@ -618,15 +648,30 @@ class Orchestrator:
         # model's tool-call attempt are both dropped, keeping the
         # thread history clean for the next turn.
         pending = self._pending_approvals.pop(thread_key, None)
-        if pending:
+        if not pending:
+            # Stale Deny click (e.g. user clicks an old Deny button after
+            # the approval was already consumed / superseded).  Suppress
+            # the reply rather than posting a noisy "no pending" note.
             logger.info(
-                "User denied write operation",
+                "Stale Deny click — no pending approval",
                 extra={
-                    "request_id": pending.request_id,
+                    "request_id": request.request_id,
                     "thread_key": thread_key,
-                    "tool_calls": [tc.name for tc in pending.tool_calls],
                 },
             )
+            return RichResponse(
+                channel_id=request.channel_id,
+                thread_ts=request.thread_ts,
+                suppress_post=True,
+            )
+        logger.info(
+            "User denied write operation",
+            extra={
+                "request_id": pending.request_id,
+                "thread_key": thread_key,
+                "tool_calls": [tc.name for tc in pending.tool_calls],
+            },
+        )
         return self._shape_response(request, "Got it — the write operation was cancelled.")
 
     def _build_approval_response(

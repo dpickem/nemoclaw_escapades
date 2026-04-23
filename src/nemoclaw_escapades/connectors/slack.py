@@ -59,6 +59,8 @@ from slack_bolt.async_app import AsyncApp
 
 from nemoclaw_escapades.connectors.base import ConnectorBase, MessageHandler
 from nemoclaw_escapades.models.types import (
+    APPROVAL_ACTION_APPROVE,
+    APPROVAL_ACTION_DENY,
     ActionBlock,
     ActionPayload,
     ConfirmBlock,
@@ -81,6 +83,27 @@ _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 # Reusable Block Kit divider block.
 DIVIDER: dict[str, str] = {"type": "divider"}
+
+# ── Slack payload limits ───────────────────────────────────────────
+#
+# Slack enforces these per-message limits; exceeding any of them
+# causes the whole reply to be rejected with ``invalid_blocks`` or
+# ``msg_too_long`` and the user sees nothing.  We keep a safety margin
+# under each documented ceiling so later mrkdwn rewrites or emoji
+# expansions can't push us over.
+#
+# - ``section.text.text``: Slack hard-limit 3000 chars.  Target 2900.
+# - Blocks array: Slack hard-limit 50 blocks.  We budget at most
+#   ``_SLACK_MAX_TEXTBLOCK_CHUNKS`` section blocks from splitting a
+#   single oversize ``TextBlock`` so interactive tail blocks
+#   (ActionBlock, ConfirmBlock) are preserved even for huge responses.
+# - Top-level ``text`` fallback: Slack hard-limit ~40,000 chars.  We
+#   truncate to 3000 since the fallback is only rendered by clients
+#   that don't support Block Kit and can't show our real content
+#   anyway.
+_SLACK_SECTION_TEXT_LIMIT = 2900
+_SLACK_MAX_TEXTBLOCK_CHUNKS = 40
+_SLACK_FALLBACK_TEXT_LIMIT = 3000
 
 # Slack ``message`` event subtypes we silently drop.  Deliberately an
 # *explicit deny-list* (not "any subtype is not None"): Slack ships
@@ -130,6 +153,53 @@ def _to_slack_markdown(text: str) -> str:
     text = _BOLD_RE.sub(r"*\1*", text)
     text = _LINK_RE.sub(r"<\2|\1>", text)
     return text
+
+
+def _split_text_for_slack(text: str, limit: int = _SLACK_SECTION_TEXT_LIMIT) -> list[str]:
+    """Split *text* into chunks of at most *limit* characters each.
+
+    Greedily chooses the highest-preference boundary that fits in the
+    current window: paragraph break (``\\n\\n``) → line break
+    (``\\n``) → whitespace → hard cut at *limit*.  Paragraph and line
+    boundaries are preferred because they almost never split inline
+    mrkdwn tokens (``*bold*``, ``<url|label>``) — a hard cut mid-token
+    would corrupt the rendering.
+
+    Hard cuts are only used for pathological input (prose with no
+    whitespace at all).
+
+    Args:
+        text:  Slack-ready content (already markdown-converted if
+               needed).  Must be non-empty.
+        limit: Max chars per chunk.  Defaults to the per-section limit
+               Slack enforces on ``section.text.text``.
+
+    Returns:
+        A non-empty list of chunks, each at most *limit* characters.
+        Concatenating them (with a single newline between) reproduces
+        the visible content modulo whitespace at chunk boundaries.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        split_at = window.rfind("\n\n")
+        if split_at <= 0:
+            split_at = window.rfind("\n")
+        if split_at <= 0:
+            split_at = window.rfind(" ")
+        if split_at <= 0:
+            split_at = limit
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 # ── Primitive Block Kit helpers (à la nv-claw) ─────────────────────
@@ -256,6 +326,14 @@ class SlackConnector(ConnectorBase):
         self._error_timestamps: dict[str, list[float]] = defaultdict(list)
         self._ERROR_WINDOW_S = 60.0
         self._ERROR_MAX_PER_WINDOW = 3
+
+        # Tracks the most recent live approval-prompt message per thread
+        # so the connector can mark the old prompt as superseded when a
+        # new one supersedes it, and remove buttons after Approve / Deny.
+        # Keyed by the conversation ``thread_key`` (thread_ts for threaded
+        # messages, top-level ts otherwise); value is the ``(channel,
+        # message_ts)`` of the live approval message.
+        self._thread_approval_msg: dict[str, tuple[str, str]] = {}
 
         self._register_listeners()
 
@@ -399,64 +477,133 @@ class SlackConnector(ConnectorBase):
         error messages per channel per ``_ERROR_WINDOW_S`` seconds.  This
         prevents spam loops when the backend is persistently failing.
 
+        Approval-click handling deviates from the regular request path
+        in two ways, both to eliminate the double-click race where a
+        user clicks Approve a second time while the orchestrator is
+        still executing the first click's write:
+
+        1. **Connector-side dedup.**  If an approval click for the same
+           thread is already in flight, this call is dropped before any
+           further work (no thinking placeholder, no orchestrator call).
+        2. **Early button strip.**  A first-time approval click
+           rewrites the clicked message to ":white_check_mark: Approved
+           — executing" / ":x: Denied" *before* the orchestrator runs,
+           so the buttons disappear the moment Slack delivers the event.
+           Slack snapshots the message state at click time, so without
+           this the buttons remain visible — and clickable — for as
+           long as the tool executes.
+
         Args:
             client:  Slack ``AsyncWebClient`` injected by Bolt.
             request: The normalised inbound request.
         """
         channel = request.channel_id
         thread_ts = request.thread_ts
+        # Key used to correlate live approval prompts with follow-up
+        # clicks.  Mirrors the orchestrator's ``thread_key`` — the
+        # Slack thread_ts when present, otherwise a synthetic key
+        # anchored on the originating request id so standalone
+        # (non-threaded) messages don't collide across channels.
+        thread_key = thread_ts or f"{channel}:{request.request_id}"
 
-        # 1. Post a transient "Thinking…" placeholder so the user gets
-        #    instant visual feedback while the orchestrator works.
-        thinking_ts = await self._post_thinking(client, channel, thread_ts)
+        # ── Approval-click pre-processing ────────────────────────────
+        # Performed before anything else so a rapid double-click can't
+        # race into ``_post_thinking`` / ``_handler``.  ``ack()`` was
+        # already sent by Bolt's listener.
+        is_approval = self._is_approval_click(request)
+        if is_approval:
+            if thread_key in self._approval_in_flight:
+                logger.info(
+                    "Dropping duplicate approval click",
+                    extra={
+                        "request_id": request.request_id,
+                        "thread_key": thread_key,
+                        "action_id": (request.action.action_id if request.action else None),
+                    },
+                )
+                return
+            self._approval_in_flight.add(thread_key)
+            # Rewrite the clicked message immediately so further clicks
+            # can't target the same buttons.  Idempotent: a superseded
+            # message is already buttonless; a second rewrite is a no-op.
+            await self._consume_approval_click_ui(client, request, thread_key)
 
-        # 2. Build a status callback that the orchestrator calls during
-        #    tool execution (e.g. "Searching Jira…").  Each call swaps
-        #    the placeholder text in-place via chat_update.
-        async def _on_status(status: str) -> None:
+        try:
+            # 1. Post a transient "Thinking…" placeholder so the user
+            #    gets instant visual feedback while the orchestrator
+            #    works.
+            thinking_ts = await self._post_thinking(client, channel, thread_ts)
+
+            # 2. Build a status callback that the orchestrator calls
+            #    during tool execution (e.g. "Searching Jira…").  Each
+            #    call swaps the placeholder text in-place via chat_update.
+            async def _on_status(status: str) -> None:
+                if thinking_ts:
+                    try:
+                        await client.chat_update(
+                            channel=channel,
+                            ts=thinking_ts,
+                            text=status,
+                            blocks=[_section(f":hourglass_flowing_sand: *{status}*")],
+                        )
+                    except Exception:
+                        logger.debug("Failed to update thinking status", exc_info=True)
+
+            # 3. Run the full agent loop (inference + tool calls + approval).
+            response = await self._handler(request, _on_status)
+
+            # 4. If the orchestrator returned an error and we've already
+            #    sent too many error messages in this channel recently,
+            #    silently delete the placeholder to avoid spam loops.
+            if response.error_category is not None and self._is_error_rate_limited(channel):
+                logger.warning(
+                    "Suppressing error response (rate limit)",
+                    extra={"channel": channel, "thread_ts": thread_ts},
+                )
+                if thinking_ts:
+                    try:
+                        await client.chat_delete(channel=channel, ts=thinking_ts)
+                    except Exception:
+                        pass
+                return
+
+            # 4b. Apply post-handler approval-lifecycle side effects.
+            #     - Suppressed response (stale click that slipped past
+            #       the in-flight dedup, e.g. a click from a previous
+            #       bot run) → delete thinking placeholder, skip posting.
+            #     - New approval prompt → supersede the prior live one
+            #       so only the latest buttons look actionable.
+            if await self._apply_approval_lifecycle(
+                client, request, response, thread_key, thinking_ts
+            ):
+                return
+
+            # 5. Render the platform-neutral RichResponse into Block Kit JSON.
+            blocks = self.render(response)
+            fallback_text = self._extract_fallback_text(response)
+
+            # 6. Swap the placeholder with the real content (or post a
+            #    new message if the placeholder was never created).
             if thinking_ts:
-                try:
-                    await client.chat_update(
-                        channel=channel,
-                        ts=thinking_ts,
-                        text=status,
-                        blocks=[_section(f":hourglass_flowing_sand: *{status}*")],
-                    )
-                except Exception:
-                    logger.debug("Failed to update thinking status", exc_info=True)
+                posted_ts = await self._update_message(
+                    client, channel, thinking_ts, fallback_text, blocks, request.request_id
+                )
+            else:
+                posted_ts = await self._post_message(
+                    client, channel, thread_ts, fallback_text, blocks, request.request_id
+                )
 
-        # 3. Run the full agent loop (inference + tool calls + approval).
-        response = await self._handler(request, _on_status)
-
-        # 4. If the orchestrator returned an error and we've already
-        #    sent too many error messages in this channel recently,
-        #    silently delete the placeholder to avoid spam loops.
-        if response.error_category is not None and self._is_error_rate_limited(channel):
-            logger.warning(
-                "Suppressing error response (rate limit)",
-                extra={"channel": channel, "thread_ts": thread_ts},
-            )
-            if thinking_ts:
-                try:
-                    await client.chat_delete(channel=channel, ts=thinking_ts)
-                except Exception:
-                    pass
-            return
-
-        # 5. Render the platform-neutral RichResponse into Block Kit JSON.
-        blocks = self.render(response)
-        fallback_text = self._extract_fallback_text(response)
-
-        # 6. Swap the placeholder with the real content (or post a new
-        #    message if the placeholder was never created).
-        if thinking_ts:
-            await self._update_message(
-                client, channel, thinking_ts, fallback_text, blocks, request.request_id
-            )
-        else:
-            await self._post_message(
-                client, channel, thread_ts, fallback_text, blocks, request.request_id
-            )
+            # 7. Record the live approval message's ts for later lifecycle
+            #    updates (supersede / consume).  Only set when we actually
+            #    posted an approval prompt and know the message's ts.
+            if self._is_approval_prompt(response) and posted_ts:
+                self._thread_approval_msg[thread_key] = (channel, posted_ts)
+        finally:
+            # Always release the in-flight slot, even on exception paths,
+            # so a crash in one click doesn't wedge approvals for the
+            # thread.  ``discard`` is a no-op for non-approval requests.
+            if is_approval:
+                self._approval_in_flight.discard(thread_key)
 
     def _is_error_rate_limited(self, channel: str) -> bool:
         """Check if error responses for this channel have exceeded the limit."""
@@ -497,7 +644,7 @@ class SlackConnector(ConnectorBase):
         text: str,
         blocks: list[dict[str, Any]],
         request_id: str = "",
-    ) -> None:
+    ) -> str | None:
         """Replace an existing message (the thinking placeholder) in-place.
 
         Falls back to posting a new message if the update fails.
@@ -509,6 +656,12 @@ class SlackConnector(ConnectorBase):
             text:       Plain-text fallback.
             blocks:     Block Kit JSON dicts for the updated message.
             request_id: Correlation ID for structured logging.
+
+        Returns:
+            The ts of the (still-in-place) message on success, or the ts
+            of the fallback post, or ``None`` if posting also failed.
+            Callers use this to correlate posted approval prompts with
+            later button clicks (see ``_thread_approval_msg``).
         """
         try:
             await client.chat_update(
@@ -521,12 +674,13 @@ class SlackConnector(ConnectorBase):
                 "Response sent (updated thinking message)",
                 extra={"request_id": request_id, "channel_id": channel, "ts": ts},
             )
+            return ts
         except Exception:
             logger.warning(
                 "Failed to update thinking message, posting new message",
                 exc_info=True,
             )
-            await self._post_message(client, channel, None, text, blocks, request_id)
+            return await self._post_message(client, channel, None, text, blocks, request_id)
 
     async def _post_message(
         self,
@@ -536,7 +690,7 @@ class SlackConnector(ConnectorBase):
         text: str,
         blocks: list[dict[str, Any]],
         request_id: str = "",
-    ) -> None:
+    ) -> str | None:
         """Post a new message (fallback when thinking update fails).
 
         Args:
@@ -546,9 +700,12 @@ class SlackConnector(ConnectorBase):
             text:       Plain-text fallback.
             blocks:     Block Kit JSON dicts.
             request_id: Correlation ID for structured logging.
+
+        Returns:
+            The posted message's ``ts`` on success, or ``None`` on failure.
         """
         try:
-            await client.chat_postMessage(
+            resp = await client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
                 text=text or "…",
@@ -558,6 +715,7 @@ class SlackConnector(ConnectorBase):
                 "Response sent (new message)",
                 extra={"request_id": request_id, "channel_id": channel, "thread_ts": thread_ts},
             )
+            return cast(str | None, resp.get("ts"))
         except Exception:
             logger.error(
                 "Failed to send Slack reply",
@@ -566,6 +724,226 @@ class SlackConnector(ConnectorBase):
                     "channel_id": channel,
                     "error_category": "connector_error",
                 },
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Approval-button lifecycle
+    # ------------------------------------------------------------------
+
+    # Per-action-id UI state.  Routes the icon and consumed-state
+    # label off the ``action_id`` directly rather than parsing a
+    # human-readable label — so renaming "Approved — executing" to
+    # "Approved, running" elsewhere doesn't break the icon mapping.
+    _APPROVAL_CLICK_UI: dict[str, tuple[str, str]] = {
+        APPROVAL_ACTION_APPROVE: (":white_check_mark:", "Approved — executing"),
+        APPROVAL_ACTION_DENY: (":x:", "Denied"),
+    }
+
+    @staticmethod
+    def _is_approval_prompt(response: RichResponse) -> bool:
+        """Return ``True`` if *response* is a pending-write approval prompt.
+
+        Detected by the presence of an Approve button on one of the
+        response's action blocks.  Connectors use this to apply
+        approval-specific UI lifecycle rules (supersede the prior
+        prompt, mark consumed after click) without the orchestrator
+        having to tag the response explicitly.
+        """
+        return any(
+            isinstance(block, ActionBlock)
+            and any(btn.action_id == APPROVAL_ACTION_APPROVE for btn in block.actions)
+            for block in response.blocks
+        )
+
+    @classmethod
+    def _approval_click_ui(cls, request: NormalizedRequest) -> tuple[str, str] | None:
+        """Return ``(icon, consumed_label)`` for an approval-button click.
+
+        Keyed on ``action_id`` — the label strings are derived from
+        the action, not the other way around, so the UI stays
+        consistent even if the user-facing phrasing is edited later.
+        Returns ``None`` when *request* is not an approval click.
+        """
+        action = request.action
+        if action is None:
+            return None
+        return cls._APPROVAL_CLICK_UI.get(action.action_id)
+
+    @classmethod
+    def _approval_click_outcome(cls, request: NormalizedRequest) -> str:
+        """Return the consumed-state label for an approval-button click.
+
+        Kept as a separate accessor because several call sites only
+        care about the label ("did a click happen at all?") and
+        shouldn't have to destructure the UI tuple.
+        """
+        ui = cls._approval_click_ui(request)
+        return ui[1] if ui is not None else ""
+
+    @staticmethod
+    def _is_approval_click(request: NormalizedRequest) -> bool:
+        """Return ``True`` when *request* carries an Approve or Deny button click.
+
+        Cheap pre-check used to gate the approval-click-specific
+        preprocessing (dedup + early button strip) in
+        ``_handle_with_thinking`` without running the full UI lookup.
+        """
+        action = request.action
+        return action is not None and action.action_id in (
+            APPROVAL_ACTION_APPROVE,
+            APPROVAL_ACTION_DENY,
+        )
+
+    async def _consume_approval_click_ui(
+        self,
+        client: Any,
+        request: NormalizedRequest,
+        thread_key: str,
+    ) -> None:
+        """Rewrite the clicked approval message to its consumed state.
+
+        Invoked upfront — before ``_post_thinking`` / ``_handler`` —
+        so the Approve / Deny buttons vanish the moment Slack
+        delivers the click event.  Without this, Slack snapshots the
+        message state at click time and the user can click Approve
+        again while the first click's ``git_clone`` is still running;
+        the stale click then races into the orchestrator and posts
+        noise.
+
+        Idempotent: a subsequent click on the same (already-consumed)
+        message just rewrites the same state; the ``_thread_approval_msg``
+        entry is popped once and stays gone.
+
+        Args:
+            client: Slack ``AsyncWebClient``.
+            request: Inbound approval-click request.
+            thread_key: Conversation thread key; matches the
+                orchestrator's ``thread_key`` for keyed-per-thread state.
+        """
+        ui = self._approval_click_ui(request)
+        if ui is None:
+            return
+        icon, outcome = ui
+        await self._update_clicked_approval(client, request, icon, outcome)
+        self._thread_approval_msg.pop(thread_key, None)
+
+    async def _apply_approval_lifecycle(
+        self,
+        client: Any,
+        request: NormalizedRequest,
+        response: RichResponse,
+        thread_key: str,
+        thinking_ts: str | None,
+    ) -> bool:
+        """Apply post-handler approval-lifecycle side effects.
+
+        Runs *after* the orchestrator returns.  Two effects:
+
+        1. **Suppressed response (stale click that slipped past the
+           in-flight dedup).**  The orchestrator returned
+           ``suppress_post=True`` — delete the thinking placeholder
+           and return ``True`` so the caller skips the normal post
+           path.  Can still happen for a click that arrives from a
+           previous bot run (in-flight tracking is in-memory).
+        2. **New approval prompt.**  When the response is itself a
+           new Approve/Deny prompt and the thread already tracks a
+           prior live one, rewrite the prior as "Superseded" so only
+           the newest buttons look actionable.
+
+        The **consumed-state rewrite** (Approved — executing / Denied)
+        for the clicked message happens upfront in
+        ``_consume_approval_click_ui``, not here — see that method's
+        docstring for the rationale.
+
+        Args:
+            client: Slack ``AsyncWebClient``.
+            request: The inbound request (may carry an action payload).
+            response: Orchestrator's reply.
+            thread_key: Connector-side thread key; matches the
+                orchestrator's ``thread_key`` for keyed-per-thread state.
+            thinking_ts: Thinking placeholder ``ts``, or ``None`` if
+                we never managed to post it.
+
+        Returns:
+            ``True`` iff the caller should skip the normal post /
+            update path (stale-click short-circuit).  ``False``
+            otherwise.
+        """
+        channel = request.channel_id
+        # 1. Suppressed response: clean placeholder, tell caller to skip.
+        if response.suppress_post:
+            if thinking_ts:
+                try:
+                    await client.chat_delete(channel=channel, ts=thinking_ts)
+                except Exception:
+                    logger.debug("Failed to delete thinking placeholder", exc_info=True)
+            return True
+
+        # 2. New approval prompt: supersede the prior one, if any.
+        if self._is_approval_prompt(response):
+            await self._supersede_prior_approval(client, thread_key)
+
+        return False
+
+    async def _update_clicked_approval(
+        self,
+        client: Any,
+        request: NormalizedRequest,
+        icon: str,
+        outcome: str,
+    ) -> None:
+        """Rewrite the clicked approval message to its consumed state.
+
+        Strips the Approve / Deny buttons and replaces them with a
+        one-line status so the user can tell at a glance which prompts
+        are still actionable.  Failures are logged at DEBUG — the main
+        response still posts regardless.
+        """
+        raw = request.raw_event
+        message = raw.get("message") if isinstance(raw, dict) else None
+        if not isinstance(message, dict):
+            return
+        message_ts = message.get("ts")
+        if not message_ts:
+            return
+        try:
+            await client.chat_update(
+                channel=request.channel_id,
+                ts=message_ts,
+                text=f"{icon} {outcome}",
+                blocks=[_section(f"{icon} _{outcome}_")],
+            )
+        except Exception:
+            logger.debug(
+                "Failed to update consumed approval message",
+                extra={"channel_id": request.channel_id, "ts": message_ts},
+                exc_info=True,
+            )
+
+    async def _supersede_prior_approval(self, client: Any, thread_key: str) -> None:
+        """Mark the previous live approval prompt for *thread_key* as superseded.
+
+        A new approval prompt is about to be posted; rewrite the prior
+        one to strip its buttons so the user doesn't click both.  No-op
+        when no prior prompt is tracked for the thread.
+        """
+        prior = self._thread_approval_msg.pop(thread_key, None)
+        if prior is None:
+            return
+        channel, ts = prior
+        try:
+            await client.chat_update(
+                channel=channel,
+                ts=ts,
+                text="Superseded — see newer approval prompt below",
+                blocks=[_section(":arrow_down: _Superseded — see newer approval prompt below._")],
+            )
+        except Exception:
+            logger.debug(
+                "Failed to supersede prior approval message",
+                extra={"channel_id": channel, "ts": ts},
                 exc_info=True,
             )
 
@@ -725,8 +1103,31 @@ class SlackConnector(ConnectorBase):
         """
         if isinstance(block, TextBlock):
             if block.style == "markdown":
-                return _section(_to_slack_markdown(block.text))
-            return _plain_section(block.text)
+                text = _to_slack_markdown(block.text)
+                section_builder = _section
+            else:
+                text = block.text
+                section_builder = _plain_section
+            chunks = _split_text_for_slack(text)
+            # Cap the per-TextBlock chunk count so a pathologically
+            # long response (e.g. an LLM dumping 200 KB of prose)
+            # can't consume the whole 50-block message budget and
+            # starve out interactive tail blocks like ActionBlock.
+            if len(chunks) > _SLACK_MAX_TEXTBLOCK_CHUNKS:
+                logger.warning(
+                    "TextBlock exceeded max chunks; truncating",
+                    extra={
+                        "total_chars": len(text),
+                        "total_chunks": len(chunks),
+                        "kept_chunks": _SLACK_MAX_TEXTBLOCK_CHUNKS,
+                    },
+                )
+                chunks = chunks[: _SLACK_MAX_TEXTBLOCK_CHUNKS - 1] + [
+                    ":warning: _Response truncated — too long to display in full._"
+                ]
+            if len(chunks) == 1:
+                return section_builder(chunks[0])
+            return [section_builder(chunk) for chunk in chunks]
 
         if isinstance(block, ActionBlock):
             return _button_actions(
@@ -878,16 +1279,24 @@ class SlackConnector(ConnectorBase):
     def _extract_fallback_text(response: RichResponse) -> str:
         """Extract a plain-text fallback from the first ``TextBlock``.
 
-        Used for Slack notifications and non-Block-Kit clients.
+        Used for Slack notifications and non-Block-Kit clients.  The
+        result is truncated to ``_SLACK_FALLBACK_TEXT_LIMIT`` chars so
+        a pathologically long text block can't trip Slack's top-level
+        ``text`` length limit (observed in practice as a
+        ``msg_too_long`` error on ``chat.update``).  Non-Block-Kit
+        clients can't show the full response anyway.
 
         Args:
             response: The orchestrator's platform-neutral response.
 
         Returns:
-            The text content of the first ``TextBlock``, or ``"…"`` if
-            no text block is found.
+            Up to ``_SLACK_FALLBACK_TEXT_LIMIT`` chars of the first
+            ``TextBlock``'s text, or ``"…"`` if no text block is found.
         """
         for block in response.blocks:
             if isinstance(block, TextBlock):
-                return block.text
+                text = block.text
+                if len(text) > _SLACK_FALLBACK_TEXT_LIMIT:
+                    text = text[: _SLACK_FALLBACK_TEXT_LIMIT - 1] + "…"
+                return text
         return "…"

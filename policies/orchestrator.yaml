@@ -3,15 +3,24 @@
 # Defines what the orchestrator sandbox is allowed to do inside OpenShell.
 # The orchestrator and Slack connector run together in a single sandbox.
 #
-# This is the BASE policy committed to the repo.  It does NOT contain
-# allowed_ips for internal services (those are secrets).
+# This is the BASE policy committed to the repo.  It is public-safe
+# and therefore contains **no category-B values**:
+#   - No internal hostnames (the `gitlab` / `gerrit` endpoint.host
+#     fields ship as empty placeholders; `scripts/gen_policy.py`
+#     substitutes real hosts from `.env`'s `GITLAB_URL` / `GERRIT_URL`
+#     at build time).
+#   - No `allowed_ips` for the SSRF-bypassed policies (injected the
+#     same way from `.env`'s `ALLOWED_IPS` +
+#     `ENDPOINTS_NEEDING_ALLOWED_IPS`).
+# Mirrors the `config/defaults.yaml` + `scripts/gen_config.py` pattern
+# described in `docs/design_m2b.md` §5.3.
 #
 # Schema reference:
 #   https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
 # Based on the NemoClaw OpenClaw sandbox policy:
 #   https://github.com/NVIDIA/NemoClaw/blob/main/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 #
-# To generate the resolved policy with allowed_ips from .env:
+# To generate the resolved policy with hostnames + allowed_ips from .env:
 #   make gen-policy        # writes policies/orchestrator.resolved.yaml
 #   make setup-sandbox     # runs gen-policy automatically
 #
@@ -40,6 +49,7 @@ filesystem_policy:
     - /proc
     - /dev/urandom
     - /app/src
+    - /app/config.yaml  # resolved sandbox config (built from config/defaults.yaml + .env)
     - /etc
   read_write:
     - /app/logs
@@ -119,8 +129,13 @@ network_policies:
   # Service API endpoints
   #
   # Internal hosts (GitLab, Gerrit) resolve to RFC 1918 IPs.  The proxy
-  # blocks these by default (SSRF protection).  The gen_policy.py script
-  # adds allowed_ips from .env to the resolved policy file.
+  # blocks these by default (SSRF protection).  The `gen_policy.py`
+  # script performs two resolve-time substitutions on the entries below:
+  #   1. `endpoint.host: ""` placeholders get filled from `.env`'s
+  #      `GITLAB_URL` / `GERRIT_URL` (category-B non-secret config).
+  #   2. `allowed_ips` is injected for every hostname listed in
+  #      `ENDPOINTS_NEEDING_ALLOWED_IPS`, using the CIDRs in
+  #      `ALLOWED_IPS`.
   # -----------------------------------------------------------------------
 
   jira:
@@ -156,7 +171,11 @@ network_policies:
   gitlab:
     name: gitlab
     endpoints:
-      - host: gitlab-master.nvidia.com
+      # host: "" is a category-B placeholder — `gen_policy.py` rewrites
+      # this with the hostname from `.env`'s `GITLAB_URL` at build time.
+      # Leaving it empty (no `.env` / OSS consumer) means the policy is
+      # fail-closed: OpenShell rejects an empty host on apply.
+      - host: ""
         port: 443
         protocol: rest
         enforcement: enforce
@@ -165,11 +184,18 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # Allow the coding agent's git_clone / git_checkout tools to reach
+      # this host over HTTPS.  Authenticated clones need credentials in
+      # .gitconfig or via a helper — the L7 proxy's credential-placeholder
+      # resolver only applies to HTTP headers in requests from the other
+      # whitelisted binaries.
+      - { path: /usr/bin/git }
 
   gerrit:
     name: gerrit
     endpoints:
-      - host: git-av.nvidia.com
+      # See `gitlab` above — `gen_policy.py` fills this from `GERRIT_URL`.
+      - host: ""
         port: 443
         protocol: rest
         enforcement: enforce
@@ -178,6 +204,8 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # See gitlab policy above for the rationale on ``git``.
+      - { path: /usr/bin/git }
 
   github:
     name: github
@@ -195,6 +223,8 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/python* }
       - { path: /usr/bin/curl }
+      # See gitlab policy above for the rationale on ``git``.
+      - { path: /usr/bin/git }
 
   # Slack user API — uses the user OAuth token (SLACK_USER_TOKEN / xoxp-...),
   # distinct from the bot token used by the connector.  Shares the same

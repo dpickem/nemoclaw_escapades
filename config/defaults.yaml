@@ -1,0 +1,93 @@
+# NemoClaw Escapades — base configuration defaults.
+#
+# This file is **committed** and therefore **public-safe**.  It contains
+# only category-A (public non-secret) values and fail-closed placeholders
+# for category-B (private non-secret) values.  See `design_m2b.md` §5.3
+# for the full categorisation.
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  DO NOT put the following here:                                 │
+# │   - Category B: internal hostnames, host allowlists, infra URLs │
+# │     → keep them in `.env`; the resolver merges them into        │
+# │       `config/orchestrator.resolved.yaml` at build time.        │
+# │   - Category C: tokens, API keys, usernames, passwords          │
+# │     → keep them in `.env`; they flow through OpenShell          │
+# │       providers and the L7 proxy at request time, not via       │
+# │       file-based config.                                        │
+# └─────────────────────────────────────────────────────────────────┘
+#
+# Runtime precedence (lowest → highest):
+#   1. Dataclass field defaults in `config.py`.
+#   2. This file (`/app/config.yaml` inside the sandbox, resolved
+#      from this + `.env` at build time).
+#   3. Environment variables — `os.environ.get(...)`.
+#   4. Provider-injected env vars (secrets resolved by the L7 proxy).
+
+orchestrator:
+  model: azure/anthropic/claude-opus-4-6
+  system_prompt_path: prompts/system_prompt.md
+  max_thread_history: 50
+  temperature: 0.7
+  max_tokens: 2048
+
+agent_loop:
+  max_tool_rounds: 10
+  max_continuation_retries: 2
+  micro_compaction_chars: 10000
+  compaction_threshold_chars: 400000
+  compaction_compress_ratio: 0.5
+  compaction_min_keep: 4
+
+nmb:
+  # Broker URL the orchestrator and sub-agents dial.  Inside the
+  # sandbox the OpenShell gateway proxies this to the NMB broker
+  # container; local-dev runs can point at their own broker via
+  # the ``NMB_URL`` env override.
+  broker_url: ws://messages.local:9876
+  # Sandbox identity announced to the broker.  Empty = agent
+  # generates a per-process id; set explicitly for stable identity.
+  sandbox_id: ""
+
+log:
+  level: INFO
+  # log_file deliberately unset — Dockerfile ENV wins so the path
+  # stays image-structure-dependent (/app/logs/nemoclaw.log).
+
+audit:
+  enabled: true
+  db_path: /sandbox/audit.db
+  persist_payloads: true
+
+coding:
+  enabled: true
+  workspace_root: /sandbox/workspace
+  # Category B — resolver fills from .env's GIT_CLONE_ALLOWED_HOSTS.
+  # Empty here means fail-closed on a fresh clone with no .env.
+  git_clone_allowed_hosts: ""
+
+skills:
+  enabled: true
+  skills_dir: /app/skills
+
+toolsets:
+  jira:
+    enabled: true
+    # Public SaaS URL — OK to ship.
+    url: https://jirasw.nvidia.com
+  gitlab:
+    enabled: true
+    # Category B — resolver fills from .env's GITLAB_URL if set.
+    url: ""
+  gerrit:
+    enabled: true
+    # Category B — resolver fills from .env's GERRIT_URL if set.
+    url: ""
+  confluence:
+    enabled: true
+    # Public SaaS URL — OK to ship.
+    url: https://nvidia.atlassian.net/wiki
+  slack_search:
+    enabled: true
+  web_search:
+    enabled: true
+    default_limit: 5
