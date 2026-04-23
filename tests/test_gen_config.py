@@ -307,3 +307,276 @@ class TestNoHostnameLeak:
                 f"{substr!r} leaked into config/defaults.yaml — "
                 "move it to .env and let gen_config.py merge it in."
             )
+
+
+# ── Full-resolver integration ───────────────────────────────────────
+
+# Synthetic .env used by the integration class below.  Deliberately
+# uses public, non-owned ``.test.example.com`` / ``.example.com``
+# hostnames and RFC 1918 CIDRs so the test needs no ground-truth
+# values (no internal NVIDIA URLs, no operator secrets).
+#
+# Every category-B key on ``gen_config._CATEGORY_B_KEYS`` is set
+# here.  If a new key is added to the allowlist, this string must
+# grow — the ``test_every_category_b_key_is_covered`` regression
+# guard below turns that silent drift into a visible test failure.
+_SYNTHETIC_ENV: str = (
+    "GITLAB_URL=https://gitlab.test.example.com\n"
+    "GERRIT_URL=https://gerrit.test.example.com/r/a\n"
+    "GIT_CLONE_ALLOWED_HOSTS=gitlab.test.example.com,gerrit.test.example.com,github.com\n"
+)
+
+
+class TestFullyResolvedConfig:
+    """Integration: populated (synthetic) .env → fully-valid resolved config.
+
+    ``TestResolverHappyPath`` above covers individual field flows;
+    this class asserts the *aggregate* output is "production-ready":
+    every section the app's loader consumes is present, no
+    placeholder remains in a resolver-written field, and the output
+    round-trips through :meth:`AppConfig.load` without error.
+
+    Uses only synthetic hostnames / CIDRs — no internal NVIDIA values
+    or real operator secrets are required for the tests to pass.
+    """
+
+    # Top-level YAML sections the loader expects.  Any new dataclass
+    # section on ``AppConfig`` that lands on ``_DIRECT_SECTIONS`` must
+    # show up here too or the coverage check below fails.
+    _EXPECTED_TOP_LEVEL: tuple[str, ...] = (
+        "inference",
+        "orchestrator",
+        "agent_loop",
+        "nmb",
+        "log",
+        "audit",
+        "coding",
+        "skills",
+        "toolsets",
+    )
+
+    # Per-service entries under ``toolsets:``.  Mirrors
+    # ``nemoclaw_escapades.config._TOOLSET_SECTIONS``.
+    _EXPECTED_TOOLSETS: tuple[str, ...] = (
+        "jira",
+        "gitlab",
+        "gerrit",
+        "confluence",
+        "slack_search",
+        "web_search",
+    )
+
+    @staticmethod
+    def _resolved(cwd: Path) -> dict[str, object]:
+        """Return the resolved YAML parsed as a dict."""
+        return yaml.safe_load(
+            (cwd / "config" / "orchestrator.resolved.yaml").read_text()
+        )
+
+    def test_every_category_b_key_is_covered_by_synthetic_env(
+        self,
+        gen_config_mod: object,
+    ) -> None:
+        """Regression: a new allowlist entry must extend ``_SYNTHETIC_ENV``.
+
+        Without this guard, the integration tests below would silently
+        drift off the allowlist when a new category-B knob is added —
+        they'd still pass while failing to exercise the new field.
+        """
+        # Every allowlist key must appear (verbatim, at line start) in
+        # the synthetic env string so the integration tests actually
+        # populate it.
+        allowlist: dict[str, str] = gen_config_mod._CATEGORY_B_KEYS  # type: ignore[attr-defined]
+        missing = [k for k in allowlist if f"{k}=" not in _SYNTHETIC_ENV]
+        assert not missing, (
+            f"synthetic .env is missing category-B keys: {missing}. "
+            "Extend _SYNTHETIC_ENV in tests/test_gen_config.py."
+        )
+
+    def test_every_category_b_field_is_populated(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+    ) -> None:
+        """Every field the resolver writes has a non-empty value."""
+        (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+
+        resolved = self._resolved(sandbox_cwd)
+        # Walk the exact dotted paths the resolver is responsible for
+        # and confirm each one resolved to a non-empty string.
+        allowlist: dict[str, str] = gen_config_mod._CATEGORY_B_KEYS  # type: ignore[attr-defined]
+        for env_key, dotted in allowlist.items():
+            node: object = resolved
+            for part in dotted.split("."):
+                assert isinstance(node, dict), (
+                    f"dotted path {dotted!r} broken at {part!r}"
+                )
+                assert part in node, f"dotted path {dotted!r} missing {part!r}"
+                node = node[part]
+            assert isinstance(node, str) and node, (
+                f"{env_key} → {dotted} is empty / non-string: {node!r}"
+            )
+
+    def test_every_top_level_section_present(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+    ) -> None:
+        """The loader's ``_DIRECT_SECTIONS`` are all present in the output."""
+        (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+        resolved = self._resolved(sandbox_cwd)
+
+        missing_sections = [
+            s for s in self._EXPECTED_TOP_LEVEL if s not in resolved
+        ]
+        assert not missing_sections, (
+            f"resolved YAML missing top-level sections: {missing_sections}"
+        )
+
+    def test_every_toolset_entry_present(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+    ) -> None:
+        """Every ``toolsets.<name>`` entry the loader expects is present."""
+        (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+        resolved = self._resolved(sandbox_cwd)
+
+        toolsets = resolved.get("toolsets") or {}
+        assert isinstance(toolsets, dict)
+        missing_toolsets = [
+            t for t in self._EXPECTED_TOOLSETS if t not in toolsets
+        ]
+        assert not missing_toolsets, (
+            f"toolsets missing: {missing_toolsets}"
+        )
+        # Every toolset carries an ``enabled`` flag.
+        for name in self._EXPECTED_TOOLSETS:
+            entry = toolsets[name]
+            assert isinstance(entry, dict)
+            assert "enabled" in entry, f"toolsets.{name} missing 'enabled'"
+            assert isinstance(entry["enabled"], bool)
+
+    def test_every_service_url_is_populated(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+    ) -> None:
+        """Every service that declares a ``url`` field has it set and parseable.
+
+        Category-A services (``jira``, ``confluence``) ship public
+        SaaS URLs in ``defaults.yaml``.  Category-B services
+        (``gitlab``, ``gerrit``) get their URL from the synthetic
+        ``.env`` via the resolver.  In both cases the final value
+        must parse to ``scheme://host[/path]``.
+        """
+        from urllib.parse import urlparse
+
+        (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+        resolved = self._resolved(sandbox_cwd)
+
+        toolsets = resolved["toolsets"]  # type: ignore[index]
+        for name in ("jira", "gitlab", "gerrit", "confluence"):
+            entry = toolsets[name]
+            assert "url" in entry, f"toolsets.{name} missing 'url'"
+            url = entry["url"]
+            assert isinstance(url, str) and url, (
+                f"toolsets.{name}.url is empty"
+            )
+            parsed = urlparse(url)
+            assert parsed.scheme in ("http", "https"), (
+                f"toolsets.{name}.url has unexpected scheme: {url!r}"
+            )
+            assert parsed.hostname, (
+                f"toolsets.{name}.url has no hostname: {url!r}"
+            )
+
+    def test_resolved_config_round_trips_through_appconfig(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The resolved YAML loads cleanly via ``AppConfig.load``.
+
+        End-to-end proof that the resolver's output is consumable by
+        the app: run the resolver, point ``AppConfig.load`` at the
+        result (secrets supplied via env as production does), and
+        assert the category-B values flowed through into the typed
+        dataclass.
+        """
+        (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+
+        # Populate required secrets so ``_check_required_secrets``
+        # passes.  We deliberately *don't* use ``require_slack=False``
+        # — the point is the orchestrator-facing validation path.
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
+
+        from nemoclaw_escapades.config import AppConfig
+
+        config = AppConfig.load(
+            path=sandbox_cwd / "config" / "orchestrator.resolved.yaml"
+        )
+        # Category-B URLs flowed through to the typed config.
+        assert config.gitlab.url == "https://gitlab.test.example.com"
+        assert config.gerrit.url == "https://gerrit.test.example.com/r/a"
+        assert config.coding.git_clone_allowed_hosts == (
+            "gitlab.test.example.com,gerrit.test.example.com,github.com"
+        )
+        # Category-A URLs (public SaaS) stayed at the shipped default.
+        assert config.jira.url == "https://jirasw.nvidia.com"
+        assert config.confluence.url == "https://nvidia.atlassian.net/wiki"
+        # Top-level non-toolset sections loaded too.
+        assert config.orchestrator.model
+        assert config.inference.model
+        assert config.agent_loop.max_tool_rounds > 0
+        assert config.nmb.broker_url.startswith("ws://")
+        assert config.audit.enabled is True
+
+    def test_secrets_in_env_never_leak_into_resolved_output(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+    ) -> None:
+        """Secrets alongside category-B values stay out of the resolved YAML.
+
+        Operators have both secrets and category-B keys in the same
+        ``.env``.  The resolver's allowlist + forbidden-suffix guard
+        must keep every secret value out of the resolved output, or
+        the committed + image-shipped artefact leaks credentials.
+        """
+        env_body = _SYNTHETIC_ENV + (
+            "SLACK_BOT_TOKEN=xoxb-DO-NOT-LEAK-THIS-TOKEN\n"
+            "SLACK_APP_TOKEN=xapp-DO-NOT-LEAK-THIS-TOKEN\n"
+            "INFERENCE_HUB_API_KEY=sk-DO-NOT-LEAK-THIS-KEY\n"
+            "JIRA_AUTH=Basic DO-NOT-LEAK-THIS-HEADER\n"
+            "GITLAB_TOKEN=glpat-DO-NOT-LEAK-THIS-TOKEN\n"
+            "GERRIT_HTTP_PASSWORD=DO-NOT-LEAK-THIS-PASSWORD\n"
+        )
+        (sandbox_cwd / ".env").write_text(env_body)
+        gen_config_mod.main()  # type: ignore[attr-defined]
+
+        resolved_text = (
+            sandbox_cwd / "config" / "orchestrator.resolved.yaml"
+        ).read_text()
+        # Category-B synthetic values flow through.
+        assert "gitlab.test.example.com" in resolved_text
+        # Every secret stays out.
+        for forbidden in (
+            "xoxb-DO-NOT-LEAK-THIS-TOKEN",
+            "xapp-DO-NOT-LEAK-THIS-TOKEN",
+            "sk-DO-NOT-LEAK-THIS-KEY",
+            "Basic DO-NOT-LEAK-THIS-HEADER",
+            "glpat-DO-NOT-LEAK-THIS-TOKEN",
+            "DO-NOT-LEAK-THIS-PASSWORD",
+        ):
+            assert forbidden not in resolved_text, (
+                f"secret leaked into resolved YAML: {forbidden!r}"
+            )
