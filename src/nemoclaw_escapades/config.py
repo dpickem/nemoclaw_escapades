@@ -215,26 +215,23 @@ _DEFAULT_YAML_PATH: Path = Path("/app/config.yaml")
 def load_dotenv_if_present(path: str | Path = ".env") -> bool:
     """Load environment variables from a ``.env`` file if one exists.
 
-    Entrypoints (``main.py``, ``agent/__main__.py``) call this once at
-    startup so ``python -m nemoclaw_escapades{,.agent}`` picks up the
-    operator's credentials without requiring them to source ``.env``
-    manually or go through ``make run-local-dev``.  Non-precedence-
-    changing: ``override=False`` means a shell-exported var still
-    wins, matching the documented precedence (shell env > YAML >
-    dataclass defaults).
+    Entrypoints call this once at startup so host-side tools picking
+    up the operator's credentials don't need a manual ``source .env``.
+    Non-precedence-changing: ``override=False`` means a shell-exported
+    var still wins, matching the documented precedence (shell env >
+    YAML > dataclass defaults).
 
     The file is looked up *only* at the supplied path (defaults to
     ``.env`` in the current working directory).  We deliberately skip
     ``python-dotenv``'s default upward search so this doesn't
-    accidentally hoover up a parent directory's ``.env`` — the tool
-    either loads the operator's project ``.env`` (when run from the
-    repo root, as the Makefile and standalone operators both do) or
-    no-ops when no local file exists (CI / OSS consumers / tests).
+    accidentally hoover up a parent directory's ``.env``.
 
     Inside the OpenShell sandbox there's no ``.env`` file — every
     secret comes from provider-injected env vars set by the gateway.
     ``load_dotenv_if_present`` is therefore a no-op in sandbox mode,
-    which is the correct behaviour.
+    which is the correct behaviour.  It's still useful on the host
+    for ``scripts/gen_config.py`` / ``scripts/gen_policy.py`` and for
+    the ``make run-broker`` dev helper.
 
     Args:
         path: ``.env`` file path, resolved relative to the current

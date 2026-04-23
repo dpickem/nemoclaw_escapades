@@ -54,15 +54,11 @@ from nemoclaw_escapades.tools.tool_registry_factory import build_full_tool_regis
 
 
 async def main() -> None:
-    # Pick up ``.env`` at the current working directory so
-    # ``python -m nemoclaw_escapades`` (and ``make run-local-dev``
-    # behind it) finds the operator's ``SLACK_*`` / ``INFERENCE_HUB_*``
-    # credentials without requiring a shell-level ``export``.
-    # Idempotent + ``override=False`` so shell-set vars still win
-    # (preserves the documented precedence: shell env > YAML >
-    # dataclass defaults).  No-op inside the sandbox — no ``.env``
-    # ships with the image; every secret is an OpenShell-provider
-    # placeholder injected by the gateway.
+    # No-op inside the sandbox — no ``.env`` file ships with the
+    # image; every secret is an OpenShell-provider placeholder
+    # injected by the gateway.  The call is retained because
+    # host-side dev helpers (``make run-broker``, scripts) share
+    # this entrypoint and benefit from the convenience.
     load_dotenv_if_present()
 
     # ── 0. Runtime self-check ─────────────────────────────────────
