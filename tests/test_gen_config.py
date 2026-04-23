@@ -122,6 +122,58 @@ class TestResolverHappyPath:
         assert "definitely-not-in-allowlist" not in resolved_text
 
 
+# ── Self-diagnosing summary ─────────────────────────────────────────
+
+
+class TestSelfDiagnosingSummary:
+    """The summary output surfaces unset / empty category-B keys.
+
+    Concrete failure mode: an operator sets ``GITLAB_TOKEN`` but forgets
+    ``GITLAB_URL``.  Without this, the only signal is an empty
+    ``toolsets.gitlab.url`` in the resolved YAML — easy to miss.
+    """
+
+    def test_missing_env_vars_listed_in_summary(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Only one of the three allowlisted keys is present.
+        (sandbox_cwd / ".env").write_text(
+            "GIT_CLONE_ALLOWED_HOSTS=github.com\n"
+        )
+        gen_config_mod.main()  # type: ignore[attr-defined]
+        stdout = capsys.readouterr().out
+        # The applied override is reported.
+        assert "GIT_CLONE_ALLOWED_HOSTS → coding.git_clone_allowed_hosts" in stdout
+        # The missing ones are called out by dotted path so an operator
+        # can match them against the resolved YAML directly.
+        assert "GITLAB_URL → toolsets.gitlab.url" in stdout
+        assert "GERRIT_URL → toolsets.gerrit.url" in stdout
+        # The remediation hint is present.
+        assert "Set these in .env" in stdout
+
+    def test_empty_value_counts_as_missing(
+        self,
+        sandbox_cwd: Path,
+        gen_config_mod: object,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A key declared but left empty must be reported, not silently
+        # dropped — matches the ``.env.example`` pattern where every
+        # category-B key is written with an empty value by default.
+        (sandbox_cwd / ".env").write_text(
+            "GITLAB_URL=\n"
+            "GERRIT_URL=\n"
+            "GIT_CLONE_ALLOWED_HOSTS=\n"
+        )
+        gen_config_mod.main()  # type: ignore[attr-defined]
+        stdout = capsys.readouterr().out
+        assert "category-B overrides skipped" in stdout
+        assert "GITLAB_URL → toolsets.gitlab.url" in stdout
+
+
 # ── Secret guard ────────────────────────────────────────────────────
 
 

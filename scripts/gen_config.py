@@ -224,12 +224,17 @@ def main() -> None:
     doc: dict[str, Any] = yaml.safe_load(BASE_CONFIG.read_text())
 
     applied: list[str] = []
+    skipped_missing: list[tuple[str, str]] = []
     skipped_forbidden: list[str] = []
     for env_key, dotted in _CATEGORY_B_KEYS.items():
-        if env_key not in env:
-            continue
-        value = env[env_key]
+        value = env.get(env_key, "")
         if not value:
+            # Either the var is absent from ``.env`` or it's present
+            # but empty — either way the resolved doc stays at the
+            # fail-closed default from ``defaults.yaml``.  Record the
+            # skip so the summary can nudge the operator; this is the
+            # same self-diagnosing pattern ``gen_policy.py`` uses.
+            skipped_missing.append((env_key, dotted))
             continue
         # Runtime-check again in case a future edit makes the allowlist
         # wider — belt-and-braces against an operator supplying a secret
@@ -266,6 +271,22 @@ def main() -> None:
         print(
             f"Config generated: {RESOLVED_CONFIG} "
             "(no category-B overrides — all fields at fail-closed defaults)"
+        )
+    # ``skipped_missing`` is informational rather than fatal: an OSS
+    # consumer legitimately has an empty ``.env`` and that's OK.  But
+    # surfacing the list saves operators from puzzling over empty
+    # ``toolsets.gitlab.url`` / ``toolsets.gerrit.url`` fields in the
+    # resolved YAML (the concrete failure mode this message is for).
+    if skipped_missing:
+        print(
+            f"  category-B overrides skipped (unset / empty in .env): "
+            f"{len(skipped_missing)}"
+        )
+        for env_key, dotted in skipped_missing:
+            print(f"    • {env_key} → {dotted}")
+        print(
+            "    Set these in .env and re-run `make gen-config` if you "
+            "need the corresponding features (e.g. GitLab / Gerrit tools)."
         )
 
 
