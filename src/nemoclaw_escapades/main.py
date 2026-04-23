@@ -79,16 +79,13 @@ async def main() -> None:
         raise SandboxConfigurationError(runtime)
 
     # ── 1. Configuration ──────────────────────────────────────────
-    # Dataclass defaults → YAML overlay (``/app/config.yaml`` in the
-    # sandbox, absent locally) → env vars.  Inside the sandbox,
-    # credentials are L7-proxy placeholders resolved at HTTP-request
-    # time — the config layer never sees real secrets.
-    #
-    # The already-computed ``runtime`` classification is threaded in
-    # so the loader and the self-check share one view of "am I in a
-    # sandbox" (replaces the old per-function ``OPENSHELL_SANDBOX``
-    # env-var checks).
-    config = AppConfig.load(env=runtime.classification)
+    # Dataclass defaults → YAML overlay (``/app/config.yaml``) →
+    # env vars.  Credentials are L7-proxy placeholders resolved at
+    # HTTP-request time — the config layer never sees real secrets.
+    # The ``runtime`` self-check above already confirmed we're in a
+    # healthy sandbox, so the loader itself doesn't need to branch
+    # on that classification.
+    config = AppConfig.load()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
     logger = get_logger("main")

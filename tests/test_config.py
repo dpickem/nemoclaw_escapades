@@ -558,42 +558,32 @@ class TestSecretValidation:
         with pytest.raises(ValueError, match="SLACK_BOT_TOKEN"):
             AppConfig.load()
 
-    def test_sandbox_does_not_require_inference_hub_vars(
+    def test_missing_inference_key_raises(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The API key is always required — in the sandbox it's the
+        L7-proxy placeholder string, which the gateway always injects.
+        Missing it means the gateway is misconfigured."""
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
         monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        # Deliberately skip INFERENCE_HUB_*.  In the sandbox, the
-        # proxy supplies them; the loader must not raise.
-        monkeypatch.setenv("OPENSHELL_SANDBOX", "1")
-        config = AppConfig.load()
-        # Sandbox backfill fires because env is empty and in_sandbox.
-        assert config.inference.base_url == "https://inference.local/v1"
-
-    def test_env_argument_overrides_openshell_sandbox_env_var(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``env=SANDBOX`` unlocks sandbox branches even without the env var.
-
-        Regression: before this path was threaded, the loader read
-        ``OPENSHELL_SANDBOX`` directly and could disagree with the
-        multi-signal detector.  Now a caller-supplied
-        :class:`RuntimeEnvironment` is the source of truth.
-        """
-        from nemoclaw_escapades.runtime import RuntimeEnvironment
-
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
         monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="INFERENCE_HUB_API_KEY"):
+            AppConfig.load()
+
+    def test_inference_base_url_is_backfilled_when_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``INFERENCE_HUB_BASE_URL`` is no longer a required secret —
+        when neither YAML nor env supplies one, the loader backfills
+        it to the sandbox proxy endpoint.
+        """
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
         monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        # Without env=..., the loader would treat this as LOCAL_DEV
-        # and refuse to start (missing INFERENCE_HUB_*).  With env
-        # passed in, the sandbox branch relaxes that requirement and
-        # the inference URL gets backfilled.
-        config = AppConfig.load(env=RuntimeEnvironment.SANDBOX)
+        config = AppConfig.load()
         assert config.inference.base_url == "https://inference.local/v1"
 
     def test_sub_agent_path_does_not_require_slack_tokens(
@@ -622,41 +612,16 @@ class TestSecretValidation:
         assert config.slack.app_token == ""
         assert config.inference.api_key == "k"
 
-    def test_sub_agent_path_still_validates_inference_in_local_dev(
+    def test_sub_agent_path_still_validates_inference(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``require_slack=False`` is about *Slack only* — inference
-        is still required in local dev.  Regression guard so a future
-        edit doesn't accidentally broaden the opt-out.
+        is still required.  Regression guard so a future edit doesn't
+        accidentally broaden the opt-out.
         """
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
         monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
         with pytest.raises(ValueError, match="INFERENCE_HUB"):
             AppConfig.load(require_slack=False)
-
-    def test_env_argument_local_dev_requires_inference_hub(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``env=LOCAL_DEV`` keeps the strict secrets requirement.
-
-        Mirror of the test above from the other side: even with the
-        ``OPENSHELL_SANDBOX`` env var set (stale from a prior shell),
-        an explicit ``env=LOCAL_DEV`` forces the strict local-dev
-        validation.
-        """
-        from nemoclaw_escapades.runtime import RuntimeEnvironment
-
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        # OPENSHELL_SANDBOX stale in the shell — with the old single-
-        # signal check this would wrongly enable sandbox mode.
-        monkeypatch.setenv("OPENSHELL_SANDBOX", "1")
-        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        with pytest.raises(ValueError, match="INFERENCE_HUB"):
-            AppConfig.load(env=RuntimeEnvironment.LOCAL_DEV)

@@ -88,6 +88,26 @@ class TestCliMode:
         workspace = tmp_path / "ws"
         workspace.mkdir()
 
+        # ``_async_main`` runs ``detect_runtime_environment`` and
+        # refuses to start outside a healthy sandbox.  Mock the
+        # detector to return a ``SANDBOX`` report so the entrypoint
+        # proceeds to config load + dispatch.
+        from nemoclaw_escapades.runtime import RuntimeEnvironment, RuntimeReport
+
+        def _fake_detect() -> RuntimeReport:
+            return RuntimeReport(
+                classification=RuntimeEnvironment.SANDBOX,
+                signals_present=(
+                    "OPENSHELL_SANDBOX",
+                    "sandbox_dir_writable",
+                    "app_src_present",
+                    "https_proxy_env",
+                ),
+                signals_missing=(),
+            )
+
+        monkeypatch.setattr(agent_main, "detect_runtime_environment", _fake_detect)
+
         async def _fake_run_cli(
             task_description: str,
             workspace_root: str | None,
