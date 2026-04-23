@@ -178,8 +178,9 @@ class TestCliMode:
                 pass
 
         workspace = tmp_path / "ws"
-        # Build a minimal config with the workspace pointing at tmp.
-        monkeypatch.setenv("CODING_WORKSPACE_ROOT", str(workspace))
+        # ``_run_cli_mode`` below receives the workspace explicitly via
+        # ``workspace_root=``, so the config just needs to load — no
+        # knob-tweaking required.
         from nemoclaw_escapades.config import AppConfig
 
         config = AppConfig.load()
@@ -258,7 +259,6 @@ class TestCliMode:
                 )()
 
         monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoop)
-        monkeypatch.setenv("SKILLS_ENABLED", "false")
 
         class _FakeBackend:
             async def close(self) -> None:
@@ -267,7 +267,12 @@ class TestCliMode:
         from nemoclaw_escapades.config import AppConfig
 
         workspace = tmp_path / "ws"
-        config = AppConfig.load()
+        # ``skills.enabled=false`` now flows through YAML only (env-var
+        # overrides for non-secret knobs were retired in the config
+        # SSOT refactor — see GAPS §16).
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("skills:\n  enabled: false\n")
+        config = AppConfig.load(path=yaml_path)
         assert config.skills.enabled is False
 
         import logging
@@ -403,9 +408,10 @@ class TestCliMode:
 
         from nemoclaw_escapades.config import AppConfig
 
-        # Explicitly enable audit at the config level — the sub-agent
-        # still must not open its own DB.
-        monkeypatch.setenv("AUDIT_ENABLED", "true")
+        # ``audit.enabled`` defaults to ``True``.  The regression this
+        # test guards is that the sub-agent still passes ``audit=None``
+        # to AgentLoop — it relies on the orchestrator to own the
+        # single authoritative DB.
         config = AppConfig.load()
         import logging
 

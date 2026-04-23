@@ -40,7 +40,7 @@ from nemoclaw_escapades.agent.approval import WriteApproval
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present
+from nemoclaw_escapades.config import create_orchestrator_config, load_dotenv_if_present
 from nemoclaw_escapades.connectors.slack import SlackConnector
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
@@ -80,12 +80,12 @@ async def main() -> None:
 
     # ── 1. Configuration ──────────────────────────────────────────
     # Dataclass defaults → YAML overlay (``/app/config.yaml``) →
-    # env vars.  Credentials are L7-proxy placeholders resolved at
-    # HTTP-request time — the config layer never sees real secrets.
-    # The ``runtime`` self-check above already confirmed we're in a
-    # healthy sandbox, so the loader itself doesn't need to branch
-    # on that classification.
-    config = AppConfig.load()
+    # secret env vars.  Credentials are L7-proxy placeholders
+    # resolved at HTTP-request time — the config layer never sees
+    # real secrets.  The ``runtime`` self-check above already
+    # confirmed we're in a healthy sandbox, so the loader itself
+    # doesn't need to branch on that classification.
+    config = create_orchestrator_config()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
     logger = get_logger("main")

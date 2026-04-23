@@ -45,7 +45,12 @@ from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present, load_system_prompt
+from nemoclaw_escapades.config import (
+    AppConfig,
+    create_coding_agent_config,
+    load_dotenv_if_present,
+    load_system_prompt,
+)
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
@@ -364,11 +369,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
     if runtime.classification is RuntimeEnvironment.INCONSISTENT:
         raise SandboxConfigurationError(runtime)
 
-    # ``require_slack=False`` because the sub-agent never connects to
-    # Slack: CLI mode prints to stdout, NMB mode talks to the broker.
-    # The orchestrator's ``main.py`` keeps the default
-    # (``require_slack=True``).
-    config = AppConfig.load(require_slack=False)
+    # ``create_coding_agent_config`` skips Slack validation — the
+    # sub-agent never connects to Slack (CLI mode prints to stdout,
+    # NMB mode talks to the broker).  The orchestrator's ``main.py``
+    # uses ``create_orchestrator_config`` which requires Slack tokens.
+    config = create_coding_agent_config()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
     logger = get_logger("agent.main")
     logger.info(
