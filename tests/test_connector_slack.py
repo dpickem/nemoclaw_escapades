@@ -686,8 +686,6 @@ def _bare_connector(handler) -> SlackConnector:
     conn._thread_approval_msg = {}
     conn._approval_in_flight = set()
     conn._error_timestamps = defaultdict(list)
-    conn._ERROR_WINDOW_S = 60.0
-    conn._ERROR_MAX_PER_WINDOW = 3
     return conn
 
 

@@ -24,6 +24,15 @@ class ErrorCategory(StrEnum):
     UNKNOWN = "unknown"
 
 
+# Platform-neutral action IDs for the Approve / Deny buttons attached to
+# write-approval prompts.  Lives in ``models`` so connectors can detect
+# approval interactions (to apply button-lifecycle UI updates) without
+# importing from ``orchestrator`` — preserves the one-way dependency
+# (``orchestrator`` → ``models``, ``connectors`` → ``models``).
+APPROVAL_ACTION_APPROVE: str = "approve_write"
+APPROVAL_ACTION_DENY: str = "deny_write"
+
+
 # ---------------------------------------------------------------------------
 # Connector layer types
 # ---------------------------------------------------------------------------
@@ -120,15 +129,6 @@ class RichResponse:
     #: Posting a reply in that case adds noise ("No pending write operation
     #: found for this thread.") without adding information.
     suppress_post: bool = False
-
-
-# Platform-neutral action IDs for the Approve / Deny buttons attached to
-# write-approval prompts.  Lives in ``models`` so connectors can detect
-# approval interactions (to apply button-lifecycle UI updates) without
-# importing from ``orchestrator`` — preserves the one-way dependency
-# (``orchestrator`` → ``models``, ``connectors`` → ``models``).
-APPROVAL_ACTION_APPROVE: str = "approve_write"
-APPROVAL_ACTION_DENY: str = "deny_write"
 
 
 # ---------------------------------------------------------------------------
