@@ -100,7 +100,7 @@ def _extract_host(url: str) -> str:
 
 def _apply_host_substitutions(
     policy: dict[str, Any], env: dict[str, str]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[tuple[str, str, str]]]:
     """Replace ``host: ""`` placeholders with hostnames from *env*.
 
     For each ``env_var → policy_name`` entry in
@@ -108,42 +108,107 @@ def _apply_host_substitutions(
 
     - If *env* has the URL and it parses to a non-empty host, rewrite
       the first endpoint's ``host`` on the matching network_policy.
-    - Otherwise leave the placeholder in place and add the policy name
-      to the skipped list for the log summary.  The resolved policy
-      then contains an empty host, which OpenShell rejects at apply
-      time — fail-closed is the correct posture for an OSS consumer
-      without a ``.env``.
+    - Otherwise leave the placeholder in place and record *why* —
+      missing env var, bare hostname without scheme, missing
+      network_policy in the base template — so the caller can emit
+      an actionable message.  The resolved policy keeps an empty
+      host, which OpenShell rejects at apply time — fail-closed is
+      the correct posture for an OSS consumer without a ``.env``.
 
     Returns:
-        ``(applied, skipped)`` — parallel lists of
-        ``"<env_var> → <policy_name> = <host>"`` strings and
-        ``"<env_var> (→ <policy_name>)"`` strings respectively.
-        Used by the caller to print a concise summary.
+        ``(applied, skipped)`` where ``applied`` is a list of
+        ``"<env_var> → <policy_name> = <host>"`` summary strings and
+        ``skipped`` is a list of ``(env_var, policy_name, reason)``
+        tuples.  ``reason`` is one of ``"missing"`` (env var not in
+        ``.env``), ``"malformed"`` (URL present but unparseable —
+        e.g. no scheme), or ``"schema_drift"`` (named policy absent
+        from base template).
     """
     network_policies = policy.get("network_policies") or {}
     applied: list[str] = []
-    skipped: list[str] = []
+    skipped: list[tuple[str, str, str]] = []
     for env_var, policy_name in _POLICY_HOST_SUBSTITUTIONS.items():
         url = env.get(env_var, "")
         host = _extract_host(url)
         policy_entry = network_policies.get(policy_name) or {}
         endpoints = policy_entry.get("endpoints") or []
         if not host:
-            skipped.append(f"{env_var} (→ {policy_name})")
+            # Distinguish "var absent" from "var set but garbage" so
+            # the summary can give the operator a concrete next step.
+            reason = "missing" if not url.strip() else "malformed"
+            skipped.append((env_var, policy_name, reason))
             continue
         if not endpoints:
-            # Schema drift — e.g. someone removed the network_policy
-            # from the base.  Flag loudly so the operator can fix it.
+            # Schema drift — someone removed the network_policy from
+            # the base.  Flag loudly so the operator notices and
+            # either restores it or drops the substitution entry.
             print(
                 f"  Warning: {policy_name} network_policy has no endpoints; "
                 f"cannot apply {env_var} substitution.",
                 file=sys.stderr,
             )
-            skipped.append(f"{env_var} (→ {policy_name})")
+            skipped.append((env_var, policy_name, "schema_drift"))
             continue
         endpoints[0]["host"] = host
         applied.append(f"{env_var} → {policy_name}.host = {host}")
     return applied, skipped
+
+
+def _format_host_skip_summary(
+    skipped: list[tuple[str, str, str]],
+) -> list[str]:
+    """Turn the structured skip list into operator-actionable lines.
+
+    Each reason gets its own block so the operator can see at a
+    glance which env vars to add and which to rewrite.  Keeping the
+    formatting here (rather than inline in ``main``) means future
+    tweaks to the UX only touch one function.
+    """
+    missing = [
+        (env_var, policy_name)
+        for env_var, policy_name, reason in skipped
+        if reason == "missing"
+    ]
+    malformed = [
+        (env_var, policy_name)
+        for env_var, policy_name, reason in skipped
+        if reason == "malformed"
+    ]
+    drift = [
+        (env_var, policy_name)
+        for env_var, policy_name, reason in skipped
+        if reason == "schema_drift"
+    ]
+    lines: list[str] = []
+    if missing:
+        lines.append(
+            "  hostnames NOT substituted (env var missing from .env, "
+            "policy stays fail-closed):"
+        )
+        for env_var, policy_name in missing:
+            lines.append(
+                f"    • {env_var} (→ network_policies.{policy_name}.endpoints[0].host)"
+            )
+        lines.append(
+            "    Fix: add `{0}=https://<your-host>` to .env, then "
+            "re-run `make gen-policy`.".format(missing[0][0])
+        )
+    if malformed:
+        lines.append(
+            "  hostnames NOT substituted (URL set but unparseable — "
+            "need `scheme://host`):"
+        )
+        for env_var, policy_name in malformed:
+            lines.append(
+                f"    • {env_var} (→ network_policies.{policy_name}.endpoints[0].host)"
+            )
+    if drift:
+        lines.append(
+            "  hostnames NOT substituted (policy missing from base template):"
+        )
+        for env_var, policy_name in drift:
+            lines.append(f"    • {env_var} (→ {policy_name})")
+    return lines
 
 
 def main() -> None:
@@ -207,22 +272,34 @@ def main() -> None:
         yaml.dump(policy, f, default_flow_style=False, sort_keys=False)
 
     # Summary — one block per substitution stage so the operator sees
-    # exactly what was applied and what's still missing.
+    # exactly what was applied and what's still missing.  ``skipped``
+    # is structured so missing-vs-malformed-vs-schema-drift each get
+    # their own actionable hint.
     print(f"Policy generated: {RESOLVED_POLICY}")
     if host_applied:
         print(f"  hostnames substituted: {len(host_applied)}")
         for line in host_applied:
             print(f"    • {line}")
-    if host_skipped:
-        print(
-            f"  hostnames NOT substituted (fail-closed): "
-            f"{', '.join(host_skipped)}"
-        )
+    for line in _format_host_skip_summary(host_skipped):
+        print(line)
     if injected:
         print(f"  allowed_ips injected for: {', '.join(injected)}")
         print(f"  CIDRs: {', '.join(allowed_ips)}")
-    elif endpoints_needing_ips:
-        print("  no allowed_ips — ALLOWED_IPS not set")
+    elif endpoints_needing_ips and host_applied:
+        # Only flag when substitution succeeded but ALLOWED_IPS didn't
+        # — otherwise the "needs ALLOWED_IPS" hint competes with the
+        # more fundamental "add GITLAB_URL / GERRIT_URL" fix above.
+        print("  no allowed_ips — ALLOWED_IPS not set in .env")
+    # Flag the specific "ENDPOINTS_NEEDING_ALLOWED_IPS is stale" case:
+    # operator has real hostnames in that var but the resolved policy
+    # has empty ``host`` fields, so no injection target matched.
+    if endpoints_needing_ips and not injected and host_skipped:
+        print(
+            "  note: ENDPOINTS_NEEDING_ALLOWED_IPS references "
+            f"{sorted(endpoints_needing_ips)} but none matched the "
+            "resolved hosts — fix the missing URL(s) above and these "
+            "will auto-inject on the next run."
+        )
 
 
 if __name__ == "__main__":
