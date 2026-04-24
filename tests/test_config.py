@@ -87,7 +87,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _set_required_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Populate the secrets ``_check_required_secrets`` insists on."""
+    """Populate the secrets ``_check_required_config`` insists on."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
     monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
@@ -580,14 +580,13 @@ class TestDotenvLoader:
 
 
 class TestSecretValidation:
-    """``_check_required_secrets`` refuses to return a config without tokens."""
+    """``_check_required_config`` refuses to return a config missing required fields."""
 
     def test_missing_slack_tokens_raises(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
-        monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://x")
         with pytest.raises(ValueError, match="SLACK_BOT_TOKEN"):
             AppConfig.load()
 
@@ -604,20 +603,35 @@ class TestSecretValidation:
         with pytest.raises(ValueError, match="INFERENCE_HUB_API_KEY"):
             AppConfig.load()
 
-    def test_inference_base_url_is_backfilled_when_missing(
+    def test_inference_base_url_comes_from_yaml_default(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``INFERENCE_HUB_BASE_URL`` is no longer a required secret —
-        when neither YAML nor env supplies one, the loader backfills
-        it to the sandbox proxy endpoint.
+        """``config/defaults.yaml`` pins ``inference.base_url`` to the
+        sandbox proxy endpoint.  Regression guard so a future edit
+        doesn't reintroduce a silent in-code backfill.
         """
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
+        _set_required_secrets(monkeypatch)
         config = AppConfig.load()
         assert config.inference.base_url == "https://inference.local/v1"
+
+    def test_missing_inference_base_url_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Fail-fast when a per-deployment YAML nukes ``inference.base_url``.
+
+        The default YAML always sets it; this test forces the blank
+        state via a minimal custom YAML and asserts the loader
+        refuses it instead of silently routing to a hardcoded fallback.
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "blank.yaml"
+        yaml_path.write_text("inference:\n  base_url: ''\n")
+        monkeypatch.setenv("NEMOCLAW_CONFIG_PATH", str(yaml_path))
+        with pytest.raises(ValueError, match="inference.base_url"):
+            AppConfig.load()
 
     def test_sub_agent_path_does_not_require_slack_tokens(
         self,
@@ -625,20 +639,20 @@ class TestSecretValidation:
     ) -> None:
         """Regression: ``require_slack=False`` skips the Slack check.
 
-        The coding sub-agent never touches Slack — CLI mode prints to
-        stdout and NMB mode talks to the broker — so requiring
-        ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its startup path
-        makes ``python -m nemoclaw_escapades.agent --task ...`` fail
-        on any machine whose ``.env`` isn't fully configured for the
-        orchestrator.  ``AppConfig.load(require_slack=False)`` opts
-        out of that check while keeping the inference-secret
+        The coding sub-agent never touches Slack — both of its run
+        modes (``--task`` CLI mode, ``--nmb`` broker mode) live inside
+        the sandbox and talk to stdout or the broker, never to Slack —
+        so requiring ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its
+        startup path makes ``python -m nemoclaw_escapades.agent
+        --task ...`` fail on any machine whose ``.env`` isn't fully
+        configured for the orchestrator.  ``AppConfig.load(require_slack=False)``
+        opts out of that check while keeping the inference-secret
         validation untouched.
         """
         # Inference secrets present; Slack ones deliberately absent.
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
         monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
-        monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://x")
         # Must not raise.
         config = AppConfig.load(require_slack=False)
         assert config.slack.bot_token == ""

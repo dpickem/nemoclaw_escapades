@@ -35,10 +35,12 @@ logger = get_logger("config")
 
 # ── Defaults (single source of truth — no magic strings elsewhere) ─
 
-# Base URL the sandbox points at for inference.  Kept here (not in the
-# YAML) because the proxy routes every request to ``inference.local``
-# regardless of the deployment and the value is not an operator knob.
-SANDBOX_INFERENCE_BASE_URL: str = "https://inference.local/v1"
+# Inference endpoint the app dials inside the sandbox.  The L7 proxy
+# terminates ``inference.local`` and forwards to the real provider, so
+# this value is deployment-agnostic.  Used as both the ``InferenceConfig``
+# dataclass default and (mirrored) in ``config/defaults.yaml``; operators
+# can override either via a per-deployment YAML.
+DEFAULT_INFERENCE_BASE_URL: str = "https://inference.local/v1"
 DEFAULT_INFERENCE_MODEL: str = "azure/anthropic/claude-opus-4-6"
 DEFAULT_INFERENCE_TIMEOUT_S: int = 60
 DEFAULT_INFERENCE_MAX_RETRIES: int = 3
@@ -292,7 +294,7 @@ class InferenceConfig:
         max_retries: Maximum retries on transient failures.
     """
 
-    base_url: str = ""
+    base_url: str = DEFAULT_INFERENCE_BASE_URL
     api_key: str = ""
     model: str = DEFAULT_INFERENCE_MODEL
     timeout_s: int = DEFAULT_INFERENCE_TIMEOUT_S
@@ -669,9 +671,9 @@ class AppConfig:
         """
         config = cls()
         _apply_yaml_overlay(config, path)
-        _apply_secret_overrides(config)
+        _load_secrets_from_env(config)
         _sync_agent_loop_prompting_fields(config)
-        _check_required_secrets(config, require_slack=require_slack)
+        _check_required_config(config, require_slack=require_slack)
         return config
 
 
@@ -857,19 +859,30 @@ def _apply_section(sub_config: Any, values: dict[str, Any], path_for_log: str) -
 #   they never live in public source but still flow through YAML
 #   inside the sandbox.
 #
-# The function below handles the "env for secrets" half of that
-# contract.  The YAML half runs in :func:`_apply_yaml_overlay`.
+# The function below reads the env half of that contract into the
+# typed ``AppConfig``.  The YAML half runs in :func:`_apply_yaml_overlay`.
 
 
-def _apply_secret_overrides(config: AppConfig) -> None:
-    """Apply secret env-var overrides on top of *config*.
+def _load_secrets_from_env(config: AppConfig) -> None:
+    """Populate secret fields on *config* from the process environment.
 
-    Mutates *config* in place.  Only handles credentials — everything
-    else flows through the YAML overlay.  Also backfills
-    ``inference.base_url`` to :data:`SANDBOX_INFERENCE_BASE_URL` when
-    neither YAML nor env supplies one (``inference.local`` is the
-    proxy-side endpoint the sandbox always talks to, so the fallback
-    is correct without having to list it in every YAML).
+    Mutates *config* in place.  This is the **single bridge** between
+    our typed config and whatever credential-injection mechanism the
+    process runs under:
+
+    - In the sandbox, OpenShell providers (wired by the Makefile's
+      ``setup-providers`` target) inject one env var per credential.
+      Their values are placeholder strings that the L7 proxy swaps for
+      the real secret at HTTP-request time — the app only ever sees
+      the placeholder.
+    - On the host (``scripts/gen_config.py``, ``make run-broker``,
+      tests), ``load_dotenv_if_present`` has already populated
+      ``os.environ`` from the operator's ``.env``.
+
+    Either way, the env is the source of truth for credentials — this
+    function is **not** a no-op.  Non-secret knobs flow through YAML
+    (see :func:`_apply_yaml_overlay`); this function deliberately
+    touches only the credential fields.
 
     Args:
         config: ``AppConfig`` instance to mutate.
@@ -880,11 +893,10 @@ def _apply_secret_overrides(config: AppConfig) -> None:
     if app := os.environ.get("SLACK_APP_TOKEN"):
         config.slack.app_token = app
 
-    # Inference Hub API key (always required) + sandbox URL fallback.
+    # Inference Hub API key.  The base URL is a non-secret knob and
+    # flows through YAML (``config/defaults.yaml::inference.base_url``).
     if key := os.environ.get("INFERENCE_HUB_API_KEY"):
         config.inference.api_key = key
-    if not config.inference.base_url:
-        config.inference.base_url = SANDBOX_INFERENCE_BASE_URL
 
     # Jira REST auth header (``Basic <base64(user:token)>``).
     if val := os.environ.get(DEFAULT_JIRA_AUTH_ENV_VAR):
@@ -978,29 +990,36 @@ def _sync_agent_loop_prompting_fields(config: AppConfig) -> None:
 # ── Validation ──────────────────────────────────────────────────────
 
 
-def _check_required_secrets(
+def _check_required_config(
     config: AppConfig,
     *,
     require_slack: bool = True,
 ) -> None:
-    """Ensure required secrets are present.
+    """Ensure required config fields are present.
 
-    Inside the sandbox every secret env var holds an
-    OpenShell-provider placeholder string that the L7 proxy resolves
-    at request time — the app only ever sees the placeholder, never
-    the real secret.  The validator just checks presence (non-empty
-    string) so a misconfigured gateway surfaces before the first
-    outbound call.
+    Covers two kinds of required values:
+
+    - **Secrets** (Slack tokens, Inference Hub API key) — in the
+      sandbox these are OpenShell-provider placeholder strings that
+      the L7 proxy resolves at request time; the app only ever sees
+      the placeholder, so a missing value means the gateway is
+      misconfigured.
+    - **Non-secret endpoints** (``inference.base_url``) — sourced
+      from YAML; we fail fast so a malformed YAML drop-in surfaces at
+      startup instead of at the first outbound call.
 
     Not every component needs every secret:
 
     - **Slack tokens** — the orchestrator's ``SlackConnector`` needs
-      them.  The coding sub-agent never touches Slack (CLI mode
-      prints to stdout; NMB mode talks to the broker), so it opts
-      out via ``require_slack=False``.
-    - **Inference Hub API key** — every component that calls the
-      inference backend needs it.  The base URL is handled by the
-      loader's backfill (defaults to ``inference.local/v1``).
+      them.  The coding sub-agent (``agent/__main__.py``) never
+      touches Slack — its ``_run_cli_mode`` prints to stdout and
+      ``_run_nmb_mode`` talks to the broker — so it opts out via
+      ``require_slack=False``.  This is orthogonal to the sandbox
+      runtime gate; both modes run in a sandbox.
+    - **Inference Hub API key + base URL** — every component that
+      calls the inference backend needs both.  The base URL's default
+      (``https://inference.local/v1``) lives in
+      ``config/defaults.yaml`` rather than code.
 
     Args:
         config: ``AppConfig`` to validate.
@@ -1009,7 +1028,7 @@ def _check_required_secrets(
             pass ``False``.
 
     Raises:
-        ValueError: If any required secret is missing.  Message lists
+        ValueError: If any required value is missing.  Message lists
             all missing keys so the operator sees the full set in one
             pass.
     """
@@ -1021,11 +1040,14 @@ def _check_required_secrets(
             missing.append("SLACK_APP_TOKEN")
     if not config.inference.api_key:
         missing.append("INFERENCE_HUB_API_KEY")
+    if not config.inference.base_url:
+        missing.append("inference.base_url (YAML)")
 
     if missing:
         raise ValueError(
-            f"Missing required environment variables: {', '.join(missing)}. "
-            "Copy .env.example to .env and fill in real values."
+            f"Missing required config values: {', '.join(missing)}. "
+            "Set secrets in .env (copy from .env.example) and non-secret "
+            "knobs in config/defaults.yaml (or a per-deployment YAML)."
         )
 
 
@@ -1063,9 +1085,13 @@ def create_orchestrator_config(path: str | Path | None = None) -> AppConfig:
 def create_coding_agent_config(path: str | Path | None = None) -> AppConfig:
     """Load config for the coding sub-agent process.
 
-    The sub-agent never touches Slack — CLI mode prints to stdout,
-    NMB mode talks to the broker — so Slack tokens are **not**
-    required.  Requiring them would cause ``python -m
+    The sub-agent (``agent/__main__.py``) never touches Slack: its
+    ``_run_cli_mode`` prints task output to stdout and
+    ``_run_nmb_mode`` talks to the broker.  Both of those run in a
+    sandbox — "CLI mode" here refers to the sub-agent's two run modes
+    (``--task`` vs ``--nmb``), not to the removed ``LOCAL_DEV``
+    runtime classification.  Since Slack is never dialled, its tokens
+    are **not** required; requiring them would cause ``python -m
     nemoclaw_escapades.agent --task ...`` to fail on any machine
     whose ``.env`` isn't fully configured for the orchestrator.
 

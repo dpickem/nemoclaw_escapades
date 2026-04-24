@@ -512,7 +512,7 @@ class TestFullyResolvedConfig:
         (sandbox_cwd / ".env").write_text(_SYNTHETIC_ENV)
         gen_config_mod.main()  # type: ignore[attr-defined]
 
-        # Populate required secrets so ``_check_required_secrets``
+        # Populate required secrets so ``_check_required_config``
         # passes.  We deliberately *don't* use ``require_slack=False``
         # — the point is the orchestrator-facing validation path.
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")

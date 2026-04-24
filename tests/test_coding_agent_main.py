@@ -38,10 +38,11 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(key, raising=False)
     # Populate required secrets so ``AppConfig.load`` passes validation.
+    # ``inference.base_url`` flows through the default YAML overlay —
+    # no env-var hook needed here (or anywhere in the runtime path).
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
     monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
-    monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://test")
 
 
 # ── Arg parsing ─────────────────────────────────────────────────────
