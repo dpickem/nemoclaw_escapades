@@ -311,7 +311,7 @@ RUN git config --system \
 - Requires a new executable in the image + a `RUN git config --system` block.  The helper path must be on the policy's `binaries` allowlist for the git-host network policies (git execs the helper to resolve credentials *before* it starts the HTTPS request).
 - Secret-exposure caveat: `printf` writes the password to the helper's stdout, which lives in pipe buffers and could in principle be captured.  This is strictly better than the URL-embedding case — the exposure is process-local, in-memory, and short-lived — but it's not zero.  Rotating providers still rotates all downstream usage cleanly.
 
-**Use case.**  The recommended long-term path for any host whose credentials already flow through an OpenShell provider.  Phase 2 implementation target.
+**Use case.**  The recommended long-term path for any host whose credentials already flow through an OpenShell provider.  Phase 3 implementation target.
 
 #### 4.4.4 Option C — SSH keys
 
@@ -368,9 +368,9 @@ The orchestrator / sub-agent then operates on the pre-populated workspace; it ne
 
 #### 4.4.7 Recommended Phasing
 
-- **Phase 1 (this milestone)** — document the problem and ship the unblocker.  Public-host clones work after the image + policy delta; private-host clones return a clear HTTP 401 instead of a confusing "tool missing" refusal.  `.env.example` documents Option A as a short-term workaround with the leakage caveat called out explicitly.
-- **Phase 2** — implement Option B (credential helper).  One shell script, two `git config --system` lines per host in the Dockerfile, one policy allowlist entry.  Handles the 90% case (authenticated clone + subsequent `pull` / `push`) without redesigning secret management.
-- **Phase 3+** — evaluate Option D (host seed) if interactive Slack workflows frequently reference an operator's local checkout.  Useful for developer UX, not urgent for autonomous delegation.
+- **Phase 1 (landed)** — document the problem and ship the unblocker.  Public-host clones work after the image + policy delta; private-host clones return a clear HTTP 401 instead of a confusing "tool missing" refusal.  `.env.example` documents Option A as a short-term workaround with the leakage caveat called out explicitly.
+- **Phase 3** — implement Option B (credential helper).  One shell script, two `git config --system` lines per host in the Dockerfile, one policy allowlist entry.  Handles the 90% case (authenticated clone + subsequent `pull` / `push`) without redesigning secret management.
+- **Phase 4+** — evaluate Option D (host seed) if interactive Slack workflows frequently reference an operator's local checkout.  Useful for developer UX, not urgent for autonomous delegation.
 - **Deferred** — Option C (SSH).  Only pick it up when a host surfaces that specifically *requires* SSH.
 
 ---
@@ -1154,7 +1154,7 @@ rendering (thinking indicator, step count, current tool).
 | Create sub-agent `__main__` entrypoint | `agent/__main__.py` | ✅ (commit `c238f73`) |
 | Create `AgentSetupBundle` dataclass | `agent/types.py` | ✅ `agent/types.py::AgentSetupBundle` |
 | Create coding agent system prompt template | `prompts/coding_agent.md` | ✅ |
-| End-to-end test: agent process starts, handles task, returns result | `tests/test_integration_coding_agent.py`, `tests/test_coding_agent_main.py` | ✅ subprocess-level: `tests/test_integration_coding_agent.py` spawns `python -m nemoclaw_escapades.agent --task ...` against a local OpenAI-format mock and asserts the assistant reply reaches stdout.  Function-level: `tests/test_coding_agent_main.py::TestCliMode` covers the same assembly path with a fake `AgentLoop`; `::TestNmbMode` smoke-tests the NMB wiring (receive-loop body itself is Phase 2). |
+| End-to-end test: agent process starts, handles task, returns result | `tests/test_integration_coding_agent.py`, `tests/test_coding_agent_main.py` | ✅ subprocess-level: `tests/test_integration_coding_agent.py` spawns `python -m nemoclaw_escapades.agent --task ...` against a local OpenAI-format mock and asserts the assistant reply reaches stdout.  Function-level: `tests/test_coding_agent_main.py::TestCliMode` covers the same assembly path with a fake `AgentLoop`; `::TestNmbMode` smoke-tests the NMB wiring (receive-loop body itself is Phase 3). |
 
 **Exit criteria (met as of PR #14 merge):**
 
@@ -1198,7 +1198,7 @@ rendering (thinking indicator, step count, current tool).
   `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call`).
   NMB connect / close wiring also in place
   (`tests/test_coding_agent_main.py::TestNmbMode`).  The
-  `task.assign` → `task.complete` protocol body itself is Phase 2 —
+  `task.assign` → `task.complete` protocol body itself is Phase 3 —
   see that phase's exit criteria.
 
 **Phase 1 Follow-ups (PR #14 — merged).**  Addressed every unresolved
@@ -1220,7 +1220,27 @@ review thread on PR #13 in a single focused branch:
 - Added docstring and commit-message verbosity caps to `CONTRIBUTING.md`.
 - `make lint` and `make typecheck` are now clean on this branch.
 
-### Phase 2 — Orchestrator delegation, NMB event loop, concurrency caps, finalization, and `ToolSearch`
+### Phase 2 — `ToolSearch` meta-tool
+
+Tool descriptions already consume 90%+ of the prompt on real runs,
+drowning out user messages and leaving no headroom for the
+delegation / finalization tools Phase 3 will add (`delegate_task`,
+`present_work_to_user`, `push_and_create_pr`, `discard_work`,
+`re_delegate`, `destroy_sandbox`).  Shipping the meta-tool before
+growing the tool surface is the cheaper path, so it gets its own
+phase ahead of delegation.
+
+| Task | Files | Status |
+|------|-------|--------|
+| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
+| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
+| Tests for `ToolSearch` | `tests/test_tool_search.py` | ⏳ Pending |
+
+**Exit criteria:** Non-core tools discoverable via `ToolSearch` and
+excluded from the default prompt; prompt tokens decrease 40%+ with
+enterprise tools enabled.
+
+### Phase 3 — Orchestrator delegation, NMB event loop, concurrency caps, and finalization
 
 | Task | Files | Status |
 |------|-------|--------|
@@ -1232,26 +1252,12 @@ review thread on PR #13 in a single focused branch:
 | Implement finalization tools (`present_work_to_user`, `push_and_create_pr`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py` | ⏳ Pending |
 | Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `orchestrator/orchestrator.py` | ⏳ Pending |
 | Implement `AuditBuffer` with NMB-batched flush + JSONL fallback | `agent/audit_buffer.py` | ⏳ Pending |
-| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
-| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
 | Integration test: orchestrator → coding agent → result → finalize | `tests/integration/test_delegation.py` | ⏳ Pending |
-| Tests for `ToolSearch` | `tests/test_tool_search.py` | ⏳ Pending |
 
-**Pulled in from Phase 4.**  `ToolSearch` moved forward because tool
-descriptions are already consuming 90%+ of the prompt on real runs,
-drowning out the user message and leaving no headroom for delegation
-/ finalization tools.  We can't safely grow the tool surface for
-Phase 2 (`delegate_task`, `present_work_to_user`, `push_and_create_pr`,
-`discard_work`, `re_delegate`, `destroy_sandbox`) until the meta-tool
-is in place.
+**Exit criteria:** Orchestrator delegates coding tasks, collects results, runs
+finalization. Concurrency caps enforced. Audit flush works via NMB and fallback.
 
-**Exit criteria:** Orchestrator delegates coding tasks, collects
-results, runs finalization. Concurrency caps enforced. Audit flush
-works via NMB and fallback. Non-core tools are discoverable via
-`ToolSearch` and excluded from the default prompt; prompt tokens
-decrease 40%+ with enterprise tools enabled.
-
-### Phase 3 — At-least-once NMB delivery
+### Phase 4 — At-least-once NMB delivery
 
 | Task | Files | Status |
 |------|-------|--------|
@@ -1262,7 +1268,7 @@ decrease 40%+ with enterprise tools enabled.
 **Exit criteria:** Critical messages (`task.complete`, `audit.flush`) survive
 broker crashes and are replayed on restart.
 
-### Phase 4 — Basic operational cron
+### Phase 5 — Basic operational cron
 
 | Task | Files | Status |
 |------|-------|--------|
@@ -1272,10 +1278,7 @@ broker crashes and are replayed on restart.
 
 **Exit criteria:** Operational cron jobs run on schedule.
 
-> `ToolSearch` was originally scoped here but has been pulled into
-> Phase 2 — see that phase's "Pulled in from Phase 4" note.
-
-### Phase 5 — Polish, hardening, and gaps document
+### Phase 6 — Polish, hardening, and gaps document
 
 | Task | Files | Status |
 |------|-------|--------|
@@ -1312,13 +1315,13 @@ progress reporting, and robust handling.
 | AgentLoop + NMB config sections | YAML `agent_loop:` / `nmb:` populate the matching `AppConfig` fields | ✅ `tests/test_config.py::TestYamlOverlay::test_agent_loop_section_populates_config`, `TestYamlPrecedence::test_nmb_section_populates_config`, `::test_agent_loop_section_populates_runtime_knobs` |
 | Sub-agent workspace isolation | Each sub-agent invocation lands in a distinct `<base>/agent-<hex>` subdirectory so concurrent runs can't clobber each other's scratchpad / notes | ✅ `tests/test_coding_agent_main.py::TestCliMode::test_cli_mode_per_agent_subdirectory_is_created` |
 | Sub-agent tool surface (enforcement-by-construction) | Sub-agent registry excludes `git_commit`; orchestrator retains it for finalisation | ✅ `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit`, `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface` |
-| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ⏳ Pending (Phase 2) |
-| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 2) |
-| NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 3) |
-| NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 3) |
+| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ⏳ Pending (Phase 3) |
+| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 3) |
+| NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 4) |
+| NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 4) |
 | `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ⏳ Pending (Phase 2) |
-| Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 2) |
-| Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 4) |
+| Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 3) |
+| Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 5) |
 
 ### 16.2 Integration Tests
 
@@ -1327,25 +1330,25 @@ progress reporting, and robust handling.
 | Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present | 🟡 Manual smoke only — the positive path needs a real OpenShell sandbox so `/sandbox`, `/app/src`, and `inference.local` DNS resolve.  Automation would require mocking OpenShell itself, out of scope for unit / integration tests.  The runtime classifier logic is fully covered at the unit level (`tests/test_runtime.py::TestClassification`); operators verify the end-to-end wiring with `make run-local-sandbox`. |
 | Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_inconsistent_runtime_fails_fast` — spawns `python -m nemoclaw_escapades.agent` with an env mix the multi-signal detector classifies `INCONSISTENT`; asserts non-zero exit and `SandboxConfigurationError` + `refusing to start` on stderr, before any config load or I/O. |
 | Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_honours_yaml_deployment_override` — custom YAML via `NEMOCLAW_CONFIG_PATH` directs the sub-agent's workspace root without a rebuild; asserts the per-agent subdir lands under the YAML-supplied path. |
-| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — (a) NMB wire-level transport covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent-side connect / close wiring (reads broker URL + sandbox id from `config.nmb`, calls `connect_with_retry`, closes on shutdown) covered by `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body awaits Phase 2 |
+| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — (a) NMB wire-level transport covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent-side connect / close wiring (reads broker URL + sandbox id from `config.nmb`, calls `connect_with_retry`, closes on shutdown) covered by `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body awaits Phase 3 |
 | Coding agent end-to-end | Agent receives task, uses file tools, returns diff | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call` — subprocess + stateful OpenAI-format mock serves a `write_file` tool_call then a terminating reply; assertions: file lands on disk inside the per-agent workspace, final reply reaches stdout. |
-| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ⏳ Pending (Phase 2) |
-| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ⏳ Pending (Phase 2) |
-| Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] | ⏳ Pending (Phase 2) |
-| Iteration flow | User feedback → `re_delegate` → same agent → updated result | ⏳ Pending (Phase 2) |
-| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ⏳ Pending (Phase 2) |
-| NMB at-least-once delivery | Kill broker after persist, restart, verify replay | ⏳ Pending (Phase 3) |
-| Audit NMB flush + fallback | Tool calls arrive via NMB batch and/or JSONL fallback | ⏳ Pending (Phase 2) |
-| TTL watchdog | Watchdog fires → sub-agent process killed → workspace cleaned | ⏳ Pending (Phase 4) |
+| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ⏳ Pending (Phase 3) |
+| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ⏳ Pending (Phase 3) |
+| Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] | ⏳ Pending (Phase 3) |
+| Iteration flow | User feedback → `re_delegate` → same agent → updated result | ⏳ Pending (Phase 3) |
+| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ⏳ Pending (Phase 3) |
+| NMB at-least-once delivery | Kill broker after persist, restart, verify replay | ⏳ Pending (Phase 4) |
+| Audit NMB flush + fallback | Tool calls arrive via NMB batch and/or JSONL fallback | ⏳ Pending (Phase 3) |
+| TTL watchdog | Watchdog fires → sub-agent process killed → workspace cleaned | ⏳ Pending (Phase 5) |
 
 ### 16.3 Safety Tests
 
 | Test | What it verifies | Status |
 |------|-----------------|--------|
-| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | 🟡 Partial — Phase 1 enforces by *construction*: `create_coding_tool_registry` deliberately omits `git_commit` (orchestrator-only, per §7.1), so the sub-agent's `ToolRegistry` has no entry the model could invoke.  Covered by `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit` and `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Phase 2 will add a runtime allow-list check for the broader "tool_surface"-as-policy story (e.g. orchestrator-granted per-task tool restrictions). |
+| Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | 🟡 Partial — Phase 1 enforces by *construction*: `create_coding_tool_registry` deliberately omits `git_commit` (orchestrator-only, per §7.1), so the sub-agent's `ToolRegistry` has no entry the model could invoke.  Covered by `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit` and `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Phase 3 will add a runtime allow-list check for the broader "tool_surface"-as-policy story (e.g. orchestrator-granted per-task tool restrictions). |
 | Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` | ✅ `tests/test_file_tools.py::TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `::test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` (M2a) |
-| No recursive delegation | Coding agent cannot spawn sub-agents | ⏳ Pending (Phase 2) |
-| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 2) |
+| No recursive delegation | Coding agent cannot spawn sub-agents | ⏳ Pending (Phase 3) |
+| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 3) |
 
 ---
 
