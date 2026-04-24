@@ -36,12 +36,12 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_SANDBOX_ID",
     ):
         monkeypatch.delenv(key, raising=False)
-    # Populate required secrets so ``AppConfig.load`` passes validation.
-    # ``inference.base_url`` flows through the default YAML overlay —
-    # no env-var hook needed here (or anywhere in the runtime path).
+    # Populate Slack secrets so ``AppConfig.load`` passes validation.
+    # ``inference.base_url`` flows through the default YAML overlay,
+    # and ``INFERENCE_HUB_API_KEY`` is deliberately not required (the
+    # sandbox L7 proxy handles auth under a different credential name).
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
 
 
 # ── Arg parsing ─────────────────────────────────────────────────────

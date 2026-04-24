@@ -86,10 +86,14 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _set_required_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Populate the secrets ``_check_required_config`` insists on."""
+    """Populate the secrets ``_check_required_config`` insists on.
+
+    ``INFERENCE_HUB_API_KEY`` is deliberately absent — the sandbox
+    never sees it (the L7 proxy handles auth via a separately-named
+    ``OPENAI_API_KEY`` credential) and the loader doesn't require it.
+    """
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
 
 
 # ── Dataclass defaults ──────────────────────────────────────────────
@@ -485,14 +489,14 @@ class TestSecretEnvOverrides:
 class TestDotenvLoader:
     """``load_dotenv_if_present`` wires ``.env`` into ``os.environ``.
 
-    Regression: running ``python -m nemoclaw_escapades{,.agent}``
-    directly (outside ``make run-local-dev``) used to fail with
-    "Missing required environment variables: INFERENCE_HUB_API_KEY /
-    SLACK_BOT_TOKEN" because the entrypoints read ``os.environ``
-    without first loading the operator's ``.env``.  The helper's
-    job is to close that gap on the entrypoint side without changing
-    the test-friendly ``AppConfig.load`` (tests control their env
-    explicitly via ``monkeypatch``).
+    Regression: host-side tooling (``scripts/gen_config.py``,
+    ``scripts/gen_policy.py``, ``make run-broker``) used to fail with
+    "Missing required environment variables: ..." because the
+    entrypoints read ``os.environ`` without first loading the
+    operator's ``.env``.  The helper closes that gap on the
+    entrypoint side without changing the test-friendly
+    ``AppConfig.load`` — tests control their env explicitly via
+    ``monkeypatch``.
     """
 
     def test_loads_env_file_from_cwd(
@@ -558,22 +562,31 @@ class TestSecretValidation:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
         with pytest.raises(ValueError, match="SLACK_BOT_TOKEN"):
             AppConfig.load()
 
-    def test_missing_inference_key_raises(
+    def test_missing_inference_api_key_is_accepted(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The API key is always required — in the sandbox it's the
-        L7-proxy placeholder string, which the gateway always injects.
-        Missing it means the gateway is misconfigured."""
+        """``INFERENCE_HUB_API_KEY`` is deliberately **not** required.
+
+        In the sandbox the inference provider is registered under a
+        different credential name (``OPENAI_API_KEY``, see the
+        Makefile's ``setup-providers``) and the L7 proxy at
+        ``inference.local`` injects the real key at HTTP-request
+        time.  The app never reads an API key — ``InferenceHubBackend``
+        omits the ``Authorization`` header when
+        ``config.inference.api_key`` is empty — so requiring one would
+        crash every sandbox startup with a false-positive.
+        Regression guard against reintroducing that check.
+        """
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
         monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
         monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="INFERENCE_HUB_API_KEY"):
-            AppConfig.load()
+        # Must not raise.
+        config = AppConfig.load()
+        assert config.inference.api_key == ""
 
     def test_inference_base_url_comes_from_yaml_default(
         self,
@@ -617,30 +630,30 @@ class TestSecretValidation:
         so requiring ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its
         startup path makes ``python -m nemoclaw_escapades.agent
         --task ...`` fail on any machine whose ``.env`` isn't fully
-        configured for the orchestrator.  ``AppConfig.load(require_slack=False)``
-        opts out of that check while keeping the inference-secret
-        validation untouched.
+        configured for the orchestrator.
         """
-        # Inference secrets present; Slack ones deliberately absent.
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
         # Must not raise.
         config = AppConfig.load(require_slack=False)
         assert config.slack.bot_token == ""
         assert config.slack.app_token == ""
-        assert config.inference.api_key == "k"
 
-    def test_sub_agent_path_still_validates_inference(
+    def test_sub_agent_path_still_validates_base_url(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
-        """``require_slack=False`` is about *Slack only* — inference
-        is still required.  Regression guard so a future edit doesn't
+        """``require_slack=False`` is about *Slack only* — the
+        ``inference.base_url`` YAML fail-fast still applies so a
+        malformed per-deployment YAML surfaces at startup for the
+        sub-agent too.  Regression guard so a future edit doesn't
         accidentally broaden the opt-out.
         """
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="INFERENCE_HUB"):
+        yaml_path = tmp_path / "blank.yaml"
+        yaml_path.write_text("inference:\n  base_url: ''\n")
+        monkeypatch.setenv("NEMOCLAW_CONFIG_PATH", str(yaml_path))
+        with pytest.raises(ValueError, match="inference.base_url"):
             AppConfig.load(require_slack=False)
