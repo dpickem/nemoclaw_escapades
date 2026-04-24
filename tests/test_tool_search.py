@@ -1,6 +1,6 @@
 """Tests for the ``tool_search`` meta-tool and the registry's surface state.
 
-Covers the mechanism half of M2b §14 Phase 2:
+Covers M2b §14 Phase 2:
 
 - ``ToolSpec.is_core`` defaults to ``True`` (back-compat with every
   existing tool module).
@@ -10,10 +10,10 @@ Covers the mechanism half of M2b §14 Phase 2:
   toolset / description) using ``difflib`` fuzzy matching.
 - ``tool_search`` marks matches as surfaced and returns a JSON payload
   the model can use to invoke them.
-
-Integration-level tests (factory wiring, service tools flipped
-non-core) live in a follow-up commit alongside the factory / service
-edits they validate.
+- Orchestrator's service tool modules declare ``is_core=False`` at
+  each ``@tool`` site; coding-agent tool modules leave the default
+  ``is_core=True`` intact so the full coding surface stays in the
+  prompt.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec, tool
+from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 from nemoclaw_escapades.tools.tool_search import register_tool_search_tool
 
 
@@ -264,3 +265,122 @@ class TestToolSearchTool:
         payload = json.loads(raw)
         assert payload["matches"] == []
         assert registry.surfaced_non_core == frozenset()
+
+
+class TestCodingToolRegistryRegistersToolSearch:
+    """Sub-agent factory wires ``tool_search`` even though its surface is core-only."""
+
+    def test_coding_registry_has_tool_search(self, tmp_path) -> None:
+        registry = create_coding_tool_registry(str(tmp_path))
+        assert "tool_search" in registry
+        assert registry.get("tool_search").is_core is True
+
+    def test_coding_registry_has_no_non_core_tools_by_default(
+        self, tmp_path
+    ) -> None:
+        # Coding sub-agent's full surface is deliberately core: file /
+        # search / bash / git are used every turn.  ``tool_search``
+        # rides along for future-compat but finds nothing today.
+        registry = create_coding_tool_registry(str(tmp_path))
+        assert registry.non_core_names == []
+
+
+class TestFullToolRegistryIntegration:
+    """End-to-end: ``build_full_tool_registry`` + ``tool_search`` cycle."""
+
+    def _config_with_jira(self, workspace_root: str) -> Any:
+        """Minimal ``AppConfig`` with Jira configured and other services off.
+
+        Trims the integration surface to one service so the test
+        doesn't depend on every service tool's registration quirks.
+        """
+        from nemoclaw_escapades.config import AppConfig
+
+        config = AppConfig()
+        config.coding.workspace_root = workspace_root
+        # Configured Jira (auth header present) → tools register.
+        config.jira.url = "https://jirasw.example.com"
+        config.jira.auth_header = "Basic dGVzdDp0ZXN0"
+        # Disable every other service so the surface stays small and
+        # the ``tool_search``-surfaces-Jira assertion below is precise.
+        config.gitlab.enabled = False
+        config.gerrit.enabled = False
+        config.confluence.enabled = False
+        config.slack_search.enabled = False
+        config.web_search.enabled = False
+        return config
+
+    @pytest.mark.asyncio
+    async def test_service_tools_are_non_core_after_factory(
+        self,
+        tmp_path,
+    ) -> None:
+        from nemoclaw_escapades.tools.tool_registry_factory import (
+            build_full_tool_registry,
+        )
+
+        config = self._config_with_jira(str(tmp_path))
+        registry = build_full_tool_registry(config)
+
+        # Jira tools registered and flagged non-core at their @tool sites.
+        assert registry.names_in_toolset("jira"), "Jira tools should be registered"
+        assert all(
+            not registry.get(name).is_core for name in registry.names_in_toolset("jira")
+        )
+
+        # Default tool list is coding + tool_search — no Jira yet.
+        default_names = {d.function.name for d in registry.tool_definitions()}
+        assert "tool_search" in default_names
+        for jira_name in registry.names_in_toolset("jira"):
+            assert jira_name not in default_names
+
+    @pytest.mark.asyncio
+    async def test_tool_search_surfaces_service_tools_end_to_end(
+        self,
+        tmp_path,
+    ) -> None:
+        """Full cycle: agent calls ``tool_search('jira')`` → sees Jira tools."""
+        from nemoclaw_escapades.tools.tool_registry_factory import (
+            build_full_tool_registry,
+        )
+
+        config = self._config_with_jira(str(tmp_path))
+        registry = build_full_tool_registry(config)
+
+        before = {d.function.name for d in registry.tool_definitions()}
+        raw = await registry.execute("tool_search", json.dumps({"query": "jira"}))
+        after = {d.function.name for d in registry.tool_definitions()}
+        payload = json.loads(raw)
+
+        surfaced_names = {m["name"] for m in payload["matches"]}
+        assert surfaced_names, "tool_search should surface at least one Jira tool"
+
+        # Every surfaced tool now appears in the inference-round tools list.
+        assert surfaced_names.issubset(after)
+        # And none of them were in the pre-search default list.
+        assert not surfaced_names.intersection(before)
+
+    @pytest.mark.asyncio
+    async def test_default_prompt_surface_shrinks(self, tmp_path) -> None:
+        """Regression: core-only surface is a strict subset of full surface.
+
+        Concrete token count comparisons are brittle across model
+        tokenisers, so we assert the structural invariant that makes
+        the 40%+ reduction possible: the default tool list is strictly
+        smaller than the full tool list when any service is enabled.
+        """
+        from nemoclaw_escapades.tools.tool_registry_factory import (
+            build_full_tool_registry,
+        )
+
+        config = self._config_with_jira(str(tmp_path))
+        registry = build_full_tool_registry(config)
+
+        core_count = len(registry.tool_definitions())
+        full_count = core_count + len(registry.non_core_names)
+        # At least the Jira tools + tool_search vs. just tool_search + coding.
+        assert full_count > core_count
+        # And the ratio confirms the reduction is meaningful — Jira
+        # alone adds several tools, so core-only comes in well under
+        # the full surface.
+        assert core_count < full_count * 0.75

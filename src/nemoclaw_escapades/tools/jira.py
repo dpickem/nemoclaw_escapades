@@ -374,6 +374,7 @@ def _make_jira_get_issue(client: JiraClient) -> ToolSpec:
         },
         display_name="Getting Jira issue",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def jira_get_issue(issue_key: str) -> str:
         """Fetch a Jira issue by key."""
@@ -405,6 +406,7 @@ def _make_jira_search(client: JiraClient) -> ToolSpec:
         },
         display_name="Searching Jira",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def jira_search(jql: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Search Jira issues using JQL."""
@@ -422,6 +424,7 @@ def _make_jira_me(client: JiraClient) -> ToolSpec:
         {"type": "object", "properties": {}},
         display_name="Checking Jira profile",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def jira_me() -> str:
         """Get the authenticated user's Jira profile."""
@@ -445,6 +448,7 @@ def _make_jira_get_transitions(client: JiraClient) -> ToolSpec:
         },
         display_name="Getting issue transitions",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def jira_get_transitions(issue_key: str) -> str:
         """Get available status transitions for a Jira issue."""
@@ -508,6 +512,7 @@ def _make_jira_create_issue(client: JiraClient) -> ToolSpec:
         },
         display_name="Creating Jira issue",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def jira_create_issue(
@@ -594,6 +599,7 @@ def _make_jira_update_issue(client: JiraClient) -> ToolSpec:
         },
         display_name="Updating Jira issue",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def jira_update_issue(
@@ -641,6 +647,7 @@ def _make_jira_add_comment(client: JiraClient) -> ToolSpec:
         },
         display_name="Adding Jira comment",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def jira_add_comment(issue_key: str, body: str) -> str:
@@ -673,6 +680,7 @@ def _make_jira_transition_issue(client: JiraClient) -> ToolSpec:
         },
         display_name="Transitioning Jira issue",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def jira_transition_issue(issue_key: str, transition_id: str, comment: str = "") -> str:

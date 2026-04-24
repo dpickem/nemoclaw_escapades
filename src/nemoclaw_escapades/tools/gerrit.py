@@ -272,6 +272,7 @@ def _make_gerrit_get_change(client: GerritClient) -> ToolSpec:
         },
         display_name="Getting Gerrit change",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_get_change(change_id: str) -> str:
         """Get details of a Gerrit change."""
@@ -296,6 +297,7 @@ def _make_gerrit_list_changes(client: GerritClient) -> ToolSpec:
         },
         display_name="Searching Gerrit changes",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_list_changes(query: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Search Gerrit changes using a query string."""
@@ -319,6 +321,7 @@ def _make_gerrit_get_change_detail(client: GerritClient) -> ToolSpec:
         },
         display_name="Getting change detail",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_get_change_detail(change_id: str) -> str:
         """Get detailed information about a Gerrit change."""
@@ -342,6 +345,7 @@ def _make_gerrit_get_comments(client: GerritClient) -> ToolSpec:
         },
         display_name="Getting Gerrit comments",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_get_comments(change_id: str) -> str:
         """Get all comments on a Gerrit change."""
@@ -370,6 +374,7 @@ def _make_gerrit_list_files(client: GerritClient) -> ToolSpec:
         },
         display_name="Listing changed files",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_list_files(change_id: str, revision: str = "current") -> str:
         """List files modified in a Gerrit change."""
@@ -399,6 +404,7 @@ def _make_gerrit_get_diff(client: GerritClient) -> ToolSpec:
         },
         display_name="Getting file diff",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_get_diff(change_id: str, file_path: str, revision: str = "current") -> str:
         """Get the diff for a specific file in a Gerrit change."""
@@ -416,6 +422,7 @@ def _make_gerrit_me(client: GerritClient) -> ToolSpec:
         {"type": "object", "properties": {}},
         display_name="Checking Gerrit profile",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gerrit_me() -> str:
         """Get the authenticated Gerrit user's account info."""
@@ -452,6 +459,7 @@ def _make_gerrit_set_review(client: GerritClient) -> ToolSpec:
         },
         display_name="Posting Gerrit review",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gerrit_set_review(
@@ -488,6 +496,7 @@ def _make_gerrit_submit(client: GerritClient) -> ToolSpec:
         },
         display_name="Submitting Gerrit change",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gerrit_submit(change_id: str) -> str:
@@ -513,6 +522,7 @@ def _make_gerrit_abandon(client: GerritClient) -> ToolSpec:
         },
         display_name="Abandoning Gerrit change",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gerrit_abandon(change_id: str, message: str = "") -> str:

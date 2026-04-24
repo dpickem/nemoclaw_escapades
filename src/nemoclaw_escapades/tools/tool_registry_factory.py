@@ -34,6 +34,7 @@ from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.search import register_search_tools
 from nemoclaw_escapades.tools.skill import register_skill_tool
 from nemoclaw_escapades.tools.slack_search import register_slack_search_tools
+from nemoclaw_escapades.tools.tool_search import register_tool_search_tool
 from nemoclaw_escapades.tools.web_search import register_web_search_tools
 
 if TYPE_CHECKING:
@@ -92,6 +93,13 @@ def create_coding_tool_registry(
     )
     if skill_loader is not None:
         register_skill_tool(registry, skill_loader)
+
+    # ``tool_search`` rides along even though the sub-agent's current
+    # surface is entirely core.  Registering it now means the moment
+    # someone adds a non-core tool to the coding registry (e.g. a
+    # tightly-scoped enterprise tool for a particular sub-agent role)
+    # the discovery path exists without a second migration.
+    register_tool_search_tool(registry)
     return registry
 
 
@@ -153,6 +161,12 @@ def build_full_tool_registry(
     # skills, so it's safe to call whenever a loader is supplied.
     if skill_loader is not None:
         register_skill_tool(registry, skill_loader)
+
+    # ``tool_search`` itself stays core — it's how the model reaches
+    # the non-core service tools in the first place.  Each service
+    # module tags its own ``@tool`` definitions with ``is_core=False``
+    # so the factory doesn't need to know which toolsets are non-core.
+    register_tool_search_tool(registry)
 
     return registry
 

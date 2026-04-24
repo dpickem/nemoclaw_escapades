@@ -769,6 +769,7 @@ def _make_gitlab_search_projects(client: GitLabClient) -> ToolSpec:
         },
         display_name="Searching GitLab projects",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_search_projects(query: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Search GitLab projects by name, path, or description."""
@@ -795,6 +796,7 @@ def _make_gitlab_get_project(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting GitLab project",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_project(project_id: str) -> str:
         """Fetch a GitLab project by numeric ID or path."""
@@ -824,6 +826,7 @@ def _make_gitlab_list_merge_requests(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing merge requests",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_merge_requests(
         project_id: str, state: str = "opened", limit: int = _DEFAULT_PER_PAGE
@@ -850,6 +853,7 @@ def _make_gitlab_get_merge_request(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting merge request",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_merge_request(project_id: str, mr_iid: int) -> str:
         """Fetch full details of a single merge request."""
@@ -874,6 +878,7 @@ def _make_gitlab_get_merge_request_changes(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting MR changes",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_merge_request_changes(project_id: str, mr_iid: int) -> str:
         """Fetch the file-level diffs of a merge request."""
@@ -898,6 +903,7 @@ def _make_gitlab_list_pipelines(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing pipelines",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_pipelines(project_id: str, limit: int = _DEFAULT_PER_PAGE) -> str:
         """List CI/CD pipelines for a project, newest first."""
@@ -922,6 +928,7 @@ def _make_gitlab_get_pipeline(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting pipeline details",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_pipeline(project_id: str, pipeline_id: int) -> str:
         """Fetch details of a specific CI/CD pipeline."""
@@ -946,6 +953,7 @@ def _make_gitlab_get_job_log(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting job log",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_job_log(project_id: str, job_id: int) -> str:
         """Fetch the raw trace log of a CI/CD job."""
@@ -970,6 +978,7 @@ def _make_gitlab_list_pipeline_jobs(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing pipeline jobs",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_pipeline_jobs(project_id: str, pipeline_id: int) -> str:
         """List jobs belonging to a CI/CD pipeline."""
@@ -1005,6 +1014,7 @@ def _make_gitlab_get_file(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting file from GitLab",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_file(project_id: str, file_path: str, ref: str = "main") -> str:
         """Fetch a file from a GitLab repository."""
@@ -1038,6 +1048,7 @@ def _make_gitlab_list_mr_notes(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing MR comments",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_mr_notes(
         project_id: str, mr_iid: int, sort: str = "asc", limit: int = _DEFAULT_PER_PAGE
@@ -1069,6 +1080,7 @@ def _make_gitlab_list_mr_discussions(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing MR discussions",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_mr_discussions(
         project_id: str, mr_iid: int, limit: int = _DEFAULT_PER_PAGE
@@ -1095,6 +1107,7 @@ def _make_gitlab_get_mr_approvals(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting MR approvals",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_mr_approvals(project_id: str, mr_iid: int) -> str:
         """Fetch the approval state of a merge request."""
@@ -1124,6 +1137,7 @@ def _make_gitlab_list_branches(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing branches",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_branches(
         project_id: str, search: str = "", limit: int = _DEFAULT_PER_PAGE
@@ -1155,6 +1169,7 @@ def _make_gitlab_list_commits(client: GitLabClient) -> ToolSpec:
         },
         display_name="Listing commits",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_list_commits(
         project_id: str, ref: str = "main", limit: int = _DEFAULT_PER_PAGE
@@ -1181,6 +1196,7 @@ def _make_gitlab_get_commit(client: GitLabClient) -> ToolSpec:
         },
         display_name="Getting commit details",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_get_commit(project_id: str, sha: str) -> str:
         """Fetch details of a specific commit."""
@@ -1215,6 +1231,7 @@ def _make_gitlab_compare(client: GitLabClient) -> ToolSpec:
         },
         display_name="Comparing refs",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_compare(project_id: str, from_ref: str, to_ref: str) -> str:
         """Compare two branches, tags, or commits."""
@@ -1232,6 +1249,7 @@ def _make_gitlab_me(client: GitLabClient) -> ToolSpec:
         {"type": "object", "properties": {}},
         display_name="Checking GitLab profile",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def gitlab_me() -> str:
         """Fetch the authenticated GitLab user's profile."""
@@ -1260,6 +1278,7 @@ def _make_gitlab_create_mr_note(client: GitLabClient) -> ToolSpec:
         },
         display_name="Commenting on merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_create_mr_note(project_id: str, mr_iid: int, body: str) -> str:
@@ -1287,6 +1306,7 @@ def _make_gitlab_update_mr_note(client: GitLabClient) -> ToolSpec:
         },
         display_name="Editing MR comment",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_update_mr_note(project_id: str, mr_iid: int, note_id: int, body: str) -> str:
@@ -1320,6 +1340,7 @@ def _make_gitlab_reply_to_discussion(client: GitLabClient) -> ToolSpec:
         },
         display_name="Replying to MR discussion",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_reply_to_discussion(
@@ -1359,6 +1380,7 @@ def _make_gitlab_resolve_discussion(client: GitLabClient) -> ToolSpec:
         },
         display_name="Resolving MR discussion",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_resolve_discussion(
@@ -1386,6 +1408,7 @@ def _make_gitlab_approve_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Approving merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_approve_mr(project_id: str, mr_iid: int) -> str:
@@ -1411,6 +1434,7 @@ def _make_gitlab_unapprove_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Removing MR approval",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_unapprove_mr(project_id: str, mr_iid: int) -> str:
@@ -1453,6 +1477,7 @@ def _make_gitlab_merge_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Merging merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_merge_mr(
@@ -1492,6 +1517,7 @@ def _make_gitlab_rebase_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Rebasing merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_rebase_mr(project_id: str, mr_iid: int) -> str:
@@ -1540,6 +1566,7 @@ def _make_gitlab_update_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Updating merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_update_mr(
@@ -1598,6 +1625,7 @@ def _make_gitlab_create_mr(client: GitLabClient) -> ToolSpec:
         },
         display_name="Creating merge request",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def gitlab_create_mr(
