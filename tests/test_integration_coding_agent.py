@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import ssl
 import subprocess
 import sys
 import threading
@@ -37,6 +36,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import certifi
 import pytest
 
 _CANNED_REPLY = "hello from the mock inference server"
@@ -243,9 +243,14 @@ def _clean_subprocess_env(
     We lower the signal threshold to ``3`` via
     ``NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD`` so the classifier still
     runs against real signals; prod behaviour is unaffected (the env
-    var is only set here).  ``SSL_CERT_FILE`` points at the Python
-    runtime's default CA bundle so httpx's client init (which parses
-    the file at constructor time) doesn't blow up.
+    var is only set here).  ``SSL_CERT_FILE`` points at certifi's CA
+    bundle so httpx's client init (which parses the file at
+    constructor time) doesn't blow up.  ``certifi.where()`` always
+    returns a path to a real file that ships with the certifi
+    package; ``ssl.get_default_verify_paths().cafile`` can legally be
+    ``None`` on platforms where OpenSSL's compiled-in default path
+    doesn't exist on disk, which would crash ``subprocess.run``
+    (env values must be strings).
 
     Non-secret config flows through the YAML at *yaml_path* via
     ``NEMOCLAW_CONFIG_PATH``; env vars here hold secrets and
@@ -260,7 +265,7 @@ def _clean_subprocess_env(
         "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD": "3",
         "OPENSHELL_SANDBOX": "1",
         "HTTPS_PROXY": "http://openshell-proxy.invalid:3128",
-        "SSL_CERT_FILE": ssl.get_default_verify_paths().cafile,
+        "SSL_CERT_FILE": certifi.where(),
     }
 
 
