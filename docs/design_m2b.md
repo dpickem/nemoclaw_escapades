@@ -1220,7 +1220,7 @@ review thread on PR #13 in a single focused branch:
 - Added docstring and commit-message verbosity caps to `CONTRIBUTING.md`.
 - `make lint` and `make typecheck` are now clean on this branch.
 
-### Phase 2 — Orchestrator delegation, NMB event loop, concurrency caps, and finalization
+### Phase 2 — Orchestrator delegation, NMB event loop, concurrency caps, finalization, and `ToolSearch`
 
 | Task | Files | Status |
 |------|-------|--------|
@@ -1232,10 +1232,24 @@ review thread on PR #13 in a single focused branch:
 | Implement finalization tools (`present_work_to_user`, `push_and_create_pr`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py` | ⏳ Pending |
 | Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `orchestrator/orchestrator.py` | ⏳ Pending |
 | Implement `AuditBuffer` with NMB-batched flush + JSONL fallback | `agent/audit_buffer.py` | ⏳ Pending |
+| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
+| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
 | Integration test: orchestrator → coding agent → result → finalize | `tests/integration/test_delegation.py` | ⏳ Pending |
+| Tests for `ToolSearch` | `tests/test_tool_search.py` | ⏳ Pending |
 
-**Exit criteria:** Orchestrator delegates coding tasks, collects results, runs
-finalization. Concurrency caps enforced. Audit flush works via NMB and fallback.
+**Pulled in from Phase 4.**  `ToolSearch` moved forward because tool
+descriptions are already consuming 90%+ of the prompt on real runs,
+drowning out the user message and leaving no headroom for delegation
+/ finalization tools.  We can't safely grow the tool surface for
+Phase 2 (`delegate_task`, `present_work_to_user`, `push_and_create_pr`,
+`discard_work`, `re_delegate`, `destroy_sandbox`) until the meta-tool
+is in place.
+
+**Exit criteria:** Orchestrator delegates coding tasks, collects
+results, runs finalization. Concurrency caps enforced. Audit flush
+works via NMB and fallback. Non-core tools are discoverable via
+`ToolSearch` and excluded from the default prompt; prompt tokens
+decrease 40%+ with enterprise tools enabled.
 
 ### Phase 3 — At-least-once NMB delivery
 
@@ -1248,18 +1262,18 @@ finalization. Concurrency caps enforced. Audit flush works via NMB and fallback.
 **Exit criteria:** Critical messages (`task.complete`, `audit.flush`) survive
 broker crashes and are replayed on restart.
 
-### Phase 4 — `ToolSearch` meta-tool + basic cron
+### Phase 4 — Basic operational cron
 
 | Task | Files | Status |
 |------|-------|--------|
-| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
-| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
 | Implement `CronWorker` with hardcoded operational jobs | `orchestrator/cron.py` | ⏳ Pending |
 | Implement TTL watchdog, stale-session cleanup, health check jobs | `orchestrator/cron.py` | ⏳ Pending |
-| Tests for `ToolSearch`, cron execution | `tests/test_tool_search.py`, `tests/test_cron.py` | ⏳ Pending |
+| Tests for cron execution | `tests/test_cron.py` | ⏳ Pending |
 
-**Exit criteria:** Non-core tools discoverable via `ToolSearch`. Prompt tokens
-decrease 40%+ with enterprise tools. Operational cron jobs run on schedule.
+**Exit criteria:** Operational cron jobs run on schedule.
+
+> `ToolSearch` was originally scoped here but has been pulled into
+> Phase 2 — see that phase's "Pulled in from Phase 4" note.
 
 ### Phase 5 — Polish, hardening, and gaps document
 
@@ -1302,7 +1316,7 @@ progress reporting, and robust handling.
 | Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 2) |
 | NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 3) |
 | NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 3) |
-| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ⏳ Pending (Phase 4) |
+| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ⏳ Pending (Phase 2) |
 | Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 2) |
 | Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 4) |
 
