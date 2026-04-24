@@ -1156,29 +1156,50 @@ rendering (thinking indicator, step count, current tool).
 | Create coding agent system prompt template | `prompts/coding_agent.md` | ✅ |
 | End-to-end test: agent process starts, handles task, returns result | `tests/test_integration_coding_agent.py`, `tests/test_coding_agent_main.py` | ✅ subprocess-level: `tests/test_integration_coding_agent.py` spawns `python -m nemoclaw_escapades.agent --task ...` against a local OpenAI-format mock and asserts the assistant reply reaches stdout.  Function-level: `tests/test_coding_agent_main.py::TestCliMode` covers the same assembly path with a fake `AgentLoop`; `::TestNmbMode` smoke-tests the NMB wiring (receive-loop body itself is Phase 2). |
 
-**Exit criteria (all met as of PR #14 merge):**
+**Exit criteria (met as of PR #14 merge):**
 
-- `config.py` contains no internal NVIDIA hostnames; `git grep nvidia.com src/`
-  returns no matches outside of docstrings and tool URL defaults.
-- `make gen-config` with an empty `.env` produces a resolved file whose
-  category-B fields all hold fail-closed values.
-- `make gen-config` with a populated `.env` produces a resolved file whose
-  `coding.git_clone_allowed_hosts` matches the operator's `.env` value.
-- `gen_config.py` refuses to write any key whose `.env` name matches the
-  secret-suffix list (`*_TOKEN`, `*_AUTH`, `*_PASSWORD`, `*_KEY`).
-- `AppConfig.load()` reads dataclass defaults → YAML overlay → secret env
-  vars with the documented precedence.
-- `make run-local-sandbox` succeeds on a fresh sandbox; the startup log
-  shows `classification: SANDBOX` with at least 4 of 6 signals present.
-- A broken sandbox (e.g. `OPENSHELL_SANDBOX` manually unset) fails fast
-  with a structured `SandboxConfigurationError`.  There is no
-  "local-dev fallback" to revert to — sandbox is the only supported
-  runtime.
-- Coding agent process starts, connects to NMB, receives `task.assign`,
-  runs the M2a `AgentLoop` with the coding tool suite (file / search /
-  bash / git — the latter includes the host-allowlisted `git_clone`
-  and `git_checkout`) and the `SkillLoader`-discovered `skill` tool,
-  sends `task.complete`.
+- ✅ `config.py` contains no internal NVIDIA hostnames;
+  `git grep nvidia.com src/` returns the single public SaaS URL
+  (`jirasw.nvidia.com`) allowed by the carve-out.  Enforced by
+  `tests/test_gen_config.py::TestNoHostnameLeak` +
+  `tests/test_gen_policy.py::TestNoHostnameLeak`.
+- ✅ `make gen-config` with an empty `.env` produces a resolved file
+  whose category-B fields all hold fail-closed values
+  (`tests/test_gen_config.py::TestResolverHappyPath`,
+  `::TestFullyResolvedConfig`).
+- ✅ `make gen-config` with a populated `.env` produces a resolved
+  file whose `coding.git_clone_allowed_hosts` matches the operator's
+  `.env` value (`tests/test_gen_config.py::TestResolverHappyPath`).
+- ✅ `gen_config.py` refuses to write any key whose `.env` name
+  matches the secret-suffix list (`*_TOKEN`, `*_AUTH`, `*_PASSWORD`,
+  `*_KEY`) (`tests/test_gen_config.py::TestSecretGuard`).
+- ✅ `AppConfig.load()` reads dataclass defaults → YAML overlay →
+  secret env vars with the documented precedence
+  (`tests/test_config.py::{TestYamlOverlay, TestYamlPrecedence,
+  TestSecretEnvOverrides, TestSecretValidation,
+  TestInferenceModelPropagation}`).
+- ✅ `make run-local-sandbox` succeeds on a fresh sandbox; the
+  startup log shows `classification: SANDBOX` with at least 4 of 6
+  signals present.  Classifier logic is fully unit-tested
+  (`tests/test_runtime.py::TestClassification`); the boot itself is
+  manual smoke by design (a real OpenShell gateway is required — see
+  §15.2 happy-path row).
+- ✅ A broken sandbox (e.g. `OPENSHELL_SANDBOX` manually unset) fails
+  fast with a structured `SandboxConfigurationError`
+  (`tests/test_integration_coding_agent.py::test_agent_subprocess_inconsistent_runtime_fails_fast`,
+  `tests/test_runtime.py::TestSandboxConfigurationError`).  There is
+  no "local-dev fallback" to revert to — sandbox is the only
+  supported runtime.
+- ✅ Coding agent process starts and runs the M2a `AgentLoop` with
+  the coding tool suite (file / search / bash / git — the latter
+  includes the host-allowlisted `git_clone` and `git_checkout`) and
+  the `SkillLoader`-discovered `skill` tool
+  (`tests/test_coding_agent_main.py::TestCliMode::test_real_cli_mode_assembles_loop_and_runs`,
+  `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call`).
+  NMB connect / close wiring also in place
+  (`tests/test_coding_agent_main.py::TestNmbMode`).  The
+  `task.assign` → `task.complete` protocol body itself is Phase 2 —
+  see that phase's exit criteria.
 
 **Phase 1 Follow-ups (PR #14 — merged).**  Addressed every unresolved
 review thread on PR #13 in a single focused branch:
