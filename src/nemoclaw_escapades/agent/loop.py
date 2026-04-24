@@ -212,8 +212,11 @@ class AgentLoop:
             WriteApprovalError: When a write tool is blocked by the
                 approval gate.
         """
-        # Snapshot tool definitions once — they don't change within a run.
-        tool_defs = self._tools.tool_definitions()
+        # Fresh task: forget any non-core tools the previous task's
+        # ``tool_search`` calls surfaced.  Registration-time state
+        # (core vs. non-core) is unchanged; this just clears the
+        # per-run bucket the registry uses to gate ``tool_definitions``.
+        self._tools.reset_surface()
 
         # Shallow-copy so callers' original list is never mutated.
         # We append assistant/tool messages to this as the loop progresses.
@@ -235,6 +238,12 @@ class AgentLoop:
             # inference call and session-roll.
             if self._compactor.should_compact(working_messages):
                 working_messages = await self._compactor.compact(working_messages, request_id)
+
+            # Refresh tool definitions every round: ``tool_search`` may
+            # have surfaced additional non-core tools in the previous
+            # round, and those need to appear in this round's ``tools``
+            # list before the model can invoke them.
+            tool_defs = self._tools.tool_definitions()
 
             inference_request = InferenceRequest(
                 messages=working_messages,
