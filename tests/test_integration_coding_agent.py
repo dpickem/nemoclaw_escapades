@@ -36,8 +36,8 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import certifi
 import pytest
-
 
 _CANNED_REPLY = "hello from the mock inference server"
 
@@ -164,9 +164,7 @@ def _start_mock_server(
     responses: list[dict[str, object]],
 ) -> tuple[_ScriptedMockServer, threading.Thread]:
     """Bind the mock to a kernel-picked free port and serve in a thread."""
-    server = _ScriptedMockServer(
-        ("127.0.0.1", 0), _ScriptedMockHandler, responses=responses
-    )
+    server = _ScriptedMockServer(("127.0.0.1", 0), _ScriptedMockHandler, responses=responses)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -197,9 +195,34 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _clean_subprocess_env(
+def _write_subprocess_yaml(
+    yaml_path: Path,
+    *,
     mock_inference_url: str,
     workspace: Path,
+    skills_dir: Path,
+) -> None:
+    """Write a YAML config file for the subprocess's ``NEMOCLAW_CONFIG_PATH``.
+
+    After the M2b P1 config-SSOT refactor (GAPS §16), non-secret
+    knobs flow through YAML only.  The helper writes everything the
+    sub-agent needs into a single file that the subprocess loads via
+    ``NEMOCLAW_CONFIG_PATH``.
+    """
+    yaml_path.write_text(
+        "inference:\n"
+        f"  base_url: {mock_inference_url}\n"
+        "  timeout_s: 5\n"
+        "  max_retries: 1\n"
+        "coding:\n"
+        f"  workspace_root: {workspace}\n"
+        "skills:\n"
+        f"  skills_dir: {skills_dir}\n"
+    )
+
+
+def _clean_subprocess_env(
+    yaml_path: Path,
     home: Path,
 ) -> dict[str, str]:
     """Build a minimal env dict for the sub-agent subprocess.
@@ -207,22 +230,65 @@ def _clean_subprocess_env(
     Replaces the parent's environment entirely so stray vars from the
     developer's shell / ``.env`` don't leak into the test.  Slack
     tokens are deliberately *absent* — the sub-agent runs without
-    Slack (``AppConfig.load(require_slack=False)``), and omitting
-    them here doubles as a regression check that the sub-agent never
-    starts depending on them.
+    Slack (``create_coding_agent_config`` / ``require_slack=False``),
+    and omitting them here doubles as a regression check that the
+    sub-agent never starts depending on them.
+
+    Sandbox signals: the sub-agent's runtime self-check refuses to
+    start with ``INCONSISTENT`` classification (zero signals on a
+    bare dev laptop).  On the host we can reliably set only the
+    three env-based signals (``OPENSHELL_SANDBOX``, ``HTTPS_PROXY``,
+    ``SSL_CERT_FILE``) — the path checks (``/sandbox``, ``/app/src``)
+    need root and the DNS check needs ``inference.local`` to resolve.
+    We lower the signal threshold to ``3`` via
+    ``NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD`` so the classifier still
+    runs against real signals; prod behaviour is unaffected (the env
+    var is only set here).  ``SSL_CERT_FILE`` points at certifi's CA
+    bundle so httpx's client init (which parses the file at
+    constructor time) doesn't blow up.  ``certifi.where()`` always
+    returns a path to a real file that ships with the certifi
+    package; ``ssl.get_default_verify_paths().cafile`` can legally be
+    ``None`` on platforms where OpenSSL's compiled-in default path
+    doesn't exist on disk, which would crash ``subprocess.run``
+    (env values must be strings).
+
+    Non-secret config flows through the YAML at *yaml_path* via
+    ``NEMOCLAW_CONFIG_PATH``; env vars here hold secrets and
+    sandbox-detection signals only.
     """
-    env: dict[str, str] = {
+    return {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(home),
         "PYTHONPATH": str(_repo_root() / "src"),
-        "INFERENCE_HUB_API_KEY": "test-key",
-        "INFERENCE_HUB_BASE_URL": mock_inference_url,
-        "INFERENCE_TIMEOUT_S": "5",
-        "INFERENCE_MAX_RETRIES": "1",
-        "CODING_WORKSPACE_ROOT": str(workspace),
-        "SKILLS_DIR": str(_repo_root() / "skills"),
+        "NEMOCLAW_CONFIG_PATH": str(yaml_path),
+        # Sandbox signals — see docstring.
+        "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD": "3",
+        "OPENSHELL_SANDBOX": "1",
+        "HTTPS_PROXY": "http://openshell-proxy.invalid:3128",
+        "SSL_CERT_FILE": certifi.where(),
     }
-    return env
+
+
+def _subprocess_env_with_defaults(
+    tmp_path: Path,
+    mock_inference_url: str,
+    workspace: Path,
+    home: Path,
+) -> dict[str, str]:
+    """Write a default YAML under *tmp_path* and return the subprocess env.
+
+    Convenience wrapper used by most tests in this file — they all
+    want the same shape (mock inference endpoint + per-test workspace
+    + repo skills dir) so they share this helper.
+    """
+    yaml_path = tmp_path / "subprocess.yaml"
+    _write_subprocess_yaml(
+        yaml_path,
+        mock_inference_url=mock_inference_url,
+        workspace=workspace,
+        skills_dir=_repo_root() / "skills",
+    )
+    return _clean_subprocess_env(yaml_path, home)
 
 
 def _run_agent(
@@ -268,7 +334,7 @@ def test_agent_subprocess_runs_task_end_to_end(
     home = tmp_path / "home"
     home.mkdir()
 
-    env = _clean_subprocess_env(mock_inference_url, workspace, home)
+    env = _subprocess_env_with_defaults(tmp_path, mock_inference_url, workspace, home)
     result = _run_agent(env, cwd=tmp_path)
 
     assert result.returncode == 0, (
@@ -277,8 +343,7 @@ def test_agent_subprocess_runs_task_end_to_end(
         f"---- stderr ----\n{result.stderr}\n"
     )
     assert _CANNED_REPLY in result.stdout, (
-        f"expected canned reply in stdout; got:\n{result.stdout!r}\n"
-        f"stderr:\n{result.stderr}"
+        f"expected canned reply in stdout; got:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
 
 
@@ -291,14 +356,14 @@ def test_agent_subprocess_per_agent_workspace_is_created(
     The in-process test in ``tests/test_coding_agent_main.py`` asserts
     this at function level; the subprocess version verifies the same
     invariant survives through the full startup path.  Two child
-    processes with the same ``CODING_WORKSPACE_ROOT`` must produce
+    processes with the same ``coding.workspace_root`` must produce
     two distinct ``agent-<8 hex>`` subdirectories.
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     home = tmp_path / "home"
     home.mkdir()
-    env = _clean_subprocess_env(mock_inference_url, workspace, home)
+    env = _subprocess_env_with_defaults(tmp_path, mock_inference_url, workspace, home)
 
     for _ in range(2):
         result = _run_agent(env, cwd=tmp_path)
@@ -356,7 +421,7 @@ def test_agent_subprocess_executes_file_tool_call(tmp_path: Path) -> None:
     try:
         host, port = server.server_address
         mock_url = f"http://{host}:{port}"
-        env = _clean_subprocess_env(mock_url, workspace, home)
+        env = _subprocess_env_with_defaults(tmp_path, mock_url, workspace, home)
         result = _run_agent(env, cwd=tmp_path)
     finally:
         server.shutdown()
@@ -377,18 +442,13 @@ def test_agent_subprocess_executes_file_tool_call(tmp_path: Path) -> None:
     # was dispatched through the real ``ToolRegistry`` and the file
     # tool executed against the scoped workspace root.
     agent_dirs = [p for p in workspace.iterdir() if p.is_dir() and p.name.startswith("agent-")]
-    assert len(agent_dirs) == 1, (
-        f"expected one per-agent workspace; got {agent_dirs}"
-    )
+    assert len(agent_dirs) == 1, f"expected one per-agent workspace; got {agent_dirs}"
     written = agent_dirs[0] / file_name
-    assert written.is_file(), (
-        f"{written} not written.  stderr:\n{result.stderr}"
-    )
+    assert written.is_file(), f"{written} not written.  stderr:\n{result.stderr}"
     assert written.read_text() == file_content
     # Final reply reaches stdout.
     assert final_reply in result.stdout, (
-        f"expected final reply in stdout; got:\n{result.stdout!r}\n"
-        f"stderr:\n{result.stderr}"
+        f"expected final reply in stdout; got:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
 
 
@@ -402,26 +462,29 @@ def test_agent_subprocess_honours_yaml_deployment_override(
     """Custom ``config.yaml`` via ``NEMOCLAW_CONFIG_PATH`` is respected.
 
     Covers the §16.2 *"Config YAML — deployment override"* row:
-    point ``NEMOCLAW_CONFIG_PATH`` at a fresh YAML that overrides
-    ``coding.workspace_root`` and confirm the sub-agent lands in that
-    path without an image rebuild or code change.
+    point ``NEMOCLAW_CONFIG_PATH`` at a fresh YAML that directs
+    ``coding.workspace_root`` somewhere non-default and confirm the
+    sub-agent lands in that path without an image rebuild or code
+    change.  With env-var overrides for non-secret knobs removed
+    (GAPS §16), the YAML is the single source of truth.
     """
-    # Workspace path lives under tmp_path but is *not* the default
-    # ``CODING_WORKSPACE_ROOT`` env value — the test is meaningful only
-    # if the YAML is the thing that directs the agent to ``yaml_ws``.
     yaml_ws = tmp_path / "yaml_ws"
     home = tmp_path / "home"
     home.mkdir()
 
     yaml_path = tmp_path / "custom.yaml"
-    yaml_path.write_text(f"coding:\n  workspace_root: {yaml_ws}\n")
+    yaml_path.write_text(
+        "inference:\n"
+        f"  base_url: {mock_inference_url}\n"
+        "  timeout_s: 5\n"
+        "  max_retries: 1\n"
+        "coding:\n"
+        f"  workspace_root: {yaml_ws}\n"
+        "skills:\n"
+        f"  skills_dir: {_repo_root() / 'skills'}\n"
+    )
 
-    env = _clean_subprocess_env(mock_inference_url, tmp_path / "unused", home)
-    # Remove the env-level override so the YAML value is what takes
-    # effect.  If both were set, env would win (by the documented
-    # precedence) and the test would be useless.
-    env.pop("CODING_WORKSPACE_ROOT", None)
-    env["NEMOCLAW_CONFIG_PATH"] = str(yaml_path)
+    env = _clean_subprocess_env(yaml_path, home)
 
     result = _run_agent(env, cwd=tmp_path)
 
@@ -434,8 +497,7 @@ def test_agent_subprocess_honours_yaml_deployment_override(
     # root, not under the ``CODING_WORKSPACE_ROOT`` env (which we
     # removed) and not under the dataclass default.
     assert yaml_ws.is_dir(), (
-        f"expected YAML-supplied workspace {yaml_ws} to be created.\n"
-        f"stderr:\n{result.stderr}"
+        f"expected YAML-supplied workspace {yaml_ws} to be created.\nstderr:\n{result.stderr}"
     )
     agent_dirs = [p for p in yaml_ws.iterdir() if p.is_dir()]
     assert any(p.name.startswith("agent-") for p in agent_dirs), (
@@ -466,11 +528,9 @@ def test_agent_subprocess_inconsistent_runtime_fails_fast(
       deliberately don't even start a mock).
     """
     # Minimal env — we never reach config load, so no secrets or
-    # workspace needed.  Two signals (OPENSHELL_SANDBOX + HTTPS_PROXY),
-    # neither confined to ``_BENIGN_LOCAL_ENV_SIGNALS`` —
-    # ``OPENSHELL_SANDBOX`` is specifically sandbox-identifying — so
-    # the classifier can't fall through the corporate-proxy escape
-    # hatch.  Result: INCONSISTENT.
+    # workspace needed.  Two signals (OPENSHELL_SANDBOX + HTTPS_PROXY)
+    # is below the 4-of-6 threshold for SANDBOX, so the classifier
+    # returns INCONSISTENT.
     home = tmp_path / "home"
     home.mkdir()
     env = {
@@ -490,8 +550,7 @@ def test_agent_subprocess_inconsistent_runtime_fails_fast(
     # The raised exception reaches stderr via ``asyncio.run``'s
     # default traceback handler.
     assert "SandboxConfigurationError" in result.stderr, (
-        "expected SandboxConfigurationError on stderr; got:\n"
-        f"{result.stderr}"
+        f"expected SandboxConfigurationError on stderr; got:\n{result.stderr}"
     )
     # The structured diagnostic ("refusing to start" is part of
     # ``SandboxConfigurationError``'s message) is present so operators

@@ -4,6 +4,11 @@ markdown conversion, and block-builder helpers.
 
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
+
+import pytest
+
 from nemoclaw_escapades.connectors.slack import (
     _SLACK_FALLBACK_TEXT_LIMIT,
     _SLACK_SECTION_TEXT_LIMIT,
@@ -636,14 +641,6 @@ class TestIsApprovalClick:
 # ── ``_handle_with_thinking`` approval-click dedup + early strip ─────
 
 
-import asyncio
-from collections import defaultdict
-
-import pytest
-
-from nemoclaw_escapades.connectors.slack import SlackConnector as _SC
-
-
 class _FakeSlackClient:
     """Async stub recording every Slack-API call in order.
 
@@ -658,7 +655,9 @@ class _FakeSlackClient:
         self.calls: list[tuple[str, dict]] = []
         self._next_ts = 1_000
 
-    async def chat_postMessage(self, **kwargs: object) -> dict:
+    async def chat_postMessage(  # noqa: N802 — matches Slack SDK method name
+        self, **kwargs: object
+    ) -> dict:
         self.calls.append(("chat_postMessage", kwargs))
         self._next_ts += 1
         return {"ts": f"ts_{self._next_ts}"}
@@ -686,8 +685,6 @@ def _bare_connector(handler) -> SlackConnector:
     conn._thread_approval_msg = {}
     conn._approval_in_flight = set()
     conn._error_timestamps = defaultdict(list)
-    conn._ERROR_WINDOW_S = 60.0
-    conn._ERROR_MAX_PER_WINDOW = 3
     return conn
 
 

@@ -20,7 +20,6 @@ from nemoclaw_escapades.config import (
     load_dotenv_if_present,
 )
 
-
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -28,20 +27,39 @@ from nemoclaw_escapades.config import (
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip every env var the loader consults so each test starts clean.
 
-    Several env vars are required for ``AppConfig.load()`` to pass
-    validation (``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` /
-    ``INFERENCE_HUB_API_KEY`` / ``INFERENCE_HUB_BASE_URL``), so tests
-    that call ``load()`` set them explicitly.  The fixture removes
-    them so a test running after another doesn't inherit stale values.
+    After the M2b P1 config-SSOT refactor, only *secret* env vars
+    reach the loader.  Non-secret vars (``LOG_LEVEL``,
+    ``AGENT_LOOP_*``, ``NMB_URL``, ``CODING_*``, etc.) are no-ops at
+    runtime but a few tests deliberately set them to assert they stay
+    ignored; scrub them here so a stale shell export doesn't accidentally
+    satisfy a precondition.
     """
     for key in (
+        # Sandbox detection.
         "OPENSHELL_SANDBOX",
+        # YAML path selector.
         "NEMOCLAW_CONFIG_PATH",
+        # Secret env vars the loader still honours.
         "SLACK_BOT_TOKEN",
         "SLACK_APP_TOKEN",
         "INFERENCE_HUB_API_KEY",
+        "JIRA_AUTH",
+        "GITLAB_TOKEN",
+        "GERRIT_USERNAME",
+        "GERRIT_HTTP_PASSWORD",
+        "CONFLUENCE_USERNAME",
+        "CONFLUENCE_API_TOKEN",
+        "SLACK_USER_TOKEN",
+        "BRAVE_SEARCH_API_KEY",
+        "JINA_API_KEY",
+        # Formerly-honoured non-secret env vars — kept in the scrub
+        # list so ``test_non_secret_env_vars_are_ignored`` doesn't
+        # inherit stale values from previous runs.
         "INFERENCE_HUB_BASE_URL",
         "INFERENCE_MODEL",
+        "ORCHESTRATOR_MODEL",
+        "TEMPERATURE",
+        "MAX_TOKENS",
         "LOG_LEVEL",
         "LOG_FILE",
         "AUDIT_ENABLED",
@@ -52,9 +70,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "SKILLS_ENABLED",
         "SKILLS_DIR",
         "JIRA_URL",
-        "JIRA_AUTH",
         "GITLAB_URL",
-        "GITLAB_TOKEN",
         "GERRIT_URL",
         "AGENT_LOOP_MAX_TOOL_ROUNDS",
         "AGENT_LOOP_MAX_CONTINUATION_RETRIES",
@@ -65,17 +81,19 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_LOOP_COMPACTION_MODEL",
         "NMB_URL",
         "AGENT_SANDBOX_ID",
-        "ORCHESTRATOR_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
 
 def _set_required_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Populate the secrets ``_check_required_secrets`` insists on."""
+    """Populate the secrets ``_check_required_config`` insists on.
+
+    ``INFERENCE_HUB_API_KEY`` is deliberately absent — the sandbox
+    never sees it (the L7 proxy handles auth via a separately-named
+    ``OPENAI_API_KEY`` credential) and the loader doesn't require it.
+    """
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
-    monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://test")
 
 
 # ── Dataclass defaults ──────────────────────────────────────────────
@@ -122,9 +140,7 @@ class TestYamlOverlay:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "partial.yaml"
-        yaml_path.write_text(
-            "coding:\n  workspace_root: /sandbox/workspace\n"
-        )
+        yaml_path.write_text("coding:\n  workspace_root: /sandbox/workspace\n")
         config = AppConfig.load(path=yaml_path)
         # Overridden by YAML.
         assert config.coding.workspace_root == "/sandbox/workspace"
@@ -162,17 +178,13 @@ class TestYamlOverlay:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "weird.yaml"
         yaml_path.write_text(
-            "future_feature:\n  knob: 42\n"
-            "coding:\n  workspace_root: /sandbox/workspace\n"
+            "future_feature:\n  knob: 42\ncoding:\n  workspace_root: /sandbox/workspace\n"
         )
         config = AppConfig.load(path=yaml_path)
         # Known section still applied.
         assert config.coding.workspace_root == "/sandbox/workspace"
         # Unknown section logged at WARNING.
-        assert any(
-            "Unknown top-level key in YAML overlay" in r.message
-            for r in caplog.records
-        )
+        assert any("Unknown top-level key in YAML overlay" in r.message for r in caplog.records)
 
     def test_unknown_field_in_known_section_logs_warning(
         self,
@@ -182,15 +194,10 @@ class TestYamlOverlay:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "bad_field.yaml"
-        yaml_path.write_text(
-            "coding:\n  workspace_root: /sandbox/workspace\n  future_knob: 42\n"
-        )
+        yaml_path.write_text("coding:\n  workspace_root: /sandbox/workspace\n  future_knob: 42\n")
         config = AppConfig.load(path=yaml_path)
         assert config.coding.workspace_root == "/sandbox/workspace"
-        assert any(
-            "Unknown field in YAML overlay section" in r.message
-            for r in caplog.records
-        )
+        assert any("Unknown field in YAML overlay section" in r.message for r in caplog.records)
 
     def test_malformed_yaml_raises(
         self,
@@ -226,11 +233,7 @@ class TestYamlOverlay:
         # top-level-key warning.
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "agent_loop.yaml"
-        yaml_path.write_text(
-            "agent_loop:\n"
-            "  max_tool_rounds: 20\n"
-            "  compaction_min_keep: 8\n"
-        )
+        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 20\n  compaction_min_keep: 8\n")
         caplog.clear()
         config = AppConfig.load(path=yaml_path)
         assert config.agent_loop.max_tool_rounds == 20
@@ -245,69 +248,66 @@ class TestYamlOverlay:
 
 
 class TestInferenceModelPropagation:
-    """``INFERENCE_MODEL`` propagation to ``orchestrator.model``."""
+    """YAML ``inference.model`` propagation to ``orchestrator.model`` and ``agent_loop.model``.
 
-    def test_inference_model_propagates_when_orchestrator_is_default(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Backwards compat: with nothing else set, env propagates both."""
-        _set_required_secrets(monkeypatch)
-        monkeypatch.setenv("INFERENCE_MODEL", "azure/claude-test")
-        config = AppConfig.load()
-        assert config.inference.model == "azure/claude-test"
-        assert config.orchestrator.model == "azure/claude-test"
+    The previous env-var path (``INFERENCE_MODEL`` / ``ORCHESTRATOR_MODEL``)
+    is retired; non-secret knobs now live in YAML only.  Propagation
+    semantics still matter though: a YAML-set ``inference.model``
+    should flow through to the agent-loop sub-agents that consume
+    ``config.agent_loop.model`` directly.
+    """
 
     def test_inference_model_propagates_to_agent_loop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Regression: ``INFERENCE_MODEL`` reaches ``config.agent_loop.model``.
-
-        Sub-agents consume ``config.agent_loop`` directly (see
-        ``agent/__main__.py::_run_task``).  Before
-        ``_sync_agent_loop_prompting_fields`` existed, an operator-set
-        ``INFERENCE_MODEL`` moved ``orchestrator.model`` but left
-        ``agent_loop.model`` stuck at ``DEFAULT_INFERENCE_MODEL`` — the
-        orchestrator ran on the new model while the sub-agent silently
-        ran on the old one.  Now the two stay in lockstep.
-        """
-        _set_required_secrets(monkeypatch)
-        monkeypatch.setenv("INFERENCE_MODEL", "azure/claude-test")
-        config = AppConfig.load()
-        assert config.orchestrator.model == "azure/claude-test"
-        assert config.agent_loop.model == "azure/claude-test"
-
-    def test_temperature_and_max_tokens_propagate_to_agent_loop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Same propagation covers the other two shared prompting fields."""
-        _set_required_secrets(monkeypatch)
-        monkeypatch.setenv("TEMPERATURE", "0.33")
-        monkeypatch.setenv("MAX_TOKENS", "12345")
-        config = AppConfig.load()
-        assert config.orchestrator.temperature == 0.33
-        assert config.orchestrator.max_tokens == 12345
-        # Sub-agents inherit via the post-env sync.
-        assert config.agent_loop.temperature == 0.33
-        assert config.agent_loop.max_tokens == 12345
-
-    def test_agent_loop_yaml_pin_survives_orchestrator_propagation(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """YAML-set ``agent_loop.*`` wins over the orchestrator sync.
+        """YAML ``inference.model`` reaches ``config.agent_loop.model``.
+
+        Sub-agents consume ``config.agent_loop`` directly (see
+        ``agent/__main__.py::_run_task``).  Without the post-YAML sync
+        an operator-set ``inference.model`` would move
+        ``config.inference.model`` but leave ``agent_loop.model`` stuck
+        at ``DEFAULT_INFERENCE_MODEL`` — the backend would use the new
+        model while the sub-agent silently ran on the old one.
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("inference:\n  model: azure/claude-test\n")
+        config = AppConfig.load(path=yaml_path)
+        assert config.inference.model == "azure/claude-test"
+        assert config.agent_loop.model == "azure/claude-test"
+
+    def test_orchestrator_temperature_and_max_tokens_propagate_to_agent_loop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Orchestrator prompting fields sync into ``agent_loop``."""
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("orchestrator:\n  temperature: 0.33\n  max_tokens: 12345\n")
+        config = AppConfig.load(path=yaml_path)
+        assert config.orchestrator.temperature == 0.33
+        assert config.orchestrator.max_tokens == 12345
+        assert config.agent_loop.temperature == 0.33
+        assert config.agent_loop.max_tokens == 12345
+
+    def test_agent_loop_yaml_pin_survives_propagation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """YAML-set ``agent_loop.*`` wins over the post-YAML sync.
 
         Enables the "run sub-agents on a different model" story: the
         operator pins ``agent_loop.model`` explicitly and it's not
-        overwritten by the INFERENCE_MODEL-induced propagation to
-        the orchestrator.
+        overwritten by the inference-model propagation.
         """
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text(
+            "inference:\n  model: inference-model\n"
             "orchestrator:\n  model: orch-model\n"
             "agent_loop:\n"
             "  model: sub-agent-model\n"
@@ -315,102 +315,39 @@ class TestInferenceModelPropagation:
             "  max_tokens: 500\n"
         )
         config = AppConfig.load(path=yaml_path)
+        assert config.inference.model == "inference-model"
         assert config.orchestrator.model == "orch-model"
         # agent_loop fields differ from defaults → not synced.
         assert config.agent_loop.model == "sub-agent-model"
         assert config.agent_loop.temperature == 0.1
         assert config.agent_loop.max_tokens == 500
 
-    def test_inference_model_respects_yaml_orchestrator_override(
+    def test_agent_loop_tracks_inference_not_orchestrator(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Regression: YAML-set ``orchestrator.model`` isn't clobbered.
+        """Regression: sub-agent follows ``inference.model``, not ``orchestrator.model``.
 
-        Previously the env var hook unconditionally overwrote both
-        fields, so an operator who deliberately pinned the orchestrator
-        to one model while switching the inference backend's default
-        (``INFERENCE_MODEL``) to another would see their pin silently
-        reverted.  Now ``orchestrator.model`` is updated only when
-        it's still at the dataclass default.
+        Operators can pin the orchestrator to a specific model via
+        ``orchestrator.model`` while the sub-agent continues to track
+        the shared inference baseline.  Fix:
+        ``_sync_agent_loop_prompting_fields`` reads from
+        ``config.inference.model``, not ``config.orchestrator.model``.
         """
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text(
-            "orchestrator:\n  model: pinned/orchestrator-model\n"
+            "inference:\n  model: fast-model\norchestrator:\n  model: smart-model\n"
         )
-        monkeypatch.setenv("INFERENCE_MODEL", "env/inference-model")
         config = AppConfig.load(path=yaml_path)
-        # Inference still tracks ``INFERENCE_MODEL``.
-        assert config.inference.model == "env/inference-model"
-        # Orchestrator keeps the YAML pin.
-        assert config.orchestrator.model == "pinned/orchestrator-model"
-        # Sub-agent tracks the shared inference baseline, not the
-        # orchestrator's YAML pin — per the "orchestrator-only" contract
-        # that ``ORCHESTRATOR_MODEL`` documents for the env-var twin.
-        assert config.agent_loop.model == "env/inference-model"
-
-    def test_orchestrator_model_env_does_not_leak_to_agent_loop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Regression: ``ORCHESTRATOR_MODEL`` is orchestrator-only.
-
-        ``.env.example`` documents ``ORCHESTRATOR_MODEL`` as pinning
-        "the orchestrator to a specific model while the rest of the
-        inference backend defaults to INFERENCE_MODEL."  Without this
-        guard, ``_sync_agent_loop_prompting_fields`` would pull from
-        ``config.orchestrator.model`` (which holds the pin) and the
-        sub-agent would silently run on the orchestrator's private
-        model instead of the shared inference baseline.  Fix:
-        ``model`` syncs from ``config.inference.model``.
-        """
-        _set_required_secrets(monkeypatch)
-        monkeypatch.setenv("INFERENCE_MODEL", "fast-model")
-        monkeypatch.setenv("ORCHESTRATOR_MODEL", "smart-model")
-        config = AppConfig.load()
         assert config.inference.model == "fast-model"
         assert config.orchestrator.model == "smart-model"
-        # The regression: sub-agent must stay on the shared baseline.
         assert config.agent_loop.model == "fast-model"
 
-    def test_orchestrator_model_env_wins_over_propagation(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``ORCHESTRATOR_MODEL`` gives operators an explicit escape hatch."""
-        _set_required_secrets(monkeypatch)
-        monkeypatch.setenv("INFERENCE_MODEL", "inference-env-model")
-        monkeypatch.setenv("ORCHESTRATOR_MODEL", "orchestrator-env-model")
-        config = AppConfig.load()
-        assert config.inference.model == "inference-env-model"
-        assert config.orchestrator.model == "orchestrator-env-model"
-        # Sub-agent follows the inference baseline, not the
-        # orchestrator's ``ORCHESTRATOR_MODEL`` override.
-        assert config.agent_loop.model == "inference-env-model"
 
-
-class TestEnvOverrides:
-    """Env vars trump YAML per the documented precedence."""
-
-    def test_env_overrides_yaml_per_field(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _set_required_secrets(monkeypatch)
-        yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text(
-            "coding:\n"
-            "  workspace_root: /sandbox/workspace\n"
-            "  git_clone_allowed_hosts: yaml-host.example.com\n"
-        )
-        # Env wins for the one field it sets; the other keeps YAML.
-        monkeypatch.setenv("GIT_CLONE_ALLOWED_HOSTS", "env-host.example.com")
-        config = AppConfig.load(path=yaml_path)
-        assert config.coding.workspace_root == "/sandbox/workspace"
-        assert config.coding.git_clone_allowed_hosts == "env-host.example.com"
+class TestYamlPrecedence:
+    """YAML sections populate ``AppConfig`` — the non-secret source of truth."""
 
     def test_nemoclaw_config_path_env_selects_yaml(
         self,
@@ -424,20 +361,6 @@ class TestEnvOverrides:
         config = AppConfig.load()  # no path argument
         assert config.log.level == "DEBUG"
 
-    def test_agent_loop_env_overrides_yaml(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Same per-field precedence we verify elsewhere, applied to
-        # loop-runtime knobs.  YAML sets a value, env var wins.
-        _set_required_secrets(monkeypatch)
-        yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 20\n")
-        monkeypatch.setenv("AGENT_LOOP_MAX_TOOL_ROUNDS", "42")
-        config = AppConfig.load(path=yaml_path)
-        assert config.agent_loop.max_tool_rounds == 42
-
     def test_nmb_section_populates_config(
         self,
         tmp_path: Path,
@@ -445,33 +368,119 @@ class TestEnvOverrides:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text(
-            "nmb:\n"
-            "  broker_url: ws://broker.example:9999\n"
-            "  sandbox_id: sub-42\n"
-        )
+        yaml_path.write_text("nmb:\n  broker_url: ws://broker.example:9999\n  sandbox_id: sub-42\n")
         config = AppConfig.load(path=yaml_path)
         assert config.nmb.broker_url == "ws://broker.example:9999"
         assert config.nmb.sandbox_id == "sub-42"
 
-    def test_nmb_env_overrides_yaml(
+    def test_agent_loop_section_populates_runtime_knobs(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # ``NMB_URL`` / ``AGENT_SANDBOX_ID`` are the same env var names
-        # the sub-agent used to read directly; they now route through
-        # the config loader as per-field overrides.
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 42\n  compaction_min_keep: 8\n")
+        config = AppConfig.load(path=yaml_path)
+        assert config.agent_loop.max_tool_rounds == 42
+        assert config.agent_loop.compaction_min_keep == 8
+
+    def test_coding_section_populates_workspace_and_allowlist(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text(
-            "nmb:\n  broker_url: ws://yaml.example:1\n  sandbox_id: yaml-id\n"
+            "coding:\n"
+            "  workspace_root: /sandbox/workspace\n"
+            "  git_clone_allowed_hosts: host-a.example.com,host-b.example.com\n"
         )
-        monkeypatch.setenv("NMB_URL", "ws://env.example:2")
-        monkeypatch.setenv("AGENT_SANDBOX_ID", "env-id")
         config = AppConfig.load(path=yaml_path)
-        assert config.nmb.broker_url == "ws://env.example:2"
-        assert config.nmb.sandbox_id == "env-id"
+        assert config.coding.workspace_root == "/sandbox/workspace"
+        assert config.coding.git_clone_allowed_hosts == "host-a.example.com,host-b.example.com"
+
+
+class TestSecretEnvOverrides:
+    """Secret env vars are the only runtime overrides the loader honours.
+
+    Non-secret knobs (URLs, models, paths, feature flags) come from
+    YAML only.  This class exercises the narrow "env for secrets"
+    contract that the refactor preserves.
+    """
+
+    def test_slack_tokens_override_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-from-env")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-from-env")
+        config = AppConfig.load()
+        assert config.slack.bot_token == "xoxb-from-env"
+        assert config.slack.app_token == "xapp-from-env"
+
+    def test_service_credentials_flow_through_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each service credential env var populates the matching dataclass field."""
+        _set_required_secrets(monkeypatch)
+        monkeypatch.setenv("JIRA_AUTH", "Basic aGVsbG86d29ybGQ=")
+        monkeypatch.setenv("GITLAB_TOKEN", "glpat-xyz")
+        monkeypatch.setenv("GERRIT_USERNAME", "gerrit-user")
+        monkeypatch.setenv("GERRIT_HTTP_PASSWORD", "gerrit-pw")
+        monkeypatch.setenv("CONFLUENCE_USERNAME", "conf-user")
+        monkeypatch.setenv("CONFLUENCE_API_TOKEN", "conf-token")
+        monkeypatch.setenv("SLACK_USER_TOKEN", "xoxp-user")
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
+        monkeypatch.setenv("JINA_API_KEY", "jina-key")
+        config = AppConfig.load()
+        assert config.jira.auth_header == "Basic aGVsbG86d29ybGQ="
+        assert config.gitlab.token == "glpat-xyz"
+        assert config.gerrit.username == "gerrit-user"
+        assert config.gerrit.http_password == "gerrit-pw"
+        assert config.confluence.username == "conf-user"
+        assert config.confluence.api_token == "conf-token"
+        assert config.slack_search.user_token == "xoxp-user"
+        assert config.web_search.api_key == "brave-key"
+        assert config.web_search.jina_api_key == "jina-key"
+
+    def test_non_secret_env_vars_are_ignored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-secret env vars no longer override YAML — only the YAML wins.
+
+        Regression guard: before this refactor, ``LOG_LEVEL``,
+        ``INFERENCE_MODEL``, ``AGENT_LOOP_*``, ``NMB_URL``,
+        ``GIT_CLONE_ALLOWED_HOSTS``, etc. all had env-var hooks.
+        They're gone now — if an operator sets one it must be silently
+        ignored.  (``scripts/gen_config.py`` reads ``GITLAB_URL`` /
+        ``GIT_CLONE_ALLOWED_HOSTS`` at build time to write the YAML,
+        which is a separate code path.)
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "log:\n  level: DEBUG\n"
+            "agent_loop:\n  max_tool_rounds: 20\n"
+            "nmb:\n  broker_url: ws://yaml.example:1\n"
+            "coding:\n  git_clone_allowed_hosts: yaml-host.example.com\n"
+        )
+        # Every one of these env vars used to win over YAML.  They
+        # must now be no-ops.
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        monkeypatch.setenv("AGENT_LOOP_MAX_TOOL_ROUNDS", "99")
+        monkeypatch.setenv("NMB_URL", "ws://env.example:2")
+        monkeypatch.setenv("GIT_CLONE_ALLOWED_HOSTS", "env-host.example.com")
+        config = AppConfig.load(path=yaml_path)
+        assert config.log.level == "DEBUG"
+        assert config.agent_loop.max_tool_rounds == 20
+        assert config.nmb.broker_url == "ws://yaml.example:1"
+        assert config.coding.git_clone_allowed_hosts == "yaml-host.example.com"
 
 
 # ── Secret validation ──────────────────────────────────────────────
@@ -480,14 +489,14 @@ class TestEnvOverrides:
 class TestDotenvLoader:
     """``load_dotenv_if_present`` wires ``.env`` into ``os.environ``.
 
-    Regression: running ``python -m nemoclaw_escapades{,.agent}``
-    directly (outside ``make run-local-dev``) used to fail with
-    "Missing required environment variables: INFERENCE_HUB_API_KEY /
-    SLACK_BOT_TOKEN" because the entrypoints read ``os.environ``
-    without first loading the operator's ``.env``.  The helper's
-    job is to close that gap on the entrypoint side without changing
-    the test-friendly ``AppConfig.load`` (tests control their env
-    explicitly via ``monkeypatch``).
+    Regression: host-side tooling (``scripts/gen_config.py``,
+    ``scripts/gen_policy.py``, ``make run-broker``) used to fail with
+    "Missing required environment variables: ..." because the
+    entrypoints read ``os.environ`` without first loading the
+    operator's ``.env``.  The helper closes that gap on the
+    entrypoint side without changing the test-friendly
+    ``AppConfig.load`` — tests control their env explicitly via
+    ``monkeypatch``.
     """
 
     def test_loads_env_file_from_cwd(
@@ -547,54 +556,67 @@ class TestDotenvLoader:
 
 
 class TestSecretValidation:
-    """``_check_required_secrets`` refuses to return a config without tokens."""
+    """``_check_required_config`` refuses to return a config missing required fields."""
 
     def test_missing_slack_tokens_raises(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
-        monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://x")
         with pytest.raises(ValueError, match="SLACK_BOT_TOKEN"):
             AppConfig.load()
 
-    def test_sandbox_does_not_require_inference_hub_vars(
+    def test_missing_inference_api_key_is_accepted(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        # Deliberately skip INFERENCE_HUB_*.  In the sandbox, the
-        # proxy supplies them; the loader must not raise.
-        monkeypatch.setenv("OPENSHELL_SANDBOX", "1")
-        config = AppConfig.load()
-        # Sandbox backfill fires because env is empty and in_sandbox.
-        assert config.inference.base_url == "https://inference.local/v1"
+        """``INFERENCE_HUB_API_KEY`` is deliberately **not** required.
 
-    def test_env_argument_overrides_openshell_sandbox_env_var(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``env=SANDBOX`` unlocks sandbox branches even without the env var.
-
-        Regression: before this path was threaded, the loader read
-        ``OPENSHELL_SANDBOX`` directly and could disagree with the
-        multi-signal detector.  Now a caller-supplied
-        :class:`RuntimeEnvironment` is the source of truth.
+        In the sandbox the inference provider is registered under a
+        different credential name (``OPENAI_API_KEY``, see the
+        Makefile's ``setup-providers``) and the L7 proxy at
+        ``inference.local`` injects the real key at HTTP-request
+        time.  The app never reads an API key — ``InferenceHubBackend``
+        omits the ``Authorization`` header when
+        ``config.inference.api_key`` is empty — so requiring one would
+        crash every sandbox startup with a false-positive.
+        Regression guard against reintroducing that check.
         """
-        from nemoclaw_escapades.runtime import RuntimeEnvironment
-
         monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
         monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
         monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        # Without env=..., the loader would treat this as LOCAL_DEV
-        # and refuse to start (missing INFERENCE_HUB_*).  With env
-        # passed in, the sandbox branch relaxes that requirement and
-        # the inference URL gets backfilled.
-        config = AppConfig.load(env=RuntimeEnvironment.SANDBOX)
+        # Must not raise.
+        config = AppConfig.load()
+        assert config.inference.api_key == ""
+
+    def test_inference_base_url_comes_from_yaml_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``config/defaults.yaml`` pins ``inference.base_url`` to the
+        sandbox proxy endpoint.  Regression guard so a future edit
+        doesn't reintroduce a silent in-code backfill.
+        """
+        _set_required_secrets(monkeypatch)
+        config = AppConfig.load()
         assert config.inference.base_url == "https://inference.local/v1"
+
+    def test_missing_inference_base_url_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Fail-fast when a per-deployment YAML nukes ``inference.base_url``.
+
+        The default YAML always sets it; this test forces the blank
+        state via a minimal custom YAML and asserts the loader
+        refuses it instead of silently routing to a hardcoded fallback.
+        """
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "blank.yaml"
+        yaml_path.write_text("inference:\n  base_url: ''\n")
+        monkeypatch.setenv("NEMOCLAW_CONFIG_PATH", str(yaml_path))
+        with pytest.raises(ValueError, match="inference.base_url"):
+            AppConfig.load()
 
     def test_sub_agent_path_does_not_require_slack_tokens(
         self,
@@ -602,61 +624,36 @@ class TestSecretValidation:
     ) -> None:
         """Regression: ``require_slack=False`` skips the Slack check.
 
-        The coding sub-agent never touches Slack — CLI mode prints to
-        stdout and NMB mode talks to the broker — so requiring
-        ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its startup path
-        makes ``python -m nemoclaw_escapades.agent --task ...`` fail
-        on any machine whose ``.env`` isn't fully configured for the
-        orchestrator.  ``AppConfig.load(require_slack=False)`` opts
-        out of that check while keeping the inference-secret
-        validation untouched.
+        The coding sub-agent never touches Slack — both of its run
+        modes (``--task`` CLI mode, ``--nmb`` broker mode) live inside
+        the sandbox and talk to stdout or the broker, never to Slack —
+        so requiring ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` for its
+        startup path makes ``python -m nemoclaw_escapades.agent
+        --task ...`` fail on any machine whose ``.env`` isn't fully
+        configured for the orchestrator.
         """
-        # Inference secrets present; Slack ones deliberately absent.
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-        monkeypatch.setenv("INFERENCE_HUB_API_KEY", "k")
-        monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://x")
         # Must not raise.
         config = AppConfig.load(require_slack=False)
         assert config.slack.bot_token == ""
         assert config.slack.app_token == ""
-        assert config.inference.api_key == "k"
 
-    def test_sub_agent_path_still_validates_inference_in_local_dev(
+    def test_sub_agent_path_still_validates_base_url(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
-        """``require_slack=False`` is about *Slack only* — inference
-        is still required in local dev.  Regression guard so a future
-        edit doesn't accidentally broaden the opt-out.
+        """``require_slack=False`` is about *Slack only* — the
+        ``inference.base_url`` YAML fail-fast still applies so a
+        malformed per-deployment YAML surfaces at startup for the
+        sub-agent too.  Regression guard so a future edit doesn't
+        accidentally broaden the opt-out.
         """
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENSHELL_SANDBOX", raising=False)
-        with pytest.raises(ValueError, match="INFERENCE_HUB"):
+        yaml_path = tmp_path / "blank.yaml"
+        yaml_path.write_text("inference:\n  base_url: ''\n")
+        monkeypatch.setenv("NEMOCLAW_CONFIG_PATH", str(yaml_path))
+        with pytest.raises(ValueError, match="inference.base_url"):
             AppConfig.load(require_slack=False)
-
-    def test_env_argument_local_dev_requires_inference_hub(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``env=LOCAL_DEV`` keeps the strict secrets requirement.
-
-        Mirror of the test above from the other side: even with the
-        ``OPENSHELL_SANDBOX`` env var set (stale from a prior shell),
-        an explicit ``env=LOCAL_DEV`` forces the strict local-dev
-        validation.
-        """
-        from nemoclaw_escapades.runtime import RuntimeEnvironment
-
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-        # OPENSHELL_SANDBOX stale in the shell — with the old single-
-        # signal check this would wrongly enable sandbox mode.
-        monkeypatch.setenv("OPENSHELL_SANDBOX", "1")
-        monkeypatch.delenv("INFERENCE_HUB_API_KEY", raising=False)
-        monkeypatch.delenv("INFERENCE_HUB_BASE_URL", raising=False)
-        with pytest.raises(ValueError, match="INFERENCE_HUB"):
-            AppConfig.load(env=RuntimeEnvironment.LOCAL_DEV)

@@ -23,6 +23,16 @@
 #   3. Environment variables — `os.environ.get(...)`.
 #   4. Provider-injected env vars (secrets resolved by the L7 proxy).
 
+inference:
+  # The sandbox's L7 proxy terminates every outbound inference call at
+  # ``inference.local`` and forwards to the real provider, so the value
+  # below is correct for every deployment.  Override in a per-deployment
+  # YAML if you're pointing at a different OpenAI-compatible endpoint.
+  base_url: https://inference.local/v1
+  model: azure/anthropic/claude-opus-4-6
+  timeout_s: 60
+  max_retries: 3
+
 orchestrator:
   model: azure/anthropic/claude-opus-4-6
   system_prompt_path: prompts/system_prompt.md

@@ -90,7 +90,31 @@ Every MR must satisfy the following before merge:
 5. **New functionality has tests.**  Unit tests for pure logic, integration
    tests for multi-sandbox behaviour.
 6. **Commit messages reference a ticket** where applicable
-   (e.g. `AVPC-12345: Short description`).
+   (e.g. `AVPC-12345: Short description`) and follow the verbosity
+   guidelines in [Commit Messages](#commit-messages).
+
+## Commit Messages
+
+Keep commit messages **concise**.  Format:
+
+- **Subject** (≤ 72 chars), imperative mood, with a conventional prefix
+  and ticket reference where applicable
+  (e.g. `AVPC-12345: fix retry loop in NMB client` or
+  `refactor(config): split .env for secrets`).
+- **Blank line**, then a short body — ideally **≤ 20 lines** —
+  explaining the *why*, not the *what*.  Skip the body for trivial
+  changes.
+
+Signs a commit message is too verbose:
+
+- Per-file change lists or test inventories that duplicate the diff.
+- Multi-section bodies (`Before / After / Code changes / Tests`) —
+  usually a sign the commit is doing too much; consider splitting it.
+- Restating every renamed symbol or new test.  The diff already shows
+  that.
+
+Design rationale, migration plans, and detailed trade-offs belong in
+the PR description or a design doc, not the commit message.
 
 ## Code Guidelines
 
@@ -184,6 +208,20 @@ Key requirements:
 - **Raises**: list exceptions the caller should expect.
 - Internal/private helpers (`_foo`) should still have docstrings, but
   they can be shorter.
+
+Keep docstrings **concise**:
+
+- **Summary + body ≤ 10 lines** before the `Args:` block.  Signature
+  sections (`Args` / `Returns` / `Raises`) scale with the function,
+  but prose doesn't.
+- **One-line bullets.**  A bullet that wraps to 5 lines is a paragraph
+  pretending to be a list item; rewrite it as prose or split it.
+- **No embedded design docs.**  If you need to explain call-site
+  contracts, cross-component interactions, or "why this looks odd,"
+  put it in a module-level comment block or a design doc (`docs/`)
+  and reference it from the docstring with a `See ...` pointer.
+- **No parallel histories.**  "Before the refactor we did X, now we
+  do Y" belongs in the commit message, not the docstring.
 
 ### 5. Type Annotations
 

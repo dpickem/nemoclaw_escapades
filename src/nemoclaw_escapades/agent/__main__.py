@@ -45,8 +45,17 @@ from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
-from nemoclaw_escapades.config import AppConfig, load_dotenv_if_present, load_system_prompt
-from nemoclaw_escapades.observability.logging import get_logger, setup_logging
+from nemoclaw_escapades.config import (
+    AppConfig,
+    create_coding_agent_config,
+    load_dotenv_if_present,
+    load_system_prompt,
+)
+from nemoclaw_escapades.observability.logging import (
+    _MergingAdapter,
+    get_logger,
+    setup_logging,
+)
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
     SandboxConfigurationError,
@@ -54,7 +63,6 @@ from nemoclaw_escapades.runtime import (
 )
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
-
 
 # Identity layer for the sub-agent's system prompt.  Written as a
 # file so operators can tune it without redeploying.  Falls back to
@@ -127,7 +135,7 @@ async def _run_task(
     identity_prompt: str,
     bundle: AgentSetupBundle,
     config: AppConfig,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
 ) -> str:
     """Run one task end-to-end and return the final assistant text.
 
@@ -200,7 +208,7 @@ async def _run_cli_mode(
     workspace_root: str | None,
     config: AppConfig,
     backend: BackendBase,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
 ) -> int:
     """Run a single task from a CLI arg and print the result.
 
@@ -217,9 +225,7 @@ async def _run_cli_mode(
     appears in both the workspace path and the scratchpad filename.
     """
     agent_id = _make_agent_id()
-    base_workspace = Path(
-        workspace_root or config.coding.workspace_root
-    ).expanduser()
+    base_workspace = Path(workspace_root or config.coding.workspace_root).expanduser()
     per_agent_workspace = base_workspace / f"agent-{agent_id}"
     bundle = AgentSetupBundle(
         task_id=f"cli-{_make_agent_id()}",
@@ -243,7 +249,7 @@ async def _run_cli_mode(
 async def _run_nmb_mode(
     config: AppConfig,
     backend: BackendBase,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
     shutdown_event: asyncio.Event,
 ) -> int:
     """Connect to NMB and handle ``task.assign`` messages.
@@ -326,8 +332,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace",
         type=str,
         default=None,
-        help="Workspace root (CLI mode only).  Defaults to "
-        "``config.coding.workspace_root``.",
+        help="Workspace root (CLI mode only).  Defaults to ``config.coding.workspace_root``.",
     )
     return parser.parse_args(argv)
 
@@ -364,19 +369,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
     if runtime.classification is RuntimeEnvironment.INCONSISTENT:
         raise SandboxConfigurationError(runtime)
 
-    # Thread the detected env into the loader so its sandbox-vs-local
-    # branches (inference backfill, secrets relaxation) use the same
-    # classification as the self-check above — no second source of
-    # truth for "am I in a sandbox".
-    #
-    # ``require_slack=False`` because the sub-agent never connects to
-    # Slack: CLI mode prints to stdout, NMB mode talks to the broker.
-    # Without this opt-out, a developer running ``python -m
-    # nemoclaw_escapades.agent --task ...`` on a machine with no
-    # Slack configuration would hit a misleading "SLACK_BOT_TOKEN /
-    # SLACK_APP_TOKEN missing" error during config load.  The
-    # orchestrator's ``main.py`` keeps the default (``require_slack=True``).
-    config = AppConfig.load(env=runtime.classification, require_slack=False)
+    # ``create_coding_agent_config`` skips Slack validation — the
+    # sub-agent never connects to Slack (CLI mode prints to stdout,
+    # NMB mode talks to the broker).  The orchestrator's ``main.py``
+    # uses ``create_orchestrator_config`` which requires Slack tokens.
+    config = create_coding_agent_config()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
     logger = get_logger("agent.main")
     logger.info(

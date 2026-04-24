@@ -3,14 +3,22 @@
 # Quick start:
 #   cp .env.example .env        # fill in real values
 #   make setup                  # conda env + gateway + providers + sandbox
-#   make run-local-dev          # start the orchestrator outside a sandbox
-#   make run-local-sandbox      # start the orchestrator inside the sandbox
+#   make run-local-sandbox      # (re)create and run the orchestrator in the sandbox
 #
-# All local Python targets run inside the "nemoclaw" conda environment.
-# `make install` creates it automatically if it doesn't exist.
+# The OpenShell sandbox is the only supported runtime for the app.
+# Local development runs inside a locally-created sandbox via
+# ``make setup-sandbox`` / ``make run-local-sandbox`` — bare-process
+# execution outside the sandbox is no longer a supported path (see
+# ``runtime.py`` — the runtime self-check refuses to start without
+# sandbox signals present).
 #
-# The sandbox runs inside OpenShell with proxy-mediated credential injection.
-# See policies/orchestrator.yaml for the full network and filesystem policy.
+# All host-side Python targets (tests, resolvers) run inside the
+# "nemoclaw" conda environment.  `make install` creates it
+# automatically if it doesn't exist.
+#
+# The sandbox runs inside OpenShell with proxy-mediated credential
+# injection.  See ``policies/orchestrator.yaml`` for the full network
+# and filesystem policy.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -149,7 +157,7 @@ setup-providers: .env ## Register all credential providers with the gateway
 			&& echo "✓ Inference provider registered."; \
 			openshell inference set \
 				--provider $(INFERENCE_PROVIDER) \
-				--model "$${INFERENCE_MODEL:-$(DEFAULT_MODEL)}" \
+				--model "$(DEFAULT_MODEL)" \
 				--no-verify \
 			&& echo "✓ Inference routing configured."; \
 		}; \
@@ -231,15 +239,11 @@ setup-sandbox: gen-policy gen-config ## Build image, create sandbox, and start t
 # Run
 # ---------------------------------------------------------------------------
 
-.PHONY: run-local-dev
-run-local-dev: ## Run the orchestrator outside a sandbox (bare process, .env creds)
-	PYTHONPATH=src $(CONDA_RUN) python -m $(MAIN_MODULE)
-
 .PHONY: run-local-sandbox
 run-local-sandbox: setup-gateway setup-providers setup-sandbox ## (Re)create and run the orchestrator in the sandbox
 
 .PHONY: run-broker
-run-broker: ## Run the NMB broker locally
+run-broker: ## Run the NMB broker locally (host-side dev helper)
 	PYTHONPATH=src $(CONDA_RUN) python -m $(BROKER_MODULE) --audit-db $(AUDIT_DB_LOCAL)
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,6 @@ import pytest
 from nemoclaw_escapades.agent import __main__ as agent_main
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 
-
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -37,11 +36,12 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_SANDBOX_ID",
     ):
         monkeypatch.delenv(key, raising=False)
-    # Populate required secrets so ``AppConfig.load`` passes validation.
+    # Populate Slack secrets so ``AppConfig.load`` passes validation.
+    # ``inference.base_url`` flows through the default YAML overlay,
+    # and ``INFERENCE_HUB_API_KEY`` is deliberately not required (the
+    # sandbox L7 proxy handles auth under a different credential name).
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("INFERENCE_HUB_API_KEY", "test-key")
-    monkeypatch.setenv("INFERENCE_HUB_BASE_URL", "http://test")
 
 
 # ── Arg parsing ─────────────────────────────────────────────────────
@@ -51,9 +51,7 @@ class TestArgParsing:
     """``_parse_args`` enforces the mutually-exclusive run modes."""
 
     def test_task_mode_parses(self) -> None:
-        args = agent_main._parse_args(
-            ["--task", "fix the bug", "--workspace", "/tmp/ws"]
-        )
+        args = agent_main._parse_args(["--task", "fix the bug", "--workspace", "/tmp/ws"])
         assert args.task == "fix the bug"
         assert args.workspace == "/tmp/ws"
         assert args.nmb is False
@@ -87,6 +85,26 @@ class TestCliMode:
     ) -> None:
         workspace = tmp_path / "ws"
         workspace.mkdir()
+
+        # ``_async_main`` runs ``detect_runtime_environment`` and
+        # refuses to start outside a healthy sandbox.  Mock the
+        # detector to return a ``SANDBOX`` report so the entrypoint
+        # proceeds to config load + dispatch.
+        from nemoclaw_escapades.runtime import RuntimeEnvironment, RuntimeReport
+
+        def _fake_detect() -> RuntimeReport:
+            return RuntimeReport(
+                classification=RuntimeEnvironment.SANDBOX,
+                signals_present=(
+                    "OPENSHELL_SANDBOX",
+                    "sandbox_dir_writable",
+                    "app_src_present",
+                    "https_proxy_env",
+                ),
+                signals_missing=(),
+            )
+
+        monkeypatch.setattr(agent_main, "detect_runtime_environment", _fake_detect)
 
         async def _fake_run_cli(
             task_description: str,
@@ -158,8 +176,9 @@ class TestCliMode:
                 pass
 
         workspace = tmp_path / "ws"
-        # Build a minimal config with the workspace pointing at tmp.
-        monkeypatch.setenv("CODING_WORKSPACE_ROOT", str(workspace))
+        # ``_run_cli_mode`` below receives the workspace explicitly via
+        # ``workspace_root=``, so the config just needs to load — no
+        # knob-tweaking required.
         from nemoclaw_escapades.config import AppConfig
 
         config = AppConfig.load()
@@ -238,7 +257,6 @@ class TestCliMode:
                 )()
 
         monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoop)
-        monkeypatch.setenv("SKILLS_ENABLED", "false")
 
         class _FakeBackend:
             async def close(self) -> None:
@@ -247,7 +265,12 @@ class TestCliMode:
         from nemoclaw_escapades.config import AppConfig
 
         workspace = tmp_path / "ws"
-        config = AppConfig.load()
+        # ``skills.enabled=false`` now flows through YAML only (env-var
+        # overrides for non-secret knobs were retired in the config
+        # SSOT refactor — see GAPS §16).
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("skills:\n  enabled: false\n")
+        config = AppConfig.load(path=yaml_path)
         assert config.skills.enabled is False
 
         import logging
@@ -383,9 +406,10 @@ class TestCliMode:
 
         from nemoclaw_escapades.config import AppConfig
 
-        # Explicitly enable audit at the config level — the sub-agent
-        # still must not open its own DB.
-        monkeypatch.setenv("AUDIT_ENABLED", "true")
+        # ``audit.enabled`` defaults to ``True``.  The regression this
+        # test guards is that the sub-agent still passes ``audit=None``
+        # to AgentLoop — it relies on the orchestrator to own the
+        # single authoritative DB.
         config = AppConfig.load()
         import logging
 

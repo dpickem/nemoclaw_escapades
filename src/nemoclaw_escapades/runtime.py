@@ -1,25 +1,23 @@
 """Runtime-environment detection for NemoClaw.
 
-Replaces the single-signal ``OPENSHELL_SANDBOX`` env-var check with a
-multi-signal evaluation so a broken sandbox deployment fails fast
-instead of silently reverting to local-dev defaults.  See
-``docs/design_m2b.md`` §5.4 for the motivation and signal rationale.
+Multi-signal sandbox health check that runs once at startup.  The
+OpenShell sandbox is the only supported runtime for the orchestrator
+and coding sub-agent — a missing signal means the deployment is
+broken, not that the process should silently fall back to defaults.
+See ``docs/design_m2b.md`` §5.4 for the signal rationale.
 
-Three classifications are produced:
+Two classifications are produced:
 
-- :class:`RuntimeEnvironment.LOCAL_DEV` — running outside a sandbox
-  (none or almost none of the sandbox signals present).
 - :class:`RuntimeEnvironment.SANDBOX` — running inside a healthy
-  OpenShell sandbox (≥ ``_SANDBOX_SIGNAL_THRESHOLD`` signals present).
-- :class:`RuntimeEnvironment.INCONSISTENT` — signal mix, almost
-  always a deployment bug (policy drift, OpenShell version skew,
-  half-applied configuration).  ``main.py`` refuses to start in this
-  state.
+  OpenShell sandbox (≥ ``_DEFAULT_SANDBOX_SIGNAL_THRESHOLD`` signals present).
+- :class:`RuntimeEnvironment.INCONSISTENT` — signal mix below the
+  threshold, almost always a deployment bug (policy drift, OpenShell
+  version skew, half-applied configuration, or the app launched
+  outside a sandbox).  ``main.py`` refuses to start in this state.
 
 Exactly one I/O operation per signal; no network calls, no long
 waits.  Detection runs once at startup before any config loading so
-its result can inform logging, YAML path selection, and the startup
-self-check.
+its result can inform logging and the startup self-check.
 """
 
 from __future__ import annotations
@@ -41,10 +39,6 @@ logger = get_logger("runtime")
 # so unit tests and log-inspection tooling have one source of truth.
 _SIGNAL_OPENSHELL_ENV: str = "OPENSHELL_SANDBOX"
 _SIGNAL_SANDBOX_DIR: str = "sandbox_dir_writable"
-# Named "present" rather than "readonly": the check is just
-# ``is_dir()``; Landlock enforcement happens externally.  The old
-# ``_SIGNAL_APP_SRC_READONLY`` name implied a stricter check than
-# is performed, which was misleading to readers of structured logs.
 _SIGNAL_APP_SRC_PRESENT: str = "app_src_present"
 _SIGNAL_HTTPS_PROXY: str = "https_proxy_env"
 _SIGNAL_SSL_CERT_BUNDLE: str = "ssl_cert_bundle_env"
@@ -61,39 +55,39 @@ _ALL_SIGNALS: tuple[str, ...] = (
 
 # ``SANDBOX`` needs at least this many signals to match.  Sized to
 # tolerate one or two flaky / missing signals (e.g. the DNS lookup or
-# a proxy CA that hasn't been installed yet) without weakening the
-# check.  Less than this → ``INCONSISTENT`` unless *everything* is
-# missing, in which case ``LOCAL_DEV``.
-_SANDBOX_SIGNAL_THRESHOLD: int = 4
+# a proxy CA that hasn't been installed yet).  Below threshold →
+# ``INCONSISTENT`` → refuse to start.
+_DEFAULT_SANDBOX_SIGNAL_THRESHOLD: int = 4
 
-# Below this count → confident ``LOCAL_DEV``.  Between this and the
-# sandbox threshold → ``INCONSISTENT``, *unless* the present signals
-# are only from :data:`_BENIGN_LOCAL_ENV_SIGNALS` (see below).
-_LOCAL_DEV_SIGNAL_CEILING: int = 1
+# Test-only escape hatch: integration tests in
+# ``tests/test_integration_coding_agent.py`` spawn the sub-agent as a
+# subprocess on a dev laptop where only the three env-based signals
+# (``OPENSHELL_SANDBOX``, ``HTTPS_PROXY``, ``SSL_CERT_FILE``) can be
+# reliably faked — the path signals need root and the DNS signal needs
+# ``inference.local`` to resolve.  Those tests lower the threshold via
+# the env var below so the classifier still runs against real signals,
+# just with a more permissive cut-off.  Production deployments MUST
+# NOT set this env var — if you're seeing ``INCONSISTENT`` in prod,
+# the sandbox is genuinely broken.
+_SANDBOX_SIGNAL_THRESHOLD_ENV: str = "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD"
 
-# Signals that can show up in a perfectly normal local-dev shell for
-# reasons unrelated to OpenShell — so we shouldn't trip
-# ``INCONSISTENT`` when *only* these are present.
-#
-# Concretely: developers behind a corporate VPN / MITM proxy usually
-# have ``HTTPS_PROXY`` in their shell profile and
-# ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` pointing at the
-# corporate CA their IT team installed.  Two signals, no paths, no
-# DNS — not an OpenShell sandbox, just the user's normal dev
-# environment.  If we classified that as ``INCONSISTENT`` the
-# ``SandboxConfigurationError`` in ``main.py`` would refuse to start
-# for every such developer.
-#
-# Any path signal (``/sandbox`` writable, ``/app/src`` present) or
-# the ``inference.local`` DNS signal *is* OpenShell-specific, so if
-# one of those appears alongside the env signals we keep classifying
-# as ``INCONSISTENT``.
-_BENIGN_LOCAL_ENV_SIGNALS: frozenset[str] = frozenset(
-    {
-        _SIGNAL_HTTPS_PROXY,
-        _SIGNAL_SSL_CERT_BUNDLE,
-    }
-)
+
+def _sandbox_signal_threshold() -> int:
+    """Return the current SANDBOX signal threshold.
+
+    Read per-call (not as an import-time constant) so ``monkeypatch``
+    in unit tests and env-var changes between subprocess launches
+    take effect immediately.  See :data:`_SANDBOX_SIGNAL_THRESHOLD_ENV`
+    for the test-only override contract.
+    """
+    raw = os.environ.get(_SANDBOX_SIGNAL_THRESHOLD_ENV)
+    if raw is None:
+        return _DEFAULT_SANDBOX_SIGNAL_THRESHOLD
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_SANDBOX_SIGNAL_THRESHOLD
+
 
 # Paths / hostnames the signals inspect.
 _SANDBOX_DIR: Path = Path("/sandbox")
@@ -111,7 +105,6 @@ class RuntimeEnvironment(StrEnum):
     codebase stays internally consistent.
     """
 
-    LOCAL_DEV = "LOCAL_DEV"
     SANDBOX = "SANDBOX"
     INCONSISTENT = "INCONSISTENT"
 
@@ -260,52 +253,32 @@ def _classify(signals_present: tuple[str, ...]) -> tuple[RuntimeEnvironment, str
     entry so operators see a diagnostic hint without needing to run
     ``make status`` first.
     """
-    n_present = len(signals_present)
-    if n_present >= _SANDBOX_SIGNAL_THRESHOLD:
+    if len(signals_present) >= _sandbox_signal_threshold():
         return RuntimeEnvironment.SANDBOX, ""
-    if n_present <= _LOCAL_DEV_SIGNAL_CEILING:
-        return RuntimeEnvironment.LOCAL_DEV, ""
 
-    # Corporate-proxy escape hatch: if every present signal is a
-    # ``_BENIGN_LOCAL_ENV_SIGNALS`` member (no path signal, no DNS
-    # signal, no ``OPENSHELL_SANDBOX``), the environment is almost
-    # certainly a developer's normal shell behind a VPN / MITM CA.
-    # Classify as ``LOCAL_DEV`` so the startup self-check doesn't
-    # refuse to run for every developer behind corporate networking.
-    if set(signals_present).issubset(_BENIGN_LOCAL_ENV_SIGNALS):
-        return RuntimeEnvironment.LOCAL_DEV, ""
-
-    # Between the two thresholds.  Common misdiagnoses, in rough order
-    # of frequency:
-    #
-    # - OpenShell version drift (env vars injected differently across
-    #   releases — e.g. ``HTTPS_PROXY`` without the cert bundle).
-    # - Gateway restart mid-policy-apply (paths exist but env missing).
-    # - A local-dev run accidentally inheriting sandbox env vars from
-    #   a previous shell (e.g. after ``source .env`` in a prod profile).
-    causes: list[str] = []
+    # Below threshold — the process must either be outside a sandbox
+    # or inside a broken one.  Distinguish the two most common failure
+    # shapes so the operator log points at the right fix.
     has_env_signals = (
         _SIGNAL_OPENSHELL_ENV in signals_present
         or _SIGNAL_HTTPS_PROXY in signals_present
         or _SIGNAL_SSL_CERT_BUNDLE in signals_present
     )
     has_path_signals = (
-        _SIGNAL_SANDBOX_DIR in signals_present
-        or _SIGNAL_APP_SRC_PRESENT in signals_present
+        _SIGNAL_SANDBOX_DIR in signals_present or _SIGNAL_APP_SRC_PRESENT in signals_present
     )
     if has_env_signals and not has_path_signals:
-        causes.append(
-            "sandbox env vars leaked into a local process "
-            "(unset OPENSHELL_SANDBOX / HTTPS_PROXY and retry)"
-        )
+        cause = "sandbox env vars present but paths missing (not inside a sandbox)"
     elif has_path_signals and not has_env_signals:
-        causes.append(
+        cause = (
             "image built correctly but gateway didn't inject env "
             "(recreate with `make run-local-sandbox`)"
         )
+    elif len(signals_present) == 0:
+        cause = "no sandbox signals present — run via `make run-local-sandbox`"
     else:
-        causes.append("OpenShell version drift or gateway misconfigured")
-    return RuntimeEnvironment.INCONSISTENT, "; ".join(causes)
+        cause = "OpenShell version drift or gateway misconfigured"
+    return RuntimeEnvironment.INCONSISTENT, cause
 
 
 def detect_runtime_environment() -> RuntimeReport:

@@ -8,8 +8,6 @@ and *Startup self-check*.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from nemoclaw_escapades.runtime import (
@@ -17,7 +15,6 @@ from nemoclaw_escapades.runtime import (
     SandboxConfigurationError,
     detect_runtime_environment,
 )
-
 
 # ── Env & path helpers ──────────────────────────────────────────────
 
@@ -31,6 +28,10 @@ def _scrub_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "https_proxy",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
+        # Test-only threshold override the subprocess integration tests
+        # set — scrub it here so a stale shell export doesn't change
+        # the classifier's cut-off for the unit tests.
+        "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -76,26 +77,30 @@ def _mock_all_signals(
 class TestClassification:
     """Signal counts mapped to ``RuntimeEnvironment`` values."""
 
-    def test_all_signals_absent_is_local_dev(
+    def test_all_signals_absent_is_inconsistent(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # OpenShell sandbox is the only supported runtime — no
+        # signals at all means the app is running outside a sandbox,
+        # which is explicitly refused.
         _mock_all_signals(monkeypatch=monkeypatch)  # all False
         report = detect_runtime_environment()
-        assert report.classification is RuntimeEnvironment.LOCAL_DEV
+        assert report.classification is RuntimeEnvironment.INCONSISTENT
         assert report.signals_present == ()
-        # No diagnostic needed — this is the healthy case.
-        assert report.likely_cause == ""
+        assert "no sandbox signals" in report.likely_cause
 
-    def test_one_signal_present_still_local_dev(
+    def test_one_signal_present_is_inconsistent(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # One signal = spurious, e.g. SSL_CERT_FILE set globally on
-        # the dev's machine for some other tool.  Stay ``LOCAL_DEV``.
+        # One signal below the threshold → refuse to start.  Even
+        # benign single-signal cases (just SSL_CERT_FILE) are
+        # rejected now that the only supported runtime is the
+        # sandbox.
         _mock_all_signals(ssl_cert=True, monkeypatch=monkeypatch)
         report = detect_runtime_environment()
-        assert report.classification is RuntimeEnvironment.LOCAL_DEV
+        assert report.classification is RuntimeEnvironment.INCONSISTENT
 
     def test_all_signals_present_is_sandbox(
         self,
@@ -137,8 +142,9 @@ class TestClassification:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Env vars set (sandbox leaked into a local shell) but the
-        # paths aren't there.  Classic misconfiguration.
+        # Env vars set but no sandbox paths — either running outside
+        # the sandbox with stale env or the image wasn't built
+        # correctly.  Either way → refuse to start.
         _mock_all_signals(
             openshell_env=True,
             https_proxy=True,
@@ -150,14 +156,14 @@ class TestClassification:
         )
         report = detect_runtime_environment()
         assert report.classification is RuntimeEnvironment.INCONSISTENT
-        assert "leaked" in report.likely_cause
+        assert "paths missing" in report.likely_cause
 
     def test_path_signals_without_env_signals_is_inconsistent(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Dockerfile copied the app in, /sandbox exists, but the
-        # gateway never injected env vars.  Also a misconfiguration.
+        # gateway never injected env vars.  Misconfiguration.
         _mock_all_signals(
             sandbox_dir=True,
             app_src=True,
@@ -171,42 +177,19 @@ class TestClassification:
         assert report.classification is RuntimeEnvironment.INCONSISTENT
         assert "gateway didn't inject" in report.likely_cause
 
-    def test_corporate_proxy_dev_is_local_dev_not_inconsistent(
+    def test_two_env_signals_only_is_inconsistent(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Regression: a developer behind a corporate VPN / MITM proxy
-        # usually has HTTPS_PROXY and SSL_CERT_FILE set in their shell
-        # profile.  Two signals, no paths, no DNS, no
-        # OPENSHELL_SANDBOX.  Must classify LOCAL_DEV — otherwise the
-        # startup self-check refuses to run for every such developer.
+        # Previously this case (HTTPS_PROXY + SSL_CERT_FILE only, no
+        # paths, no DNS) was a special-cased LOCAL_DEV escape hatch
+        # for developers behind corporate MITM proxies.  With local
+        # mode dropped, this mix is just a broken sandbox.
         _mock_all_signals(
             https_proxy=True,
             ssl_cert=True,
             openshell_env=False,
             sandbox_dir=False,
-            app_src=False,
-            inference_dns=False,
-            monkeypatch=monkeypatch,
-        )
-        report = detect_runtime_environment()
-        assert report.classification is RuntimeEnvironment.LOCAL_DEV
-        assert report.likely_cause == ""
-
-    def test_path_signal_alongside_benign_env_is_still_inconsistent(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Belt and braces: the corporate-proxy escape hatch must NOT
-        # kick in when any sandbox-specific signal (path, DNS,
-        # OPENSHELL_SANDBOX) is also present.  Here /sandbox is
-        # writable in addition to HTTPS_PROXY + SSL_CERT_FILE — that's
-        # genuinely suspicious and should still flag INCONSISTENT.
-        _mock_all_signals(
-            https_proxy=True,
-            ssl_cert=True,
-            sandbox_dir=True,
-            openshell_env=False,
             app_src=False,
             inference_dns=False,
             monkeypatch=monkeypatch,

@@ -235,9 +235,7 @@ class TestCodingToolRegistry:
         # empty).
         skills_dir = tmp_path / "skills" / "scratchpad"
         skills_dir.mkdir(parents=True)
-        (skills_dir / "SKILL.md").write_text(
-            "---\nid: scratchpad\n---\nScratchpad content.\n"
-        )
+        (skills_dir / "SKILL.md").write_text("---\nid: scratchpad\n---\nScratchpad content.\n")
 
         loader = SkillLoader(str(tmp_path / "skills"))
         assert "scratchpad" in loader.available_ids

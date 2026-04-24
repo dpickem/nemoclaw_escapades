@@ -105,6 +105,15 @@ _SLACK_SECTION_TEXT_LIMIT = 2900
 _SLACK_MAX_TEXTBLOCK_CHUNKS = 40
 _SLACK_FALLBACK_TEXT_LIMIT = 3000
 
+# ── Error-response rate-limit window ───────────────────────────────
+#
+# Guard against the orchestrator's own error branch spamming a channel
+# when the backend is persistently failing: at most
+# ``_ERROR_MAX_PER_WINDOW`` error replies per channel per
+# ``_ERROR_WINDOW_S`` seconds.
+_ERROR_WINDOW_S: float = 60.0
+_ERROR_MAX_PER_WINDOW: int = 3
+
 # Slack ``message`` event subtypes we silently drop.  Deliberately an
 # *explicit deny-list* (not "any subtype is not None"): Slack ships
 # many subtypes that still represent real user content — e.g.
@@ -324,8 +333,6 @@ class SlackConnector(ConnectorBase):
         self._socket_handler: AsyncSocketModeHandler | None = None
 
         self._error_timestamps: dict[str, list[float]] = defaultdict(list)
-        self._ERROR_WINDOW_S = 60.0
-        self._ERROR_MAX_PER_WINDOW = 3
 
         # Tracks the most recent live approval-prompt message per thread
         # so the connector can mark the old prompt as superseded when a
@@ -334,6 +341,12 @@ class SlackConnector(ConnectorBase):
         # messages, top-level ts otherwise); value is the ``(channel,
         # message_ts)`` of the live approval message.
         self._thread_approval_msg: dict[str, tuple[str, str]] = {}
+
+        # Threads with an in-flight approval click — populated by
+        # ``_handle_with_thinking`` to drop a rapid double-click before
+        # it races into ``_post_thinking`` / the handler.  Cleared in
+        # the same method's ``finally`` block.
+        self._approval_in_flight: set[str] = set()
 
         self._register_listeners()
 
@@ -609,9 +622,9 @@ class SlackConnector(ConnectorBase):
         """Check if error responses for this channel have exceeded the limit."""
         now = time.monotonic()
         timestamps = self._error_timestamps[channel]
-        timestamps[:] = [t for t in timestamps if now - t < self._ERROR_WINDOW_S]
+        timestamps[:] = [t for t in timestamps if now - t < _ERROR_WINDOW_S]
         timestamps.append(now)
-        return len(timestamps) > self._ERROR_MAX_PER_WINDOW
+        return len(timestamps) > _ERROR_MAX_PER_WINDOW
 
     async def _post_thinking(self, client: Any, channel: str, thread_ts: str | None) -> str | None:
         """Post the transient thinking indicator and return its ``ts``.
