@@ -9,7 +9,7 @@ See ``docs/design_m2b.md`` §5.4 for the signal rationale.
 Two classifications are produced:
 
 - :class:`RuntimeEnvironment.SANDBOX` — running inside a healthy
-  OpenShell sandbox (≥ ``_SANDBOX_SIGNAL_THRESHOLD`` signals present).
+  OpenShell sandbox (≥ ``_DEFAULT_SANDBOX_SIGNAL_THRESHOLD`` signals present).
 - :class:`RuntimeEnvironment.INCONSISTENT` — signal mix below the
   threshold, almost always a deployment bug (policy drift, OpenShell
   version skew, half-applied configuration, or the app launched
@@ -57,7 +57,37 @@ _ALL_SIGNALS: tuple[str, ...] = (
 # tolerate one or two flaky / missing signals (e.g. the DNS lookup or
 # a proxy CA that hasn't been installed yet).  Below threshold →
 # ``INCONSISTENT`` → refuse to start.
-_SANDBOX_SIGNAL_THRESHOLD: int = 4
+_DEFAULT_SANDBOX_SIGNAL_THRESHOLD: int = 4
+
+# Test-only escape hatch: integration tests in
+# ``tests/test_integration_coding_agent.py`` spawn the sub-agent as a
+# subprocess on a dev laptop where only the three env-based signals
+# (``OPENSHELL_SANDBOX``, ``HTTPS_PROXY``, ``SSL_CERT_FILE``) can be
+# reliably faked — the path signals need root and the DNS signal needs
+# ``inference.local`` to resolve.  Those tests lower the threshold via
+# the env var below so the classifier still runs against real signals,
+# just with a more permissive cut-off.  Production deployments MUST
+# NOT set this env var — if you're seeing ``INCONSISTENT`` in prod,
+# the sandbox is genuinely broken.
+_SANDBOX_SIGNAL_THRESHOLD_ENV: str = "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD"
+
+
+def _sandbox_signal_threshold() -> int:
+    """Return the current SANDBOX signal threshold.
+
+    Read per-call (not as an import-time constant) so ``monkeypatch``
+    in unit tests and env-var changes between subprocess launches
+    take effect immediately.  See :data:`_SANDBOX_SIGNAL_THRESHOLD_ENV`
+    for the test-only override contract.
+    """
+    raw = os.environ.get(_SANDBOX_SIGNAL_THRESHOLD_ENV)
+    if raw is None:
+        return _DEFAULT_SANDBOX_SIGNAL_THRESHOLD
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_SANDBOX_SIGNAL_THRESHOLD
+
 
 # Paths / hostnames the signals inspect.
 _SANDBOX_DIR: Path = Path("/sandbox")
@@ -223,7 +253,7 @@ def _classify(signals_present: tuple[str, ...]) -> tuple[RuntimeEnvironment, str
     entry so operators see a diagnostic hint without needing to run
     ``make status`` first.
     """
-    if len(signals_present) >= _SANDBOX_SIGNAL_THRESHOLD:
+    if len(signals_present) >= _sandbox_signal_threshold():
         return RuntimeEnvironment.SANDBOX, ""
 
     # Below threshold — the process must either be outside a sandbox

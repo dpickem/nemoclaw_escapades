@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -233,15 +234,33 @@ def _clean_subprocess_env(
     and omitting them here doubles as a regression check that the
     sub-agent never starts depending on them.
 
+    Sandbox signals: the sub-agent's runtime self-check refuses to
+    start with ``INCONSISTENT`` classification (zero signals on a
+    bare dev laptop).  On the host we can reliably set only the
+    three env-based signals (``OPENSHELL_SANDBOX``, ``HTTPS_PROXY``,
+    ``SSL_CERT_FILE``) — the path checks (``/sandbox``, ``/app/src``)
+    need root and the DNS check needs ``inference.local`` to resolve.
+    We lower the signal threshold to ``3`` via
+    ``NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD`` so the classifier still
+    runs against real signals; prod behaviour is unaffected (the env
+    var is only set here).  ``SSL_CERT_FILE`` points at the Python
+    runtime's default CA bundle so httpx's client init (which parses
+    the file at constructor time) doesn't blow up.
+
     Non-secret config flows through the YAML at *yaml_path* via
-    ``NEMOCLAW_CONFIG_PATH``; env vars here hold secrets only.
+    ``NEMOCLAW_CONFIG_PATH``; env vars here hold secrets and
+    sandbox-detection signals only.
     """
     return {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(home),
         "PYTHONPATH": str(_repo_root() / "src"),
-        "INFERENCE_HUB_API_KEY": "test-key",
         "NEMOCLAW_CONFIG_PATH": str(yaml_path),
+        # Sandbox signals — see docstring.
+        "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD": "3",
+        "OPENSHELL_SANDBOX": "1",
+        "HTTPS_PROXY": "http://openshell-proxy.invalid:3128",
+        "SSL_CERT_FILE": ssl.get_default_verify_paths().cafile,
     }
 
 

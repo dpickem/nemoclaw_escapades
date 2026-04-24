@@ -28,6 +28,10 @@ def _scrub_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "https_proxy",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
+        # Test-only threshold override the subprocess integration tests
+        # set — scrub it here so a stale shell export doesn't change
+        # the classifier's cut-off for the unit tests.
+        "NEMOCLAW_SANDBOX_SIGNAL_THRESHOLD",
     ):
         monkeypatch.delenv(key, raising=False)
 
