@@ -104,10 +104,10 @@ class TestRegistrySurface:
         # Core stays core (not tracked); unknown silently dropped.
         assert registry.surfaced_non_core == frozenset()
 
-    def test_reset_surface_wipes_surfaced_tools(self) -> None:
+    def test_reset_tool_surface_wipes_surfaced_tools(self) -> None:
         registry = self._populated()
         registry.mark_surfaced(["search_jira", "fetch_web"])
-        registry.reset_surface()
+        registry.reset_tool_surface()
         assert registry.surfaced_non_core == frozenset()
         names = {d.function.name for d in registry.tool_definitions()}
         assert names == {"read_file"}
@@ -119,9 +119,7 @@ class TestRegistrySearch:
     def _jira_registry(self) -> ToolRegistry:
         registry = ToolRegistry()
         registry.register(
-            _echo_tool(
-                "read_file", "read a workspace file, including jira-exported text files"
-            )
+            _echo_tool("read_file", "read a workspace file, including jira-exported text files")
         )
         registry.register(
             _echo_tool("search_jira", "search Jira issues", toolset="jira", is_core=False)
@@ -192,9 +190,7 @@ class TestToolSearchTool:
             _echo_tool("search_jira", "search Jira issues", toolset="jira", is_core=False)
         )
         registry.register(
-            _echo_tool(
-                "get_jira_issue", "fetch a single Jira issue", toolset="jira", is_core=False
-            )
+            _echo_tool("get_jira_issue", "fetch a single Jira issue", toolset="jira", is_core=False)
         )
         registry.register(
             _echo_tool(
@@ -244,9 +240,7 @@ class TestToolSearchTool:
 
     @pytest.mark.asyncio
     async def test_tool_search_clamps_limit(self, registry: ToolRegistry) -> None:
-        raw = await registry.execute(
-            "tool_search", json.dumps({"query": "jira", "limit": 999})
-        )
+        raw = await registry.execute("tool_search", json.dumps({"query": "jira", "limit": 999}))
         payload = json.loads(raw)
         assert payload["limit"] == 15  # clamped to _MAX_LIMIT
 
@@ -275,9 +269,7 @@ class TestCodingToolRegistryRegistersToolSearch:
         assert "tool_search" in registry
         assert registry.get("tool_search").is_core is True
 
-    def test_coding_registry_has_no_non_core_tools_by_default(
-        self, tmp_path
-    ) -> None:
+    def test_coding_registry_has_no_non_core_tools_by_default(self, tmp_path) -> None:
         # Coding sub-agent's full surface is deliberately core: file /
         # search / bash / git are used every turn.  ``tool_search``
         # rides along for future-compat but finds nothing today.
@@ -324,9 +316,7 @@ class TestFullToolRegistryIntegration:
 
         # Jira tools registered and flagged non-core at their @tool sites.
         assert registry.names_in_toolset("jira"), "Jira tools should be registered"
-        assert all(
-            not registry.get(name).is_core for name in registry.names_in_toolset("jira")
-        )
+        assert all(not registry.get(name).is_core for name in registry.names_in_toolset("jira"))
 
         # Default tool list is coding + tool_search — no Jira yet.
         default_names = {d.function.name for d in registry.tool_definitions()}

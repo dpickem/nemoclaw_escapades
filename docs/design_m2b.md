@@ -1238,9 +1238,9 @@ mark their non-core tools and register it.
 | Task | Files | Status |
 |------|-------|--------|
 | Add `ToolSpec.is_core` flag; default `True` (no behaviour change) | `tools/registry.py` | ✅ |
-| Extend `ToolRegistry`: `search()`, `mark_surfaced()`, `reset_surface()`, `core_names` / `non_core_names` / `surfaced_non_core` properties; make `tool_definitions()` core-only by default with surfaced non-core tools opted back in | `tools/registry.py` | ✅ |
+| Extend `ToolRegistry`: `search()`, `mark_surfaced()`, `reset_tool_surface()`, `core_names` / `non_core_names` / `surfaced_non_core` properties; make `tool_definitions()` core-only by default with surfaced non-core tools opted back in | `tools/registry.py` | ✅ |
 | Implement `tool_search` meta-tool (keyword search over all registered specs; marks matches as surfaced so the next inference round sees them) | `tools/tool_search.py` | ✅ |
-| `AgentLoop`: refresh `tool_defs` per round (drop the once-per-run snapshot) and call `reset_surface()` at the start of `run()` | `agent/loop.py` | ✅ |
+| `AgentLoop`: refresh `tool_defs` per round (drop the once-per-run snapshot) and call `reset_tool_surface()` at the start of `run()` | `agent/loop.py` | ✅ |
 | Integrate into orchestrator: register `tool_search`; mark every service tool (Jira / GitLab / Gerrit / Confluence / Slack search / web search) `is_core=False` at its `@tool` definition site so prompt visibility is declared alongside the tool itself | `tools/{jira,gitlab,gerrit,confluence,slack_search,web_search}.py`, `tools/tool_registry_factory.py` | ✅ |
 | Integrate into coding sub-agent: register `tool_search` (coding + skill tools stay `is_core=True`; the meta-tool is a no-op until non-core tools are added later) | `tools/tool_registry_factory.py` | ✅ |
 | Unit tests: registry surface state, `search()` relevance, `tool_search` handler (limit floor/ceiling, surfacing side-effect, no-match no-op) | `tests/test_tool_search.py` — `TestIsCoreDefault`, `TestRegistrySurface`, `TestRegistrySearch`, `TestToolSearchTool`, `TestNonCoreServiceToolsetsList` | ✅ |

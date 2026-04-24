@@ -204,8 +204,8 @@ class ToolRegistry:
     that tracks which non-core tools the :mod:`tool_search` meta-tool
     has exposed during the current :meth:`AgentLoop.run` invocation.
     :class:`~nemoclaw_escapades.agent.loop.AgentLoop` calls
-    :meth:`reset_surface` at the start of every ``run()`` so each
-    task begins with only the core tools visible.
+    :meth:`reset_tool_surface` at the start of every ``run()`` so
+    each task begins with only the core tools visible.
     """
 
     def __init__(self) -> None:
@@ -293,7 +293,7 @@ class ToolRegistry:
     # :meth:`mark_surfaced` to mirror its matches into the next
     # round's ``tools`` list; :meth:`tool_definitions` reads the set;
     # :class:`~nemoclaw_escapades.agent.loop.AgentLoop` calls
-    # :meth:`reset_surface` at the start of each ``run()`` so
+    # :meth:`reset_tool_surface` at the start of each ``run()`` so
     # cross-task carryover can't accidentally expose tools.
 
     @property
@@ -311,7 +311,7 @@ class ToolRegistry:
         """Non-core tools currently surfaced for the active task."""
         return frozenset(self._surfaced_non_core)
 
-    def reset_surface(self) -> None:
+    def reset_tool_surface(self) -> None:
         """Forget which non-core tools are surfaced (start of a new task)."""
         self._surfaced_non_core.clear()
 

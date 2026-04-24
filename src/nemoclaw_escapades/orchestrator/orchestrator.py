@@ -604,15 +604,21 @@ class Orchestrator:
         pending.working_messages.extend(tool_results)
 
         # Re-enter the agent loop so the model can see the tool results
-        # and generate a final response.  If the model requests *another*
-        # write tool (cascading approval), we catch and re-save — the
-        # user will see a second Approve/Deny prompt.
+        # and generate a final response.  ``reset_tool_surface=False``
+        # keeps any non-core tools that ``tool_search`` surfaced
+        # pre-approval callable post-approval — otherwise
+        # ``pending.working_messages`` would still reference those tools
+        # but ``tool_definitions()`` wouldn't include them, blocking the
+        # model's next tool_call.  If the model requests *another* write
+        # tool (cascading approval), we catch and re-save — the user
+        # will see a second Approve/Deny prompt.
         try:
             result = await self._agent_loop.run(
                 pending.working_messages,
                 pending.request_id,
                 thread_ts=thread_key,
                 on_tool_start=callback,
+                reset_tool_surface=False,
             )
             content = result.content
         except WriteApprovalError as exc:

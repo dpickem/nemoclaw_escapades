@@ -758,3 +758,115 @@ class TestConcurrentExecution:
         payload = json.loads(msg["content"])
         assert "error" in payload
         assert payload["tool"] == "echo"
+
+
+# ---------------------------------------------------------------------------
+# ToolSearch surface state interaction
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceReset:
+    """``run`` resets the registry's surfaced-tool set unless told not to.
+
+    Regression: an unconditional ``reset_tool_surface()`` at the top of
+    ``run`` wiped tools that ``tool_search`` had surfaced before a
+    write tool's approval pause.  The resumed conversation's
+    ``working_messages`` still referenced those tools but
+    ``tool_definitions()`` no longer included them, blocking the
+    model's next non-core ``tool_call`` (constrained decoding).
+    """
+
+    def _registry_with_non_core(self) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="echo",
+                description="Echoes the input",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_core=True,
+                toolset="test",
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="search_jira",
+                description="Search Jira issues",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_core=False,
+                toolset="jira",
+            )
+        )
+        return registry
+
+    async def test_run_clears_surface_by_default(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Fresh task starts: surface state from any prior run is wiped."""
+        registry = self._registry_with_non_core()
+        registry.mark_surfaced(["search_jira"])
+
+        backend = ToolMockBackend()
+        backend.add_response(content="hi", finish_reason="stop")
+        loop = AgentLoop(backend=backend, tools=registry, config=config)
+
+        await loop.run(_make_messages(), request_id="req-fresh")
+
+        assert registry.surfaced_non_core == frozenset()
+
+    async def test_run_preserves_surface_when_reset_disabled(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """Approval-resume path keeps tools surfaced across the pause.
+
+        Mirrors ``orchestrator.handle_write_approval``: the resumed
+        ``run`` call passes ``reset_tool_surface=False`` so non-core
+        tools the model surfaced before the write-approval gate stay
+        callable on the post-approval round.
+        """
+        registry = self._registry_with_non_core()
+        registry.mark_surfaced(["search_jira"])
+
+        backend = ToolMockBackend()
+        backend.add_response(content="resumed reply", finish_reason="stop")
+        loop = AgentLoop(backend=backend, tools=registry, config=config)
+
+        await loop.run(
+            _make_messages(),
+            request_id="req-resume",
+            reset_tool_surface=False,
+        )
+
+        # Surface set survived the resume, and the next inference
+        # round's tools list reflects it.
+        assert registry.surfaced_non_core == frozenset({"search_jira"})
+        names = {d.function.name for d in registry.tool_definitions()}
+        assert "search_jira" in names
+
+    async def test_resume_inference_request_includes_surfaced_tool(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """The actual ``InferenceRequest.tools`` on the resume call
+        carries the previously-surfaced non-core tool, so the model's
+        constrained decoder will accept a tool_call against it."""
+        registry = self._registry_with_non_core()
+        registry.mark_surfaced(["search_jira"])
+
+        backend = ToolMockBackend()
+        backend.add_response(content="ok", finish_reason="stop")
+        loop = AgentLoop(backend=backend, tools=registry, config=config)
+
+        await loop.run(
+            _make_messages(),
+            request_id="req-resume-tools",
+            reset_tool_surface=False,
+        )
+
+        # Exactly one inference call on this resume.
+        assert len(backend.calls) == 1
+        sent_tool_names = {t.function.name for t in (backend.calls[0].tools or [])}
+        assert "search_jira" in sent_tool_names

@@ -170,6 +170,8 @@ class AgentLoop:
         request_id: str,
         thread_ts: str | None = None,
         on_tool_start: ToolStartCallback | None = None,
+        *,
+        reset_tool_surface: bool = True,
     ) -> AgentLoopResult:
         """Run the multi-turn tool-use loop.
 
@@ -199,6 +201,17 @@ class AgentLoop:
                 precedence over the instance-level ``_on_tool_start``.
                 Passed as a parameter (not shared state) so concurrent
                 requests don't clobber each other's callbacks.
+            reset_tool_surface: Whether to clear the registry's
+                ``tool_search``-surfaced non-core tools at run start.
+                Default ``True`` for fresh tasks.  Approval-resume
+                callers (orchestrator's ``handle_write_approval``)
+                pass ``False`` so non-core tools the model surfaced
+                pre-approval stay callable post-approval — otherwise
+                ``working_messages`` would still reference tools that
+                ``tool_definitions()`` no longer advertises and the
+                model would either be unable to call them
+                (constrained decoding) or have to waste a round
+                re-invoking ``tool_search``.
 
         Returns:
             An ``AgentLoopResult`` with the final text, round/tool
@@ -216,7 +229,10 @@ class AgentLoop:
         # ``tool_search`` calls surfaced.  Registration-time state
         # (core vs. non-core) is unchanged; this just clears the
         # per-run bucket the registry uses to gate ``tool_definitions``.
-        self._tools.reset_surface()
+        # Skipped on approval-resume so surfaced tools survive the
+        # pause — see the ``reset_tool_surface`` kwarg.
+        if reset_tool_surface:
+            self._tools.reset_tool_surface()
 
         # Shallow-copy so callers' original list is never mutated.
         # We append assistant/tool messages to this as the loop progresses.
