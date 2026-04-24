@@ -38,7 +38,6 @@ from pathlib import Path
 
 import pytest
 
-
 _CANNED_REPLY = "hello from the mock inference server"
 
 
@@ -164,9 +163,7 @@ def _start_mock_server(
     responses: list[dict[str, object]],
 ) -> tuple[_ScriptedMockServer, threading.Thread]:
     """Bind the mock to a kernel-picked free port and serve in a thread."""
-    server = _ScriptedMockServer(
-        ("127.0.0.1", 0), _ScriptedMockHandler, responses=responses
-    )
+    server = _ScriptedMockServer(("127.0.0.1", 0), _ScriptedMockHandler, responses=responses)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -322,8 +319,7 @@ def test_agent_subprocess_runs_task_end_to_end(
         f"---- stderr ----\n{result.stderr}\n"
     )
     assert _CANNED_REPLY in result.stdout, (
-        f"expected canned reply in stdout; got:\n{result.stdout!r}\n"
-        f"stderr:\n{result.stderr}"
+        f"expected canned reply in stdout; got:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
 
 
@@ -422,18 +418,13 @@ def test_agent_subprocess_executes_file_tool_call(tmp_path: Path) -> None:
     # was dispatched through the real ``ToolRegistry`` and the file
     # tool executed against the scoped workspace root.
     agent_dirs = [p for p in workspace.iterdir() if p.is_dir() and p.name.startswith("agent-")]
-    assert len(agent_dirs) == 1, (
-        f"expected one per-agent workspace; got {agent_dirs}"
-    )
+    assert len(agent_dirs) == 1, f"expected one per-agent workspace; got {agent_dirs}"
     written = agent_dirs[0] / file_name
-    assert written.is_file(), (
-        f"{written} not written.  stderr:\n{result.stderr}"
-    )
+    assert written.is_file(), f"{written} not written.  stderr:\n{result.stderr}"
     assert written.read_text() == file_content
     # Final reply reaches stdout.
     assert final_reply in result.stdout, (
-        f"expected final reply in stdout; got:\n{result.stdout!r}\n"
-        f"stderr:\n{result.stderr}"
+        f"expected final reply in stdout; got:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
 
 
@@ -482,8 +473,7 @@ def test_agent_subprocess_honours_yaml_deployment_override(
     # root, not under the ``CODING_WORKSPACE_ROOT`` env (which we
     # removed) and not under the dataclass default.
     assert yaml_ws.is_dir(), (
-        f"expected YAML-supplied workspace {yaml_ws} to be created.\n"
-        f"stderr:\n{result.stderr}"
+        f"expected YAML-supplied workspace {yaml_ws} to be created.\nstderr:\n{result.stderr}"
     )
     agent_dirs = [p for p in yaml_ws.iterdir() if p.is_dir()]
     assert any(p.name.startswith("agent-") for p in agent_dirs), (
@@ -536,8 +526,7 @@ def test_agent_subprocess_inconsistent_runtime_fails_fast(
     # The raised exception reaches stderr via ``asyncio.run``'s
     # default traceback handler.
     assert "SandboxConfigurationError" in result.stderr, (
-        "expected SandboxConfigurationError on stderr; got:\n"
-        f"{result.stderr}"
+        f"expected SandboxConfigurationError on stderr; got:\n{result.stderr}"
     )
     # The structured diagnostic ("refusing to start" is part of
     # ``SandboxConfigurationError``'s message) is present so operators

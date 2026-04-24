@@ -235,8 +235,7 @@ def _classify(signals_present: tuple[str, ...]) -> tuple[RuntimeEnvironment, str
         or _SIGNAL_SSL_CERT_BUNDLE in signals_present
     )
     has_path_signals = (
-        _SIGNAL_SANDBOX_DIR in signals_present
-        or _SIGNAL_APP_SRC_PRESENT in signals_present
+        _SIGNAL_SANDBOX_DIR in signals_present or _SIGNAL_APP_SRC_PRESENT in signals_present
     )
     if has_env_signals and not has_path_signals:
         cause = "sandbox env vars present but paths missing (not inside a sandbox)"

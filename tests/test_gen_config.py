@@ -108,13 +108,10 @@ class TestResolverHappyPath:
         gen_config_mod: object,
     ) -> None:
         (sandbox_cwd / ".env").write_text(
-            "SOME_OTHER_VAR=definitely-not-in-allowlist\n"
-            "GIT_CLONE_ALLOWED_HOSTS=github.com\n"
+            "SOME_OTHER_VAR=definitely-not-in-allowlist\nGIT_CLONE_ALLOWED_HOSTS=github.com\n"
         )
         gen_config_mod.main()  # type: ignore[attr-defined]
-        resolved_text = (
-            sandbox_cwd / "config" / "orchestrator.resolved.yaml"
-        ).read_text()
+        resolved_text = (sandbox_cwd / "config" / "orchestrator.resolved.yaml").read_text()
         # Allowlisted key flows through.
         assert "github.com" in resolved_text
         # Unknown key never appears in the resolved output.
@@ -140,9 +137,7 @@ class TestSelfDiagnosingSummary:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         # Only one of the three allowlisted keys is present.
-        (sandbox_cwd / ".env").write_text(
-            "GIT_CLONE_ALLOWED_HOSTS=github.com\n"
-        )
+        (sandbox_cwd / ".env").write_text("GIT_CLONE_ALLOWED_HOSTS=github.com\n")
         gen_config_mod.main()  # type: ignore[attr-defined]
         stdout = capsys.readouterr().out
         # The applied override is reported.
@@ -163,11 +158,7 @@ class TestSelfDiagnosingSummary:
         # A key declared but left empty must be reported, not silently
         # dropped — matches the ``.env.example`` pattern where every
         # category-B key is written with an empty value by default.
-        (sandbox_cwd / ".env").write_text(
-            "GITLAB_URL=\n"
-            "GERRIT_URL=\n"
-            "GIT_CLONE_ALLOWED_HOSTS=\n"
-        )
+        (sandbox_cwd / ".env").write_text("GITLAB_URL=\nGERRIT_URL=\nGIT_CLONE_ALLOWED_HOSTS=\n")
         gen_config_mod.main()  # type: ignore[attr-defined]
         stdout = capsys.readouterr().out
         assert "category-B overrides skipped" in stdout
@@ -186,14 +177,9 @@ class TestSecretGuard:
         gen_config_mod: object,
     ) -> None:
         # ``*_TOKEN`` in .env — not on the allowlist, so ignored.
-        (sandbox_cwd / ".env").write_text(
-            "SLACK_BOT_TOKEN=xoxb-secret\n"
-            "JIRA_AUTH=Basic secret\n"
-        )
+        (sandbox_cwd / ".env").write_text("SLACK_BOT_TOKEN=xoxb-secret\nJIRA_AUTH=Basic secret\n")
         gen_config_mod.main()  # type: ignore[attr-defined]
-        resolved_text = (
-            sandbox_cwd / "config" / "orchestrator.resolved.yaml"
-        ).read_text()
+        resolved_text = (sandbox_cwd / "config" / "orchestrator.resolved.yaml").read_text()
         # Secrets never appear in the resolved file.
         assert "xoxb-secret" not in resolved_text
         assert "Basic secret" not in resolved_text
@@ -369,9 +355,7 @@ class TestFullyResolvedConfig:
     @staticmethod
     def _resolved(cwd: Path) -> dict[str, object]:
         """Return the resolved YAML parsed as a dict."""
-        return yaml.safe_load(
-            (cwd / "config" / "orchestrator.resolved.yaml").read_text()
-        )
+        return yaml.safe_load((cwd / "config" / "orchestrator.resolved.yaml").read_text())
 
     def test_every_category_b_key_is_covered_by_synthetic_env(
         self,
@@ -409,9 +393,7 @@ class TestFullyResolvedConfig:
         for env_key, dotted in allowlist.items():
             node: object = resolved
             for part in dotted.split("."):
-                assert isinstance(node, dict), (
-                    f"dotted path {dotted!r} broken at {part!r}"
-                )
+                assert isinstance(node, dict), f"dotted path {dotted!r} broken at {part!r}"
                 assert part in node, f"dotted path {dotted!r} missing {part!r}"
                 node = node[part]
             assert isinstance(node, str) and node, (
@@ -428,12 +410,8 @@ class TestFullyResolvedConfig:
         gen_config_mod.main()  # type: ignore[attr-defined]
         resolved = self._resolved(sandbox_cwd)
 
-        missing_sections = [
-            s for s in self._EXPECTED_TOP_LEVEL if s not in resolved
-        ]
-        assert not missing_sections, (
-            f"resolved YAML missing top-level sections: {missing_sections}"
-        )
+        missing_sections = [s for s in self._EXPECTED_TOP_LEVEL if s not in resolved]
+        assert not missing_sections, f"resolved YAML missing top-level sections: {missing_sections}"
 
     def test_every_toolset_entry_present(
         self,
@@ -447,12 +425,8 @@ class TestFullyResolvedConfig:
 
         toolsets = resolved.get("toolsets") or {}
         assert isinstance(toolsets, dict)
-        missing_toolsets = [
-            t for t in self._EXPECTED_TOOLSETS if t not in toolsets
-        ]
-        assert not missing_toolsets, (
-            f"toolsets missing: {missing_toolsets}"
-        )
+        missing_toolsets = [t for t in self._EXPECTED_TOOLSETS if t not in toolsets]
+        assert not missing_toolsets, f"toolsets missing: {missing_toolsets}"
         # Every toolset carries an ``enabled`` flag.
         for name in self._EXPECTED_TOOLSETS:
             entry = toolsets[name]
@@ -484,16 +458,12 @@ class TestFullyResolvedConfig:
             entry = toolsets[name]
             assert "url" in entry, f"toolsets.{name} missing 'url'"
             url = entry["url"]
-            assert isinstance(url, str) and url, (
-                f"toolsets.{name}.url is empty"
-            )
+            assert isinstance(url, str) and url, f"toolsets.{name}.url is empty"
             parsed = urlparse(url)
             assert parsed.scheme in ("http", "https"), (
                 f"toolsets.{name}.url has unexpected scheme: {url!r}"
             )
-            assert parsed.hostname, (
-                f"toolsets.{name}.url has no hostname: {url!r}"
-            )
+            assert parsed.hostname, f"toolsets.{name}.url has no hostname: {url!r}"
 
     def test_resolved_config_round_trips_through_appconfig(
         self,
@@ -521,9 +491,7 @@ class TestFullyResolvedConfig:
 
         from nemoclaw_escapades.config import AppConfig
 
-        config = AppConfig.load(
-            path=sandbox_cwd / "config" / "orchestrator.resolved.yaml"
-        )
+        config = AppConfig.load(path=sandbox_cwd / "config" / "orchestrator.resolved.yaml")
         # Category-B URLs flowed through to the typed config.
         assert config.gitlab.url == "https://gitlab.test.example.com"
         assert config.gerrit.url == "https://gerrit.test.example.com/r/a"
@@ -563,9 +531,7 @@ class TestFullyResolvedConfig:
         (sandbox_cwd / ".env").write_text(env_body)
         gen_config_mod.main()  # type: ignore[attr-defined]
 
-        resolved_text = (
-            sandbox_cwd / "config" / "orchestrator.resolved.yaml"
-        ).read_text()
+        resolved_text = (sandbox_cwd / "config" / "orchestrator.resolved.yaml").read_text()
         # Category-B synthetic values flow through.
         assert "gitlab.test.example.com" in resolved_text
         # Every secret stays out.

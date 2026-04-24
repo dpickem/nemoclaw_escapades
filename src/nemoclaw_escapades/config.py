@@ -796,9 +796,7 @@ def _apply_yaml_overlay(config: AppConfig, path: str | Path | None) -> None:
                 )
 
     # Unknown top-level keys: log, but don't fail.  Forward-compat.
-    known_top_level = (
-        set(_DIRECT_SECTIONS) | {"toolsets"} | _RESERVED_YAML_KEYS
-    )
+    known_top_level = set(_DIRECT_SECTIONS) | {"toolsets"} | _RESERVED_YAML_KEYS
     for key in overlay:
         if key not in known_top_level:
             logger.warning(

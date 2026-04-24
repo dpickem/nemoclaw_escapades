@@ -8,8 +8,6 @@ and *Startup self-check*.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from nemoclaw_escapades.runtime import (
@@ -17,7 +15,6 @@ from nemoclaw_escapades.runtime import (
     SandboxConfigurationError,
     detect_runtime_environment,
 )
-
 
 # ── Env & path helpers ──────────────────────────────────────────────
 

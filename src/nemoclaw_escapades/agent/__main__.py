@@ -51,7 +51,11 @@ from nemoclaw_escapades.config import (
     load_dotenv_if_present,
     load_system_prompt,
 )
-from nemoclaw_escapades.observability.logging import get_logger, setup_logging
+from nemoclaw_escapades.observability.logging import (
+    _MergingAdapter,
+    get_logger,
+    setup_logging,
+)
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
     SandboxConfigurationError,
@@ -59,7 +63,6 @@ from nemoclaw_escapades.runtime import (
 )
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
-
 
 # Identity layer for the sub-agent's system prompt.  Written as a
 # file so operators can tune it without redeploying.  Falls back to
@@ -132,7 +135,7 @@ async def _run_task(
     identity_prompt: str,
     bundle: AgentSetupBundle,
     config: AppConfig,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
 ) -> str:
     """Run one task end-to-end and return the final assistant text.
 
@@ -205,7 +208,7 @@ async def _run_cli_mode(
     workspace_root: str | None,
     config: AppConfig,
     backend: BackendBase,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
 ) -> int:
     """Run a single task from a CLI arg and print the result.
 
@@ -222,9 +225,7 @@ async def _run_cli_mode(
     appears in both the workspace path and the scratchpad filename.
     """
     agent_id = _make_agent_id()
-    base_workspace = Path(
-        workspace_root or config.coding.workspace_root
-    ).expanduser()
+    base_workspace = Path(workspace_root or config.coding.workspace_root).expanduser()
     per_agent_workspace = base_workspace / f"agent-{agent_id}"
     bundle = AgentSetupBundle(
         task_id=f"cli-{_make_agent_id()}",
@@ -248,7 +249,7 @@ async def _run_cli_mode(
 async def _run_nmb_mode(
     config: AppConfig,
     backend: BackendBase,
-    logger: logging.Logger,
+    logger: logging.Logger | _MergingAdapter,
     shutdown_event: asyncio.Event,
 ) -> int:
     """Connect to NMB and handle ``task.assign`` messages.
@@ -331,8 +332,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace",
         type=str,
         default=None,
-        help="Workspace root (CLI mode only).  Defaults to "
-        "``config.coding.workspace_root``.",
+        help="Workspace root (CLI mode only).  Defaults to ``config.coding.workspace_root``.",
     )
     return parser.parse_args(argv)
 

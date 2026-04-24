@@ -23,7 +23,6 @@ import pytest
 from nemoclaw_escapades.agent import __main__ as agent_main
 from nemoclaw_escapades.agent.types import AgentSetupBundle
 
-
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -52,9 +51,7 @@ class TestArgParsing:
     """``_parse_args`` enforces the mutually-exclusive run modes."""
 
     def test_task_mode_parses(self) -> None:
-        args = agent_main._parse_args(
-            ["--task", "fix the bug", "--workspace", "/tmp/ws"]
-        )
+        args = agent_main._parse_args(["--task", "fix the bug", "--workspace", "/tmp/ws"])
         assert args.task == "fix the bug"
         assert args.workspace == "/tmp/ws"
         assert args.nmb is False

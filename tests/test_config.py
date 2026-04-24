@@ -20,7 +20,6 @@ from nemoclaw_escapades.config import (
     load_dotenv_if_present,
 )
 
-
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -137,9 +136,7 @@ class TestYamlOverlay:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "partial.yaml"
-        yaml_path.write_text(
-            "coding:\n  workspace_root: /sandbox/workspace\n"
-        )
+        yaml_path.write_text("coding:\n  workspace_root: /sandbox/workspace\n")
         config = AppConfig.load(path=yaml_path)
         # Overridden by YAML.
         assert config.coding.workspace_root == "/sandbox/workspace"
@@ -177,17 +174,13 @@ class TestYamlOverlay:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "weird.yaml"
         yaml_path.write_text(
-            "future_feature:\n  knob: 42\n"
-            "coding:\n  workspace_root: /sandbox/workspace\n"
+            "future_feature:\n  knob: 42\ncoding:\n  workspace_root: /sandbox/workspace\n"
         )
         config = AppConfig.load(path=yaml_path)
         # Known section still applied.
         assert config.coding.workspace_root == "/sandbox/workspace"
         # Unknown section logged at WARNING.
-        assert any(
-            "Unknown top-level key in YAML overlay" in r.message
-            for r in caplog.records
-        )
+        assert any("Unknown top-level key in YAML overlay" in r.message for r in caplog.records)
 
     def test_unknown_field_in_known_section_logs_warning(
         self,
@@ -197,15 +190,10 @@ class TestYamlOverlay:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "bad_field.yaml"
-        yaml_path.write_text(
-            "coding:\n  workspace_root: /sandbox/workspace\n  future_knob: 42\n"
-        )
+        yaml_path.write_text("coding:\n  workspace_root: /sandbox/workspace\n  future_knob: 42\n")
         config = AppConfig.load(path=yaml_path)
         assert config.coding.workspace_root == "/sandbox/workspace"
-        assert any(
-            "Unknown field in YAML overlay section" in r.message
-            for r in caplog.records
-        )
+        assert any("Unknown field in YAML overlay section" in r.message for r in caplog.records)
 
     def test_malformed_yaml_raises(
         self,
@@ -241,11 +229,7 @@ class TestYamlOverlay:
         # top-level-key warning.
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "agent_loop.yaml"
-        yaml_path.write_text(
-            "agent_loop:\n"
-            "  max_tool_rounds: 20\n"
-            "  compaction_min_keep: 8\n"
-        )
+        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 20\n  compaction_min_keep: 8\n")
         caplog.clear()
         config = AppConfig.load(path=yaml_path)
         assert config.agent_loop.max_tool_rounds == 20
@@ -298,9 +282,7 @@ class TestInferenceModelPropagation:
         """Orchestrator prompting fields sync into ``agent_loop``."""
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text(
-            "orchestrator:\n  temperature: 0.33\n  max_tokens: 12345\n"
-        )
+        yaml_path.write_text("orchestrator:\n  temperature: 0.33\n  max_tokens: 12345\n")
         config = AppConfig.load(path=yaml_path)
         assert config.orchestrator.temperature == 0.33
         assert config.orchestrator.max_tokens == 12345
@@ -352,8 +334,7 @@ class TestInferenceModelPropagation:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text(
-            "inference:\n  model: fast-model\n"
-            "orchestrator:\n  model: smart-model\n"
+            "inference:\n  model: fast-model\norchestrator:\n  model: smart-model\n"
         )
         config = AppConfig.load(path=yaml_path)
         assert config.inference.model == "fast-model"
@@ -383,11 +364,7 @@ class TestYamlPrecedence:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text(
-            "nmb:\n"
-            "  broker_url: ws://broker.example:9999\n"
-            "  sandbox_id: sub-42\n"
-        )
+        yaml_path.write_text("nmb:\n  broker_url: ws://broker.example:9999\n  sandbox_id: sub-42\n")
         config = AppConfig.load(path=yaml_path)
         assert config.nmb.broker_url == "ws://broker.example:9999"
         assert config.nmb.sandbox_id == "sub-42"
@@ -399,9 +376,7 @@ class TestYamlPrecedence:
     ) -> None:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
-        yaml_path.write_text(
-            "agent_loop:\n  max_tool_rounds: 42\n  compaction_min_keep: 8\n"
-        )
+        yaml_path.write_text("agent_loop:\n  max_tool_rounds: 42\n  compaction_min_keep: 8\n")
         config = AppConfig.load(path=yaml_path)
         assert config.agent_loop.max_tool_rounds == 42
         assert config.agent_loop.compaction_min_keep == 8
@@ -420,10 +395,7 @@ class TestYamlPrecedence:
         )
         config = AppConfig.load(path=yaml_path)
         assert config.coding.workspace_root == "/sandbox/workspace"
-        assert (
-            config.coding.git_clone_allowed_hosts
-            == "host-a.example.com,host-b.example.com"
-        )
+        assert config.coding.git_clone_allowed_hosts == "host-a.example.com,host-b.example.com"
 
 
 class TestSecretEnvOverrides:

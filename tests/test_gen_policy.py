@@ -77,9 +77,7 @@ def sandbox_cwd(
 
 def _resolved_policy(cwd: Path) -> dict[str, object]:
     """Helper — parse the resolved YAML the resolver just wrote."""
-    return yaml.safe_load(
-        (cwd / "policies" / "orchestrator.resolved.yaml").read_text()
-    )
+    return yaml.safe_load((cwd / "policies" / "orchestrator.resolved.yaml").read_text())
 
 
 def _network_policy(doc: dict[str, object], name: str) -> dict[str, object]:
@@ -103,8 +101,7 @@ class TestHostSubstitution:
         gen_policy_mod: object,
     ) -> None:
         (sandbox_cwd / ".env").write_text(
-            "GITLAB_URL=https://gitlab.example.com\n"
-            "GERRIT_URL=https://gerrit.example.com/r/a\n"
+            "GITLAB_URL=https://gitlab.example.com\nGERRIT_URL=https://gerrit.example.com/r/a\n"
         )
         gen_policy_mod.main()  # type: ignore[attr-defined]
 
@@ -356,13 +353,9 @@ class TestFullyResolvedPolicy:
             for i, ep in enumerate(endpoints):
                 assert isinstance(ep, dict), f"{name}.endpoints[{i}]"
                 host = ep.get("host")
-                assert isinstance(host, str), (
-                    f"{name}.endpoints[{i}].host not a string: {host!r}"
-                )
+                assert isinstance(host, str), f"{name}.endpoints[{i}].host not a string: {host!r}"
                 assert host, f"{name}.endpoints[{i}].host is empty"
-                assert _HOSTNAME_RE.match(host), (
-                    f"{name}.endpoints[{i}].host malformed: {host!r}"
-                )
+                assert _HOSTNAME_RE.match(host), f"{name}.endpoints[{i}].host malformed: {host!r}"
 
     def test_every_endpoint_port_is_valid(
         self,
@@ -377,12 +370,8 @@ class TestFullyResolvedPolicy:
         for name, policy_entry in resolved["network_policies"].items():  # type: ignore[index]
             for i, ep in enumerate(policy_entry["endpoints"]):  # type: ignore[index]
                 port = ep.get("port")
-                assert isinstance(port, int), (
-                    f"{name}.endpoints[{i}].port not int: {port!r}"
-                )
-                assert 1 <= port <= 65535, (
-                    f"{name}.endpoints[{i}].port out of range: {port}"
-                )
+                assert isinstance(port, int), f"{name}.endpoints[{i}].port not int: {port!r}"
+                assert 1 <= port <= 65535, f"{name}.endpoints[{i}].port out of range: {port}"
 
     def test_every_endpoint_protocol_and_enforcement_is_valid(
         self,
@@ -412,8 +401,7 @@ class TestFullyResolvedPolicy:
                     )
                 if "enforcement" in ep:
                     assert ep["enforcement"] in _VALID_ENFORCEMENTS, (
-                        f"{name}.endpoints[{i}].enforcement invalid: "
-                        f"{ep['enforcement']!r}"
+                        f"{name}.endpoints[{i}].enforcement invalid: {ep['enforcement']!r}"
                     )
                 if "access" in ep:
                     assert ep["access"] in _VALID_ACCESS, (
@@ -465,10 +453,7 @@ class TestFullyResolvedPolicy:
                     try:
                         ipaddress.ip_network(cidr, strict=True)
                     except ValueError as exc:
-                        pytest.fail(
-                            f"host={want_host!r} has invalid CIDR "
-                            f"{cidr!r}: {exc}"
-                        )
+                        pytest.fail(f"host={want_host!r} has invalid CIDR {cidr!r}: {exc}")
 
     def test_required_top_level_sections_present(
         self,
@@ -507,9 +492,7 @@ class TestFullyResolvedPolicy:
             assert paths, f"filesystem_policy.{key} is empty"
             for p in paths:
                 assert isinstance(p, str), f"{key} entry not str: {p!r}"
-                assert p.startswith("/"), (
-                    f"filesystem_policy.{key} has non-absolute path: {p!r}"
-                )
+                assert p.startswith("/"), f"filesystem_policy.{key} has non-absolute path: {p!r}"
 
     def test_every_endpoint_has_at_least_one_binary(
         self,
@@ -531,9 +514,7 @@ class TestFullyResolvedPolicy:
             binaries = policy_entry.get("binaries") or []
             assert binaries, f"{name} has no binaries"
             for b in binaries:
-                assert isinstance(b, dict) and "path" in b, (
-                    f"{name} binary entry malformed: {b!r}"
-                )
+                assert isinstance(b, dict) and "path" in b, f"{name} binary entry malformed: {b!r}"
                 assert isinstance(b["path"], str) and b["path"].startswith("/"), (
                     f"{name} binary.path not absolute: {b['path']!r}"
                 )
@@ -580,9 +561,7 @@ class TestFullyResolvedPolicy:
         (sandbox_cwd / ".env").write_text(env_body)
         gen_policy_mod.main()  # type: ignore[attr-defined]
 
-        resolved_text = (
-            sandbox_cwd / "policies" / "orchestrator.resolved.yaml"
-        ).read_text()
+        resolved_text = (sandbox_cwd / "policies" / "orchestrator.resolved.yaml").read_text()
         # Category-B synthetic values flow through.
         assert "gitlab.test.example.com" in resolved_text
         # Every secret stays out.

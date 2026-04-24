@@ -85,9 +85,7 @@ class TestGitToolRegistration:
         register_git_tools(reg, str(workspace), include_commit=False)
         assert "git_commit" not in reg.names
         # The read + clone tools are still there.
-        assert {"git_diff", "git_log", "git_checkout", "git_clone"}.issubset(
-            set(reg.names)
-        )
+        assert {"git_diff", "git_log", "git_checkout", "git_clone"}.issubset(set(reg.names))
 
 
 class TestGitHandlers:
@@ -199,9 +197,7 @@ class TestGitClone:
         desc = reg.get("git_clone").description  # type: ignore[union-attr]
         assert "Approved hosts: github.com, gitlab.example.com" in desc
 
-    def test_description_marks_disabled_when_allowlist_empty(
-        self, workspace: Path
-    ) -> None:
+    def test_description_marks_disabled_when_allowlist_empty(self, workspace: Path) -> None:
         """Empty allowlist → the description explicitly says DISABLED.
 
         Prevents the model from attempting a call it knows will fail,

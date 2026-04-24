@@ -342,6 +342,12 @@ class SlackConnector(ConnectorBase):
         # message_ts)`` of the live approval message.
         self._thread_approval_msg: dict[str, tuple[str, str]] = {}
 
+        # Threads with an in-flight approval click — populated by
+        # ``_handle_with_thinking`` to drop a rapid double-click before
+        # it races into ``_post_thinking`` / the handler.  Cleared in
+        # the same method's ``finally`` block.
+        self._approval_in_flight: set[str] = set()
+
         self._register_listeners()
 
     # ------------------------------------------------------------------
