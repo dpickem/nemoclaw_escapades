@@ -986,6 +986,24 @@ def _sync_agent_loop_prompting_fields(config: AppConfig) -> None:
 
 
 # ── Validation ──────────────────────────────────────────────────────
+#
+# Two kinds of required values are enforced below:
+#
+# - Slack tokens — ``SlackConnector`` can't open its socket-mode
+#   WebSocket without them.  The sandbox receives them as
+#   OpenShell-provider placeholder strings under the same env var
+#   names the connector reads.  Sub-agents pass ``require_slack=False``
+#   because they never dial Slack.
+# - ``inference.base_url`` — sourced from YAML; blanking it is almost
+#   always a malformed per-deployment YAML, so we fail fast.
+#
+# Deliberately NOT checked: ``INFERENCE_HUB_API_KEY``.  The sandbox's
+# inference provider uses a different credential name
+# (``OPENAI_API_KEY``, per the Makefile's ``setup-providers``) and the
+# L7 proxy at ``inference.local`` injects the real key at HTTP-request
+# time; ``InferenceHubBackend`` omits the ``Authorization`` header
+# when ``config.inference.api_key`` is empty.  Requiring it would
+# crash every sandbox startup with a false-positive.
 
 
 def _check_required_config(
@@ -993,46 +1011,18 @@ def _check_required_config(
     *,
     require_slack: bool = True,
 ) -> None:
-    """Ensure required config fields are present.
-
-    Covers two kinds of required values:
-
-    - **Slack tokens** — the orchestrator's ``SlackConnector`` opens
-      a socket-mode WebSocket and can't start without them.  The
-      sandbox receives the tokens as OpenShell-provider placeholder
-      strings (``openshell provider create --credential
-      SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=...``) under the same env
-      var names the connector reads.  The coding sub-agent
-      (``agent/__main__.py``) never touches Slack — its
-      ``_run_cli_mode`` prints to stdout and ``_run_nmb_mode`` talks
-      to the broker — so it opts out via ``require_slack=False``.
-      This is orthogonal to the sandbox runtime gate; both modes
-      run in a sandbox.
-    - **Inference base URL** — sourced from YAML; we fail fast so a
-      malformed YAML drop-in surfaces at startup instead of at the
-      first outbound call.  The default
-      (``https://inference.local/v1``) lives in
-      ``config/defaults.yaml``.
-
-    Deliberately **not** checked: ``INFERENCE_HUB_API_KEY``.  The
-    sandbox's inference provider is registered with a *different*
-    credential name (``OPENAI_API_KEY``, per the Makefile's
-    ``setup-providers``) and the L7 proxy at ``inference.local``
-    injects the real key at HTTP-request time.  The app never reads
-    an API key (``InferenceHubBackend`` omits the ``Authorization``
-    header when ``config.inference.api_key`` is empty), so requiring
-    one would crash every sandbox startup with a false-positive.
+    """Raise ``ValueError`` if any required config field is missing.
 
     Args:
         config: ``AppConfig`` to validate.
         require_slack: Whether Slack bot + app tokens are required.
-            Defaults to ``True`` for the orchestrator.  Sub-agents
+            Defaults to ``True`` for the orchestrator; sub-agents
             pass ``False``.
 
     Raises:
         ValueError: If any required value is missing.  Message lists
-            all missing keys so the operator sees the full set in one
-            pass.
+            every missing key so the operator sees the full set in
+            one pass.
     """
     missing: list[str] = []
     if require_slack:
