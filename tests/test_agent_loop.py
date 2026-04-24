@@ -765,15 +765,29 @@ class TestConcurrentExecution:
 # ---------------------------------------------------------------------------
 
 
-class TestSurfaceReset:
-    """``run`` resets the registry's surfaced-tool set unless told not to.
+class TestPreSurfacedTools:
+    """``run`` always resets the surface, then re-applies ``pre_surfaced_tools``.
 
-    Regression: an unconditional ``reset_tool_surface()`` at the top of
-    ``run`` wiped tools that ``tool_search`` had surfaced before a
-    write tool's approval pause.  The resumed conversation's
-    ``working_messages`` still referenced those tools but
-    ``tool_definitions()`` no longer included them, blocking the
-    model's next non-core ``tool_call`` (constrained decoding).
+    Regression for two interacting issues:
+
+    1. An earlier fix tried to keep non-core tools surfaced across
+       a write-approval pause via a ``reset_tool_surface=False``
+       kwarg.  But ``_TOOL_SURFACE`` is a ``ContextVar`` that lives
+       per asyncio task, and the approval-click handler runs in a
+       *different* task than the original request, so there was
+       nothing to preserve in the click's task — its surface was
+       already empty.
+    2. The resumed ``run`` therefore couldn't see any non-core
+       tools the original task had surfaced, even though
+       ``working_messages`` still referenced them.  Constrained
+       decoding gates on ``tool_definitions()``, so the model
+       couldn't follow up with those tools.
+
+    Fix: ``WriteApprovalError`` snapshots the registry's surfaced
+    tools onto ``PendingApproval``; the orchestrator passes that
+    snapshot back into ``run`` as ``pre_surfaced_tools``.  The loop
+    resets, then re-applies — so the resumed run starts with a
+    surface identical to the original at the point of pause.
     """
 
     def _registry_with_non_core(self) -> ToolRegistry:
@@ -800,7 +814,7 @@ class TestSurfaceReset:
         )
         return registry
 
-    async def test_run_clears_surface_by_default(
+    async def test_run_clears_surface_at_task_start(
         self,
         config: AgentLoopConfig,
     ) -> None:
@@ -816,19 +830,20 @@ class TestSurfaceReset:
 
         assert registry.surfaced_non_core == frozenset()
 
-    async def test_run_preserves_surface_when_reset_disabled(
+    async def test_pre_surfaced_tools_restores_surface(
         self,
         config: AgentLoopConfig,
     ) -> None:
-        """Approval-resume path keeps tools surfaced across the pause.
+        """Approval-resume rebuilds the pre-pause surface from a snapshot.
 
-        Mirrors ``orchestrator.handle_write_approval``: the resumed
-        ``run`` call passes ``reset_tool_surface=False`` so non-core
-        tools the model surfaced before the write-approval gate stay
-        callable on the post-approval round.
+        Mirrors ``orchestrator.handle_write_approval`` running in a
+        fresh asyncio task with an empty ``ContextVar``: surfacing
+        from the original task is gone, so the resume call passes
+        ``pre_surfaced_tools=pending.surfaced_tools`` to re-apply.
         """
         registry = self._registry_with_non_core()
-        registry.mark_surfaced(["search_jira"])
+        # The "click handler" task starts with an empty surface — no
+        # ``mark_surfaced`` here on purpose.
 
         backend = ToolMockBackend()
         backend.add_response(content="resumed reply", finish_reason="stop")
@@ -837,11 +852,10 @@ class TestSurfaceReset:
         await loop.run(
             _make_messages(),
             request_id="req-resume",
-            reset_tool_surface=False,
+            pre_surfaced_tools=frozenset({"search_jira"}),
         )
 
-        # Surface set survived the resume, and the next inference
-        # round's tools list reflects it.
+        # The restored surface is what the model sees in ``tools=``.
         assert registry.surfaced_non_core == frozenset({"search_jira"})
         names = {d.function.name for d in registry.tool_definitions()}
         assert "search_jira" in names
@@ -851,10 +865,9 @@ class TestSurfaceReset:
         config: AgentLoopConfig,
     ) -> None:
         """The actual ``InferenceRequest.tools`` on the resume call
-        carries the previously-surfaced non-core tool, so the model's
+        carries the snapshot's non-core tool, so the model's
         constrained decoder will accept a tool_call against it."""
         registry = self._registry_with_non_core()
-        registry.mark_surfaced(["search_jira"])
 
         backend = ToolMockBackend()
         backend.add_response(content="ok", finish_reason="stop")
@@ -863,10 +876,186 @@ class TestSurfaceReset:
         await loop.run(
             _make_messages(),
             request_id="req-resume-tools",
-            reset_tool_surface=False,
+            pre_surfaced_tools=("search_jira",),
         )
 
-        # Exactly one inference call on this resume.
         assert len(backend.calls) == 1
         sent_tool_names = {t.function.name for t in (backend.calls[0].tools or [])}
         assert "search_jira" in sent_tool_names
+
+    async def test_write_approval_error_snapshots_surfaced_tools(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """``PendingApproval`` carries the surface the original run built up.
+
+        Without the snapshot, the approval-click handler — running in
+        its own task — has no way to recover those tools and the
+        resumed ``run`` would advertise only core tools to the model.
+        """
+        registry = self._registry_with_non_core()
+        # Add a write tool so the loop trips the approval gate.
+        registry.register(
+            ToolSpec(
+                name="write_jira",
+                description="Update a Jira issue",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_read_only=False,
+                is_core=False,
+                toolset="jira",
+            )
+        )
+
+        # Mock backend: model surfaces ``search_jira`` directly via
+        # ``mark_surfaced`` — keeping the test focused on the
+        # snapshot-on-approval invariant rather than re-testing
+        # ``tool_search``.  Then it emits the write tool_call.
+        registry.mark_surfaced(["search_jira"])
+        backend = ToolMockBackend()
+        backend.add_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[ToolCall(id="tc-w", name="write_jira", arguments="{}")],
+        )
+
+        loop = AgentLoop(
+            backend=backend,
+            tools=registry,
+            config=config,
+            approval=WriteApproval(),  # require approval for non-read-only
+        )
+
+        with pytest.raises(WriteApprovalError) as excinfo:
+            await loop.run(
+                _make_messages(),
+                request_id="req-approval-snapshot",
+                pre_surfaced_tools=frozenset({"search_jira"}),
+            )
+
+        assert excinfo.value.pending.surfaced_tools == frozenset({"search_jira"})
+
+
+# ---------------------------------------------------------------------------
+# Per-task surface isolation
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceIsolation:
+    """Surface state is per-task, not per-registry.
+
+    Regression: ``_surfaced_non_core`` was a ``set[str]`` on the
+    shared ``ToolRegistry`` instance.  Two concurrent ``run`` calls
+    would clobber each other — one's ``mark_surfaced`` leaked into
+    the other's ``tool_definitions``, and one's
+    ``reset_tool_surface`` wiped the other's surface state.  Now
+    surface state lives in a ``ContextVar`` so each ``asyncio.Task``
+    automatically gets its own copy via context-on-task creation.
+    """
+
+    def _registry_with_two_non_core(self) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_core=True,
+                toolset="test",
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="search_jira",
+                description="Search Jira issues",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_core=False,
+                toolset="jira",
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="search_gitlab",
+                description="Search GitLab merge requests",
+                input_schema={"type": "object", "properties": {}},
+                handler=_echo_tool,
+                is_core=False,
+                toolset="gitlab",
+            )
+        )
+        return registry
+
+    async def test_concurrent_tasks_have_independent_surfaces(self) -> None:
+        """Two tasks each surfacing a different tool see only their own.
+
+        The barrier (event-pair) ensures both tasks have called
+        ``mark_surfaced`` *before* either reads ``surfaced_non_core``,
+        so a leak through shared state would be observable: each task
+        would see both surfaced tools instead of just its own.
+        """
+        registry = self._registry_with_two_non_core()
+
+        a_view: frozenset[str] | None = None
+        b_view: frozenset[str] | None = None
+        a_marked = asyncio.Event()
+        b_marked = asyncio.Event()
+
+        async def task_a() -> None:
+            nonlocal a_view
+            registry.reset_tool_surface()
+            registry.mark_surfaced(["search_jira"])
+            a_marked.set()
+            await b_marked.wait()
+            a_view = registry.surfaced_non_core
+
+        async def task_b() -> None:
+            nonlocal b_view
+            registry.reset_tool_surface()
+            registry.mark_surfaced(["search_gitlab"])
+            b_marked.set()
+            await a_marked.wait()
+            b_view = registry.surfaced_non_core
+
+        await asyncio.gather(task_a(), task_b())
+
+        assert a_view == frozenset({"search_jira"})
+        assert b_view == frozenset({"search_gitlab"})
+
+    async def test_concurrent_runs_advertise_only_own_surfaced_tools(
+        self,
+        config: AgentLoopConfig,
+    ) -> None:
+        """``InferenceRequest.tools`` from concurrent ``run()`` calls
+        contain only the surfaced tools each task itself produced —
+        so neither task's constrained decoder sees the other's.
+        """
+        registry = self._registry_with_two_non_core()
+
+        async def run_with_pre_surfaced(name: str, request_id: str) -> AgentLoopResult:
+            backend = ToolMockBackend()
+            backend.add_response(content="done", finish_reason="stop")
+            loop = AgentLoop(backend=backend, tools=registry, config=config)
+            # Pass the surfaced tool through the public API
+            # ``pre_surfaced_tools`` — the test asserts that the
+            # other task's surfaced tool never leaks into this one.
+            result = await loop.run(
+                _make_messages(),
+                request_id=request_id,
+                pre_surfaced_tools=(name,),
+            )
+            sent = {t.function.name for t in (backend.calls[-1].tools or [])}
+            assert name in sent
+            other = "search_gitlab" if name == "search_jira" else "search_jira"
+            assert other not in sent, (
+                f"task {request_id} saw {other} in its tools list — "
+                f"surface state leaked across concurrent runs"
+            )
+            return result
+
+        results = await asyncio.gather(
+            run_with_pre_surfaced("search_jira", "req-A"),
+            run_with_pre_surfaced("search_gitlab", "req-B"),
+        )
+        assert all(r.content == "done" for r in results)

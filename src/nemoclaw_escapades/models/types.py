@@ -255,6 +255,24 @@ class PendingApproval:
 
     Captures the full agent-loop context so execution can resume after
     the user approves (or be discarded on denial).
+
+    Attributes:
+        tool_calls: The write tool calls awaiting approval.
+        working_messages: Conversation snapshot up to the pause point.
+        assistant_message: The assistant's tool-call message that
+            triggered the pause; must precede the tool-result
+            messages once execution resumes.
+        request_id: Original inference correlation ID.
+        description: Human-readable summary of the proposed writes.
+        original_user_text: User message that started this turn.
+        surfaced_tools: Non-core tools that ``tool_search`` had
+            surfaced in the original request's task before the pause.
+            Stored here because the approval-click runs in a
+            separate asyncio task with its own ``ContextVar``
+            context, so the original surface set is otherwise lost.
+            Restored via ``ToolRegistry.mark_surfaced`` before the
+            resumed ``AgentLoop.run`` so the model can still call
+            those tools in the post-approval round.
     """
 
     tool_calls: list[ToolCall]
@@ -263,6 +281,7 @@ class PendingApproval:
     request_id: str
     description: str
     original_user_text: str = ""
+    surfaced_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 # ---------------------------------------------------------------------------

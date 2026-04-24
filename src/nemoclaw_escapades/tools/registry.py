@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -42,6 +43,16 @@ _DEFAULT_SEARCH_LIMIT: int = 5
 # ``difflib``'s 0.6 default would otherwise let through ("file" vs
 # "single" ≈ 0.6 from shared "i" + "le" is noise, not a tool match).
 _MIN_FIELD_SCORE: float = 0.7
+
+# Per-task surface state.  ``ContextVar`` rather than an instance attr
+# on the (shared) ``ToolRegistry`` so concurrent ``AgentLoop.run`` calls
+# don't clobber each other's ``tool_search``-surfaced tools.  Each
+# ``asyncio.Task`` automatically copies the parent context at creation,
+# so two Slack events being handled in parallel each get their own
+# binding.  Stored as ``frozenset`` so updates re-bind the var rather
+# than mutating a shared object — that keeps two tasks that inherited
+# the same parent binding safely independent.
+_TOOL_SURFACE: ContextVar[frozenset[str]] = ContextVar("nemoclaw_tool_surface", default=frozenset())
 
 
 def _field_score(query: str, field_value: str) -> float:
@@ -199,10 +210,13 @@ def _truncate(text: str, limit: int) -> str:
 class ToolRegistry:
     """Registry of available tools.
 
-    Registration is one-shot at startup.  The only mutable state at
-    runtime is the :attr:`_surfaced_non_core` set — a per-task buffer
-    that tracks which non-core tools the :mod:`tool_search` meta-tool
-    has exposed during the current :meth:`AgentLoop.run` invocation.
+    Registration is one-shot at startup; the registry instance carries
+    no per-task mutable state.  Surface state (which non-core tools
+    :mod:`tool_search` has exposed in the current
+    :meth:`AgentLoop.run` invocation) lives in the module-level
+    :data:`_TOOL_SURFACE` ``ContextVar`` so concurrent ``run()`` calls
+    on a shared registry — e.g. two Slack events handled in parallel
+    by the orchestrator — see independent surface views.
     :class:`~nemoclaw_escapades.agent.loop.AgentLoop` calls
     :meth:`reset_tool_surface` at the start of every ``run()`` so
     each task begins with only the core tools visible.
@@ -211,9 +225,12 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
         self._skipped_toolsets: set[str] = set()
-        # Non-core tool names made visible to the model by the
-        # ``tool_search`` meta-tool during the current task.
-        self._surfaced_non_core: set[str] = set()
+        # Reset the contextvar in the current context so a freshly-
+        # constructed registry starts with an empty surface even when
+        # earlier code in the same context (notably tests) set the
+        # var.  No-op in production: the orchestrator only builds one
+        # registry at startup.
+        _TOOL_SURFACE.set(frozenset())
 
     def register(self, spec: ToolSpec) -> None:
         """Register a tool specification.
@@ -289,12 +306,15 @@ class ToolRegistry:
     # letting the model call the tool next round requires the
     # backend to advertise it in ``tools``.
     #
-    # ``_surfaced_non_core`` bridges that gap.  ``tool_search`` calls
-    # :meth:`mark_surfaced` to mirror its matches into the next
-    # round's ``tools`` list; :meth:`tool_definitions` reads the set;
+    # The :data:`_TOOL_SURFACE` ContextVar bridges that gap.
+    # ``tool_search`` calls :meth:`mark_surfaced` to mirror its
+    # matches into the next round's ``tools`` list;
+    # :meth:`tool_definitions` reads the var;
     # :class:`~nemoclaw_escapades.agent.loop.AgentLoop` calls
     # :meth:`reset_tool_surface` at the start of each ``run()`` so
-    # cross-task carryover can't accidentally expose tools.
+    # cross-task carryover can't accidentally expose tools.  The
+    # ContextVar is per-task — concurrent ``run()`` invocations on
+    # the same registry each see their own surface.
 
     @property
     def core_names(self) -> list[str]:
@@ -308,12 +328,12 @@ class ToolRegistry:
 
     @property
     def surfaced_non_core(self) -> frozenset[str]:
-        """Non-core tools currently surfaced for the active task."""
-        return frozenset(self._surfaced_non_core)
+        """Non-core tools surfaced in the current task's context."""
+        return _TOOL_SURFACE.get()
 
     def reset_tool_surface(self) -> None:
         """Forget which non-core tools are surfaced (start of a new task)."""
-        self._surfaced_non_core.clear()
+        _TOOL_SURFACE.set(frozenset())
 
     def mark_surfaced(self, names: Iterable[str]) -> None:
         """Mark non-core tools as surfaced so they appear in the next round.
@@ -321,11 +341,20 @@ class ToolRegistry:
         Unknown names are silently ignored (e.g. ``tool_search`` on a
         query with no matches).  Core tools are also ignored — they're
         always visible, so there's nothing to track.
+
+        Re-binds the contextvar to a fresh ``frozenset`` rather than
+        mutating an existing object, which keeps two concurrent tasks
+        that inherited the same parent binding safely independent
+        (mutation would alias their surface views).
         """
-        for name in names:
-            spec = self._tools.get(name)
-            if spec is not None and not spec.is_core:
-                self._surfaced_non_core.add(name)
+        additions = {
+            name
+            for name in names
+            if (spec := self._tools.get(name)) is not None and not spec.is_core
+        }
+        if not additions:
+            return
+        _TOOL_SURFACE.set(_TOOL_SURFACE.get() | additions)
 
     def tool_definitions(self) -> list[ToolDefinition]:
         """Return typed tool definitions for the inference API.
@@ -333,10 +362,11 @@ class ToolRegistry:
         Always includes core tools.  Non-core tools are included only
         after ``tool_search`` has surfaced them via :meth:`mark_surfaced`.
         """
+        surfaced = _TOOL_SURFACE.get()
         return [
             spec.to_definition()
             for spec in self._tools.values()
-            if spec.is_core or spec.name in self._surfaced_non_core
+            if spec.is_core or spec.name in surfaced
         ]
 
     def all_tool_definitions(self) -> list[ToolDefinition]:
