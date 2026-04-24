@@ -1230,15 +1230,51 @@ delegation / finalization tools Phase 3 will add (`delegate_task`,
 growing the tool surface is the cheaper path, so it gets its own
 phase ahead of delegation.
 
+Phase 2 lands both the meta-tool **and** its wiring into the two
+tool-registry factories — the meta-tool on its own doesn't reduce
+prompt size unless the orchestrator and coding sub-agent actually
+mark their non-core tools and register it.
+
 | Task | Files | Status |
 |------|-------|--------|
-| Implement `ToolSearch` meta-tool (keyword search over tool definitions) | `tools/tool_search.py` | ⏳ Pending |
-| Add `ToolSpec.is_core` flag; partition tools into core (in prompt) and searchable | `agent/types.py`, `agent/loop.py` | ⏳ Pending |
-| Tests for `ToolSearch` | `tests/test_tool_search.py` | ⏳ Pending |
+| Add `ToolSpec.is_core` flag; default `True` (no behaviour change) | `tools/registry.py` | ✅ |
+| Extend `ToolRegistry`: `search()`, `mark_surfaced()`, `reset_surface()`, `core_names` / `non_core_names` / `surfaced_non_core` properties; make `tool_definitions()` core-only by default with surfaced non-core tools opted back in | `tools/registry.py` | ✅ |
+| Implement `tool_search` meta-tool (keyword search over all registered specs; marks matches as surfaced so the next inference round sees them) | `tools/tool_search.py` | ✅ |
+| `AgentLoop`: refresh `tool_defs` per round (drop the once-per-run snapshot) and call `reset_surface()` at the start of `run()` | `agent/loop.py` | ✅ |
+| Integrate into orchestrator: register `tool_search`; mark every service tool (Jira / GitLab / Gerrit / Confluence / Slack search / web search) `is_core=False` at its `@tool` definition site so prompt visibility is declared alongside the tool itself | `tools/{jira,gitlab,gerrit,confluence,slack_search,web_search}.py`, `tools/tool_registry_factory.py` | ✅ |
+| Integrate into coding sub-agent: register `tool_search` (coding + skill tools stay `is_core=True`; the meta-tool is a no-op until non-core tools are added later) | `tools/tool_registry_factory.py` | ✅ |
+| Unit tests: registry surface state, `search()` relevance, `tool_search` handler (limit floor/ceiling, surfacing side-effect, no-match no-op) | `tests/test_tool_search.py` — `TestIsCoreDefault`, `TestRegistrySurface`, `TestRegistrySearch`, `TestToolSearchTool`, `TestNonCoreServiceToolsetsList` | ✅ |
+| Integration tests: factory flips service toolsets non-core, default tool-defs exclude them, `tool_search` surfaces service tools end-to-end, core surface is strictly smaller than full surface | `tests/test_tool_search.py::TestFullToolRegistryIntegration`, `tests/test_tool_search.py::TestCodingToolRegistryRegistersToolSearch` | ✅ Registry-level.  A subprocess-level turn (mock inference emits `tool_search` → `search_jira` → text reply) is deferred to Phase 3, where the orchestrator's `AgentLoop`-driven delegation flow comes online. |
 
-**Exit criteria:** Non-core tools discoverable via `ToolSearch` and
-excluded from the default prompt; prompt tokens decrease 40%+ with
-enterprise tools enabled.
+**Exit criteria:**
+
+- ✅ `ToolSpec.is_core=False` tools are excluded from the default
+  `tool_definitions()` output
+  (`tests/test_tool_search.py::TestRegistrySurface::test_default_tool_definitions_excludes_non_core`).
+- ✅ `tool_search` takes a natural-language query, returns matching
+  non-core specs, and marks them as surfaced so they appear in the
+  next inference round's `tools` list
+  (`tests/test_tool_search.py::TestToolSearchTool::test_tool_search_returns_matches_and_surfaces_them`).
+- ✅ Orchestrator's service tools (Jira / GitLab / Gerrit / Confluence /
+  Slack search / web search) default to non-core; the default
+  orchestrator prompt's tool block is strictly smaller than the full
+  surface whenever a service is enabled
+  (`tests/test_tool_search.py::TestFullToolRegistryIntegration::{test_service_tools_are_non_core_after_factory,test_default_prompt_surface_shrinks}`).
+  Structural invariant (core-only count < 0.75 × full count) is
+  tested here; a concrete model-specific token measurement against a
+  fixture prompt is deferred to Phase 3 alongside the delegation
+  test harness.
+- ✅ Coding sub-agent registers `tool_search` for future-compat; its
+  coding tool suite stays fully core so current sub-agent flows are
+  unchanged
+  (`tests/test_tool_search.py::TestCodingToolRegistryRegistersToolSearch`).
+- 🟡 A full delegation turn (orchestrator calls `tool_search("jira")`
+  → receives `search_jira` → calls `search_jira(...)` → gets a result)
+  completes end-to-end in an integration test against the mock
+  inference server.  **Deferred to Phase 3** — needs the
+  orchestrator-side `AgentLoop` driver that Phase 3 wires up; the
+  per-round refresh + surface state plumbing it relies on is already
+  in place and covered at the unit / registry-integration level.
 
 ### Phase 3 — Orchestrator delegation, NMB event loop, concurrency caps, and finalization
 
@@ -1319,7 +1355,7 @@ progress reporting, and robust handling.
 | Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 3) |
 | NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 4) |
 | NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 4) |
-| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ⏳ Pending (Phase 2) |
+| `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ✅ `tests/test_tool_search.py` — `TestRegistrySearch` (scoring), `TestRegistrySurface::test_default_tool_definitions_excludes_non_core`, `TestToolSearchTool::test_tool_search_returns_matches_and_surfaces_them`, `TestFullToolRegistryIntegration::test_default_prompt_surface_shrinks` |
 | Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 3) |
 | Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 5) |
 
