@@ -59,7 +59,7 @@ class TestJiraToolRegistration:
     def test_tool_definitions_are_valid_openai_format(self) -> None:
         registry = ToolRegistry()
         register_jira_tools(registry, _TEST_CONFIG)
-        defs = registry.tool_definitions()
+        defs = registry.all_tool_definitions()
         assert len(defs) == 8
         for d in defs:
             assert d.type == "function"

@@ -289,6 +289,7 @@ def _make_confluence_search(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Searching Confluence",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def confluence_search(cql: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Search Confluence pages using CQL."""
@@ -312,6 +313,7 @@ def _make_confluence_get_page(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Getting Confluence page",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def confluence_get_page(page_id: str) -> str:
         """Retrieve a Confluence page by ID."""
@@ -340,6 +342,7 @@ def _make_confluence_get_page_children(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Listing child pages",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def confluence_get_page_children(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """List child pages of a Confluence page."""
@@ -368,6 +371,7 @@ def _make_confluence_get_comments(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Getting page comments",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def confluence_get_comments(page_id: str, limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Get comments on a Confluence page."""
@@ -391,6 +395,7 @@ def _make_confluence_get_labels(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Getting page labels",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def confluence_get_labels(page_id: str) -> str:
         """Get labels on a Confluence page."""
@@ -420,6 +425,7 @@ def _make_confluence_create_page(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Creating Confluence page",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def confluence_create_page(
@@ -454,6 +460,7 @@ def _make_confluence_update_page(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Updating Confluence page",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def confluence_update_page(
@@ -481,6 +488,7 @@ def _make_confluence_add_comment(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Adding Confluence comment",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def confluence_add_comment(page_id: str, body: str) -> str:
@@ -506,6 +514,7 @@ def _make_confluence_add_label(client: ConfluenceClient) -> ToolSpec:
         },
         display_name="Adding Confluence label",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def confluence_add_label(page_id: str, label: str) -> str:

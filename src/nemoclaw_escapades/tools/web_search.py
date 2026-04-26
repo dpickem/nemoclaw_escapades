@@ -186,6 +186,7 @@ def _make_web_search(
         },
         display_name="Searching the web",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def web_search(query: str, count: int = default_limit) -> str:
         """Search the web via Brave Search and return formatted results.
@@ -307,6 +308,7 @@ def _make_web_fetch(jina_api_key: str = "") -> ToolSpec:
         },
         display_name="Fetching web page",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def web_fetch(url: str) -> str:
         """Fetch a URL, preferring Jina Reader for Markdown, with direct fallback.

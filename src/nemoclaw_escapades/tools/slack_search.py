@@ -228,6 +228,7 @@ def _make_slack_search_messages(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Searching Slack",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def slack_search_messages(query: str, count: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """Search Slack messages across all channels."""
@@ -250,6 +251,7 @@ def _make_slack_list_channels(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Listing Slack channels",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def slack_list_channels(limit: int = _DEFAULT_SEARCH_LIMIT) -> str:
         """List Slack channels the user has access to."""
@@ -274,6 +276,7 @@ def _make_slack_get_channel_history(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Getting channel history",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def slack_get_channel_history(
         channel_id: str, limit: int = _DEFAULT_HISTORY_LIMIT
@@ -301,6 +304,7 @@ def _make_slack_get_thread_replies(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Getting thread replies",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def slack_get_thread_replies(
         channel_id: str, thread_ts: str, limit: int = _DEFAULT_HISTORY_LIMIT
@@ -326,6 +330,7 @@ def _make_slack_get_user_info(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Getting Slack user info",
         toolset=_TOOLSET,
+        is_core=False,
     )
     async def slack_get_user_info(user_id: str) -> str:
         """Get information about a Slack user."""
@@ -351,6 +356,7 @@ def _make_slack_send_message(client: SlackSearchClient) -> ToolSpec:
         },
         display_name="Sending Slack message",
         toolset=_TOOLSET,
+        is_core=False,
         is_read_only=False,
     )
     async def slack_send_message(channel_id: str, text: str, thread_ts: str = "") -> str:

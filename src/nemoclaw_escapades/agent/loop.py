@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from nemoclaw_escapades.agent.approval import ApprovalGate, AutoApproval
@@ -170,6 +171,8 @@ class AgentLoop:
         request_id: str,
         thread_ts: str | None = None,
         on_tool_start: ToolStartCallback | None = None,
+        *,
+        pre_surfaced_tools: Iterable[str] = (),
     ) -> AgentLoopResult:
         """Run the multi-turn tool-use loop.
 
@@ -199,6 +202,18 @@ class AgentLoop:
                 precedence over the instance-level ``_on_tool_start``.
                 Passed as a parameter (not shared state) so concurrent
                 requests don't clobber each other's callbacks.
+            pre_surfaced_tools: Non-core tool names to surface
+                immediately after the per-task surface reset, before
+                the first inference round.  Empty for fresh tasks
+                (the default).  Approval-resume callers
+                (orchestrator's ``handle_write_approval``) pass the
+                surface snapshot saved on ``PendingApproval``: the
+                approval-click handler runs in a different asyncio
+                task with its own ``ContextVar`` context, so the
+                non-core tools surfaced pre-approval would otherwise
+                be lost and the model couldn't follow up with any
+                of them in the post-approval round (constrained
+                decoding gates on ``tool_definitions()``).
 
         Returns:
             An ``AgentLoopResult`` with the final text, round/tool
@@ -212,8 +227,17 @@ class AgentLoop:
             WriteApprovalError: When a write tool is blocked by the
                 approval gate.
         """
-        # Snapshot tool definitions once — they don't change within a run.
-        tool_defs = self._tools.tool_definitions()
+        # Fresh task: forget any non-core tools the previous run in
+        # this task's ``ContextVar`` context surfaced.  Registration-
+        # time state (core vs. non-core) is unchanged; this just
+        # clears the per-task ``tool_definitions`` gate.  Approval-
+        # resume callers immediately re-apply ``pre_surfaced_tools``
+        # because the resumed run executes in a *different* asyncio
+        # task than the one that built up the original surface (each
+        # Slack event spawns its own task, with its own context).
+        self._tools.reset_tool_surface()
+        if pre_surfaced_tools:
+            self._tools.mark_surfaced(pre_surfaced_tools)
 
         # Shallow-copy so callers' original list is never mutated.
         # We append assistant/tool messages to this as the loop progresses.
@@ -235,6 +259,12 @@ class AgentLoop:
             # inference call and session-roll.
             if self._compactor.should_compact(working_messages):
                 working_messages = await self._compactor.compact(working_messages, request_id)
+
+            # Refresh tool definitions every round: ``tool_search`` may
+            # have surfaced additional non-core tools in the previous
+            # round, and those need to appear in this round's ``tools``
+            # list before the model can invoke them.
+            tool_defs = self._tools.tool_definitions()
 
             inference_request = InferenceRequest(
                 messages=working_messages,
@@ -290,6 +320,15 @@ class AgentLoop:
             write_calls = self._get_write_tool_calls(result.tool_calls)
             if write_calls and await self._needs_write_approval(write_calls, request_id):
                 assistant_msg = self._build_assistant_tool_message(result)
+                # Snapshot the registry's surface state *now* so the
+                # approval-click handler — which runs in a separate
+                # asyncio task with its own ``ContextVar`` context —
+                # can restore the non-core tools ``tool_search``
+                # surfaced this turn.  Without the snapshot, the
+                # resumed ``run()`` would see an empty surface and
+                # the model couldn't follow up with any non-core
+                # tool call (constrained decoding gates on
+                # ``tool_definitions()``).
                 raise WriteApprovalError(
                     PendingApproval(
                         tool_calls=list(result.tool_calls),
@@ -297,6 +336,7 @@ class AgentLoop:
                         assistant_message=assistant_msg,
                         request_id=request_id,
                         description=self._format_write_description(write_calls),
+                        surfaced_tools=self._tools.surfaced_non_core,
                     )
                 )
 

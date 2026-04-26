@@ -54,7 +54,7 @@ class TestSlackSearchToolRegistration:
     def test_tool_definitions_valid_openai_format(self) -> None:
         registry = ToolRegistry()
         register_slack_search_tools(registry, _TEST_CONFIG)
-        for d in registry.tool_definitions():
+        for d in registry.all_tool_definitions():
             assert d.type == "function"
             assert d.function.name
             assert d.function.description
