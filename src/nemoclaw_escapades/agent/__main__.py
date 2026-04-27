@@ -32,24 +32,42 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import signal
 import sys
+import traceback
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from nemoclaw_escapades.agent.approval import AutoApproval
+from nemoclaw_escapades.agent.git_helpers import (
+    WorkspaceNotAGitRepoError,
+    diff_against_baseline,
+)
 from nemoclaw_escapades.agent.loop import AgentLoop
 from nemoclaw_escapades.agent.prompt_builder import LayeredPromptBuilder, SourceType
 from nemoclaw_escapades.agent.skill_loader import SkillLoader
-from nemoclaw_escapades.agent.types import AgentSetupBundle
+from nemoclaw_escapades.agent.types import AgentLoopResult, AgentSetupBundle
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
 from nemoclaw_escapades.config import (
+    AgentLoopConfig,
     AppConfig,
     create_coding_agent_config,
     load_dotenv_if_present,
     load_system_prompt,
+)
+from nemoclaw_escapades.nmb.protocol import (
+    TASK_COMPLETE,
+    TASK_ERROR,
+    PayloadValidationError,
+    TaskAssignPayload,
+    TaskCompletePayload,
+    TaskErrorPayload,
+    dump,
+    load,
 )
 from nemoclaw_escapades.observability.logging import (
     _MergingAdapter,
@@ -63,6 +81,10 @@ from nemoclaw_escapades.runtime import (
 )
 from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
+
+if TYPE_CHECKING:
+    from nemoclaw_escapades.nmb.client import MessageBus
+    from nemoclaw_escapades.nmb.models import NMBMessage
 
 # Identity layer for the sub-agent's system prompt.  Written as a
 # file so operators can tune it without redeploying.  Falls back to
@@ -136,13 +158,23 @@ async def _run_task(
     bundle: AgentSetupBundle,
     config: AppConfig,
     logger: logging.Logger | _MergingAdapter,
-) -> str:
-    """Run one task end-to-end and return the final assistant text.
+    *,
+    loop_config: AgentLoopConfig | None = None,
+) -> AgentLoopResult:
+    """Run one task end-to-end and return the loop result.
 
-    Separate from the entrypoint loop so both CLI mode and NMB mode
-    share the same code path.  Intentionally does *not* receive the
-    ``request_id`` from outside — the CLI generates one, the NMB
-    handler uses the NMB message id.
+    Returns ``AgentLoopResult`` (rather than just ``content``) so NMB
+    mode can build a ``TaskCompletePayload`` with ``rounds_used`` /
+    ``tool_calls_made`` without opening the loop twice.  CLI mode
+    reads ``result.content``.
+
+    Args:
+        loop_config: Per-task ``AgentLoopConfig`` override.  ``None``
+            means "use ``config.agent_loop`` verbatim" — that's the
+            CLI-mode path.  NMB mode passes a one-shot config built
+            via ``dataclasses.replace`` so per-task ``max_turns`` and
+            ``model`` apply for this run only and don't mutate the
+            process-wide config (design §6.4 / §6.5.2).
     """
     prompt_builder = LayeredPromptBuilder(
         identity=identity_prompt,
@@ -158,13 +190,13 @@ async def _run_task(
     loop = AgentLoop(
         backend=backend,
         tools=tools,
-        # Sub-agents use ``config.agent_loop`` directly — loop-runtime
-        # knobs (tool-round cap, compaction thresholds) come from YAML
-        # / env; prompt-level fields (model / temperature / max_tokens)
-        # live on the same dataclass and default to the shared inference
-        # defaults.  Operators can tune a sub-agent's model independently
-        # from the orchestrator's via the ``agent_loop.model`` YAML key.
-        config=config.agent_loop,
+        # Per-task config when supplied (NMB mode), otherwise the
+        # shared sub-agent default.  Operators tune the sub-agent's
+        # model independently from the orchestrator's via the
+        # ``agent_loop.model`` YAML key; per-task overrides live on
+        # ``TaskAssignPayload.{max_turns,model}`` and arrive here as
+        # a ``dataclasses.replace`` of that default.
+        config=loop_config or config.agent_loop,
         # Phase 1 ships the sub-agent without its own ``AuditDB``: the
         # design (``docs/design_m2b.md`` §13) is that sub-agent tool
         # calls accumulate in an in-memory ``AuditBuffer`` and flush
@@ -172,15 +204,15 @@ async def _run_task(
         # single authoritative audit DB.  Opening a second DB here
         # would fight the orchestrator for the ``/sandbox/audit.db``
         # write lock and lose the agent-id attribution.
-        # ``AuditBuffer`` lands in Phase 2 alongside the NMB receive
+        # ``AuditBuffer`` lands in Phase 3b alongside the NMB receive
         # loop; until then the sub-agent runs without audit.  Tool
         # invocations still surface in the structured log.
         audit=None,
         # Sub-agents run inside their own sandbox / workspace, so auto-
         # approve writes — any external containment is provided by the
-        # sandbox policy, not the approval gate.  The orchestrator
-        # (Phase 2) will invoke ``WriteApproval`` on its side before
-        # forwarding finalisation actions that touch shared state.
+        # sandbox policy, not the approval gate.  The orchestrator's
+        # finalisation step (Phase 3b) invokes ``WriteApproval`` on
+        # its side before forwarding actions that touch shared state.
         approval=AutoApproval(),
     )
     result = await loop.run(
@@ -197,7 +229,7 @@ async def _run_task(
             "hit_safety_limit": result.hit_safety_limit,
         },
     )
-    return result.content
+    return result
 
 
 # ── Run modes ──────────────────────────────────────────────────────
@@ -238,11 +270,11 @@ async def _run_cli_mode(
     tools = _build_tool_registry(config, bundle)
     identity = _load_coding_prompt()
     try:
-        content = await _run_task(backend, tools, identity, bundle, config, logger)
+        result = await _run_task(backend, tools, identity, bundle, config, logger)
     except Exception:  # pragma: no cover - surfaced in logs
         logger.error("Coding agent task failed", exc_info=True)
         return 1
-    print(content)
+    print(result.content)
     return 0
 
 
@@ -252,18 +284,23 @@ async def _run_nmb_mode(
     logger: logging.Logger | _MergingAdapter,
     shutdown_event: asyncio.Event,
 ) -> int:
-    """Connect to NMB and handle ``task.assign`` messages.
+    """Connect to NMB and handle exactly one ``task.assign``.
 
-    **Phase 1 skeleton.**  The full orchestrator-side delegation
-    protocol (``task.assign`` dispatch, ``task.progress`` relaying,
-    ``task.complete.ack``) lands in Phase 2.  This function reserves
-    the slot: it imports the NMB client and wires a listener, but
-    the receive-loop body is a TODO because the Phase 2 handler
-    pattern hasn't been designed yet.
+    Single-shot per process: connect, receive the first
+    ``task.assign``, run the loop, send ``task.complete`` (or
+    ``task.error``), close the bus, return.  Concurrency at the
+    workflow level lives on the orchestrator's side via per-agent
+    semaphores (§8.1) and per-task spawning, not in the sub-agent.
 
-    Running with ``--nmb`` today is supported but idles until
-    shutdown; it's useful for sanity-checking that the sub-agent can
-    open a broker connection with the config it's been given.
+    Matches the M3 shape where ``openshell sandbox create`` will
+    spawn one sandbox per task — the M2b → M3 migration only changes
+    the spawn mechanism, not the sub-agent's lifecycle.
+
+    Returns:
+        Process exit code.  ``0`` on a clean ``task.complete``,
+        ``0`` on a handled ``task.error`` (the error's been delivered
+        upstream), ``1`` on anything that prevented us from even
+        opening the connection.
     """
     # NMB client is imported lazily so CLI mode doesn't pay the import
     # cost when NMB isn't being used.
@@ -275,30 +312,299 @@ async def _run_nmb_mode(
     # ``AppConfig.load``.  That keeps non-secret config flowing
     # through the YAML overlay inside the sandbox (design §5.3).
     broker_url = config.nmb.broker_url
-    agent_id = config.nmb.sandbox_id or f"coding-{_make_agent_id()}"
+    agent_sandbox_id = config.nmb.sandbox_id or f"coding-{_make_agent_id()}"
     logger.info(
         "Connecting to NMB broker",
-        extra={"broker_url": broker_url, "agent_id": agent_id},
+        extra={"broker_url": broker_url, "sandbox_id": agent_sandbox_id},
     )
-    bus = MessageBus(broker_url=broker_url, sandbox_id=agent_id)
-    await bus.connect_with_retry()
-
-    # Phase 2 TODO: implement the receive loop.
-    # ``async for msg in bus.listen(): ... parse AgentSetupBundle ...
-    # run _run_task ... bus.reply(msg, 'task.complete', {...})``.
-    # Until Phase 2, just wait for shutdown so the process stays up
-    # and an operator can verify the connection took.
-    logger.warning(
-        "NMB receive loop is a Phase 2 TODO — sub-agent is idle.  "
-        "Use --task for CLI mode until orchestrator delegation lands.",
-    )
+    bus = MessageBus(broker_url=broker_url, sandbox_id=agent_sandbox_id)
     try:
-        await shutdown_event.wait()
+        await bus.connect_with_retry()
+    except Exception:
+        logger.error("Failed to connect to NMB broker", exc_info=True)
+        return 1
+
+    try:
+        return await _await_and_handle_one_task(bus, config, backend, logger, shutdown_event)
     finally:
         await bus.close()
-    # Surprisingly, the process reached here — means shutdown was
-    # requested externally, not an error.
+
+
+async def _await_and_handle_one_task(
+    bus: MessageBus,
+    config: AppConfig,
+    backend: BackendBase,
+    logger: logging.Logger | _MergingAdapter,
+    shutdown_event: asyncio.Event,
+) -> int:
+    """Wait for a ``task.assign``, run it, reply, return exit code.
+
+    Split out from ``_run_nmb_mode`` so the bus lifecycle (connect /
+    close) stays in one obvious place and the per-task logic is
+    testable in isolation against a stub bus.
+    """
+    assign_msg = await _wait_for_assign(bus, logger, shutdown_event)
+    if assign_msg is None:
+        # Shutdown received before any task arrived — clean exit.
+        return 0
+
+    try:
+        task = load(TaskAssignPayload, "task.assign", assign_msg.payload)
+    except PayloadValidationError as exc:
+        logger.error(
+            "Rejected malformed task.assign",
+            extra={"validation_error": str(exc), "from": assign_msg.from_sandbox},
+        )
+        # Reply with task.error so the orchestrator's listener doesn't
+        # hang waiting for a complete that will never come.
+        await _reply_validation_error(bus, assign_msg, exc)
+        return 0
+
+    logger.info(
+        "Accepted task.assign",
+        extra={
+            "workflow_id": task.workflow_id,
+            "agent_id": task.agent_id,
+            "max_turns": task.max_turns,
+            "model": task.model,
+            "is_iteration": task.is_iteration,
+        },
+    )
+
+    try:
+        complete = await _run_assigned_task(task, config, backend, logger)
+        await bus.reply(assign_msg, type=TASK_COMPLETE, payload=dump(complete))
+        logger.info(
+            "Sent task.complete",
+            extra={
+                "workflow_id": task.workflow_id,
+                "rounds_used": complete.rounds_used,
+                "tool_calls_made": complete.tool_calls_made,
+            },
+        )
+    except Exception as exc:
+        # Don't crash the process — emit a structured task.error so
+        # the orchestrator's finalisation flow can surface the failure
+        # to the user instead of timing out on a missing reply.
+        error_payload = TaskErrorPayload(
+            workflow_id=task.workflow_id,
+            error=f"{type(exc).__name__}: {exc}",
+            error_kind=_classify_error(exc),
+            recoverable=False,
+            traceback=traceback.format_exc(),
+        )
+        await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error_payload))
+        logger.error(
+            "Sent task.error",
+            extra={
+                "workflow_id": task.workflow_id,
+                "error_kind": error_payload.error_kind,
+            },
+            exc_info=True,
+        )
     return 0
+
+
+async def _wait_for_assign(
+    bus: MessageBus,
+    logger: logging.Logger | _MergingAdapter,
+    shutdown_event: asyncio.Event,
+) -> NMBMessage | None:
+    """Wait for the next message on the bus, racing against shutdown.
+
+    Returns ``None`` if shutdown was requested before any message
+    arrived; otherwise returns the first :class:`NMBMessage` whose
+    ``type == "task.assign"``.  Other types are logged and ignored —
+    the sub-agent's contract is "I run one task and exit", so a
+    ``task.progress`` or ``task.complete`` arriving here means the
+    orchestrator is talking to the wrong sandbox or replaying an
+    old message.
+
+    The single ``async for msg in bus.listen()`` pattern is what NMB
+    expects (see ``nmb/client.py``); we layer a shutdown-event race
+    on top so SIGINT / SIGTERM during connection idle exits cleanly.
+    """
+    listen_task = asyncio.create_task(_first_assign(bus))
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {listen_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_task in done:
+            logger.info("Shutdown signal received while awaiting task.assign")
+            listen_task.cancel()
+            return None
+        return listen_task.result()
+    finally:
+        if not listen_task.done():
+            listen_task.cancel()
+        if not shutdown_task.done():
+            shutdown_task.cancel()
+
+
+async def _first_assign(bus: MessageBus) -> NMBMessage:
+    """Return the first ``task.assign`` message off the bus.
+
+    Lazily skips over non-``task.assign`` deliveries so a stray
+    message from a confused orchestrator doesn't crash the sub-agent.
+    """
+    async for msg in bus.listen():
+        if msg.type == "task.assign":
+            return msg
+        # Else: log and keep waiting; an unsolicited task.complete
+        # for a different workflow is a misroute, not a fatal error.
+    raise RuntimeError("NMB listen() ended without delivering a task.assign")
+
+
+async def _run_assigned_task(
+    task: TaskAssignPayload,
+    config: AppConfig,
+    backend: BackendBase,
+    logger: logging.Logger | _MergingAdapter,
+) -> TaskCompletePayload:
+    """Run one validated task and return the success payload.
+
+    Builds a per-task ``AgentLoopConfig`` via ``dataclasses.replace``
+    so per-task ``max_turns`` and ``model`` apply for this run only.
+    The process-wide ``config.agent_loop`` is untouched (design §6.4
+    / §6.5.2).
+
+    Computes the baseline-anchored diff (``git diff <base_sha>..HEAD``)
+    when the orchestrator pinned a ``workspace_baseline``; otherwise
+    leaves ``diff`` empty per §6.6.
+
+    Raises:
+        Whatever the underlying ``AgentLoop`` raises.  The caller
+        (``_await_and_handle_one_task``) wraps these into a
+        ``task.error`` payload — this function never builds a
+        ``TaskErrorPayload`` itself.
+    """
+    bundle = AgentSetupBundle(
+        task_id=task.workflow_id,
+        agent_id=task.agent_id,
+        parent_agent_id=task.parent_sandbox_id,
+        task_description=task.prompt,
+        workspace_root=task.workspace_root,
+        source_type=SourceType.AGENT,
+    )
+    Path(task.workspace_root).expanduser().mkdir(parents=True, exist_ok=True)
+
+    tools = _build_tool_registry(config, bundle)
+    identity = _load_coding_prompt()
+
+    # Per-task ``AgentLoopConfig`` — only override the fields the
+    # orchestrator pinned, fall back to YAML/env defaults for the
+    # rest.  ``replace`` returns a fresh dataclass; the caller's
+    # ``config.agent_loop`` is untouched.
+    overrides: dict[str, object] = {}
+    if task.max_turns is not None:
+        overrides["max_tool_rounds"] = task.max_turns
+    if task.model is not None:
+        overrides["model"] = task.model
+    loop_config = (
+        dataclasses.replace(config.agent_loop, **overrides)  # type: ignore[arg-type]
+        if overrides
+        else config.agent_loop
+    )
+
+    result = await _run_task(
+        backend,
+        tools,
+        identity,
+        bundle,
+        config,
+        logger,
+        loop_config=loop_config,
+    )
+
+    diff = await _compute_baseline_diff(task, logger)
+    return TaskCompletePayload(
+        workflow_id=task.workflow_id,
+        summary=result.content or "(empty response)",
+        diff=diff,
+        workspace_baseline=task.workspace_baseline,
+        tool_calls_made=result.tool_calls_made,
+        rounds_used=result.rounds,
+        model_used=loop_config.model,
+    )
+
+
+async def _compute_baseline_diff(
+    task: TaskAssignPayload,
+    logger: logging.Logger | _MergingAdapter,
+) -> str:
+    """Compute ``git diff <base_sha>..HEAD`` against the assigned baseline.
+
+    Returns the empty string when no baseline was pinned (the
+    orchestrator's "non-diff-producing task" signal — §6.6).  Logs
+    and returns empty on git failure rather than raising; the diff
+    is informational, the source of truth is the orchestrator's
+    re-derivation at finalisation (§6.6.3).
+    """
+    if task.workspace_baseline is None:
+        return ""
+    try:
+        diff = await diff_against_baseline(task.workspace_root, task.workspace_baseline.base_sha)
+    except WorkspaceNotAGitRepoError:
+        logger.warning(
+            "Workspace is not a git repo; skipping baseline diff",
+            extra={"workflow_id": task.workflow_id, "workspace": task.workspace_root},
+        )
+        return ""
+    if diff.startswith(("Exit code:", "Error:")):
+        logger.warning(
+            "git diff failed",
+            extra={"workflow_id": task.workflow_id, "stderr": diff[:500]},
+        )
+        return ""
+    return diff
+
+
+async def _reply_validation_error(
+    bus: MessageBus,
+    assign_msg: NMBMessage,
+    exc: PayloadValidationError,
+) -> None:
+    """Reply with a ``task.error`` for a payload that failed validation.
+
+    Without a workflow_id (the very thing we couldn't parse), we use
+    the original NMB message id as a workflow placeholder — the
+    orchestrator's listener can correlate via the reply-to chain.
+    """
+    error = TaskErrorPayload(
+        workflow_id=assign_msg.id,
+        error=f"task.assign payload validation failed: {exc}",
+        error_kind="other",
+        recoverable=False,
+    )
+    await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error))
+
+
+_ErrorKind = Literal[
+    "max_turns_exceeded",
+    "tool_failure",
+    "policy_denied",
+    "inference_error",
+    "other",
+]
+
+
+def _classify_error(exc: BaseException) -> _ErrorKind:
+    """Map a Python exception type to a ``TaskErrorPayload.error_kind``.
+
+    The five literal values come from the design (§6.3, §6.5).
+    Default is ``"other"`` — we'd rather be honest about an
+    unclassified failure than mis-bucket it.
+    """
+    if isinstance(exc, TimeoutError):
+        return "tool_failure"
+    name = type(exc).__name__
+    if "Inference" in name or "Backend" in name:
+        return "inference_error"
+    if "Approval" in name or "Policy" in name:
+        return "policy_denied"
+    return "other"
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────

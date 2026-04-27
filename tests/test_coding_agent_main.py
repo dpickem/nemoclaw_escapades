@@ -571,3 +571,256 @@ class TestAgentSetupBundleSerde:
     def test_from_dict_missing_field_raises(self) -> None:
         with pytest.raises(KeyError):
             AgentSetupBundle.from_dict({"task_id": "t1"})
+
+
+# ── NMB receive loop ────────────────────────────────────────────────
+
+
+class _FakeAgentLoopForNmb:
+    """Records the AgentLoopConfig it was constructed with.
+
+    Per-task ``max_turns`` / ``model`` flow through
+    ``dataclasses.replace``; this fake makes the resulting config
+    visible to the test so we can assert the override landed.
+    """
+
+    captured: dict[str, Any] = {}
+
+    def __init__(self, *, config: Any, **_: Any) -> None:
+        type(self).captured["config"] = config
+
+    async def run(self, *, messages: list[Any], request_id: str) -> Any:
+        return type(
+            "R",
+            (),
+            {
+                "content": "did the work",
+                "rounds": 3,
+                "tool_calls_made": 5,
+                "hit_safety_limit": False,
+                "working_messages": list(messages),
+            },
+        )()
+
+
+class TestRunAssignedTask:
+    """``_run_assigned_task`` builds the per-task config and produces complete payload."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _FakeAgentLoopForNmb.captured = {}
+        monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoopForNmb)
+
+    @pytest.mark.asyncio
+    async def test_per_task_max_turns_and_model_replace_global(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``task.max_turns`` / ``task.model`` flow into a one-shot config.
+
+        The process-wide ``config.agent_loop`` must stay untouched —
+        the next ``task.assign`` shouldn't inherit this assignment's
+        overrides.  Verified via the global-config-instance identity
+        check below.
+        """
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        global_loop_config = config.agent_loop
+        original_max = global_loop_config.max_tool_rounds
+        original_model = global_loop_config.model
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        task = TaskAssignPayload(
+            prompt="add a /api/health endpoint",
+            workflow_id="wf-1",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef01",
+            workspace_root=str(workspace),
+            max_turns=42,
+            model="azure/anthropic/claude-haiku-4",
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+
+        captured_cfg = _FakeAgentLoopForNmb.captured["config"]
+        # Per-task config has the overrides applied.
+        assert captured_cfg.max_tool_rounds == 42
+        assert captured_cfg.model == "azure/anthropic/claude-haiku-4"
+        # The process-wide config is untouched.
+        assert global_loop_config.max_tool_rounds == original_max
+        assert global_loop_config.model == original_model
+        assert global_loop_config is config.agent_loop  # identity unchanged
+
+        # Complete payload reports the requested model + actual round count.
+        assert complete.workflow_id == "wf-1"
+        assert complete.summary == "did the work"
+        assert complete.rounds_used == 3
+        assert complete.tool_calls_made == 5
+        assert complete.model_used == "azure/anthropic/claude-haiku-4"
+
+    @pytest.mark.asyncio
+    async def test_no_overrides_uses_global_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``max_turns=None`` and ``model=None`` → loop gets the unchanged global."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        task = TaskAssignPayload(
+            prompt="task body",
+            workflow_id="wf-2",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef02",
+            workspace_root=str(workspace),
+            # No max_turns, no model — global wins.
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+
+        captured_cfg = _FakeAgentLoopForNmb.captured["config"]
+        # When no overrides, the helper passes the global config
+        # by identity, not a replaced copy.
+        assert captured_cfg is config.agent_loop
+
+    @pytest.mark.asyncio
+    async def test_baseline_diff_when_baseline_pinned(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the orchestrator pinned a baseline, the diff is computed."""
+        # Make the diff helper return a known string so we don't need
+        # a real git repo here — the git-helper tests exercise the
+        # real-git path.
+        async def _fake_diff(workspace_root: str, base_sha: str) -> str:
+            return f"diff against {base_sha[:7]}"
+
+        monkeypatch.setattr(agent_main, "diff_against_baseline", _fake_diff)
+
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, WorkspaceBaseline
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        baseline = WorkspaceBaseline(
+            repo_url="https://example.com/x.git",
+            branch="main",
+            base_sha="cafebabecafebabecafebabecafebabecafebabe",
+        )
+        task = TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-3",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-deadbeef",
+            workspace_root=str(workspace),
+            workspace_baseline=baseline,
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        # Diff was computed against the assigned baseline.
+        assert complete.diff == "diff against cafebab"
+        # Baseline echoed verbatim — drift detection on the
+        # orchestrator's side compares against the original.
+        assert complete.workspace_baseline == baseline
+
+    @pytest.mark.asyncio
+    async def test_no_baseline_means_empty_diff(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``workspace_baseline=None`` → ``diff`` is empty (non-diff task)."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="summarize this repo",
+            workflow_id="wf-4",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-99887766",
+            workspace_root=str(workspace),
+            # Deliberately no baseline.
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        assert complete.diff == ""
+        assert complete.workspace_baseline is None
+
+
+class TestClassifyError:
+    """``_classify_error`` maps Python exception types to wire literals."""
+
+    def test_timeout_is_tool_failure(self) -> None:
+        assert agent_main._classify_error(TimeoutError("timed out")) == "tool_failure"
+
+    def test_inference_error_class_name_is_inference_error(self) -> None:
+        class InferenceFooError(Exception):
+            pass
+
+        assert agent_main._classify_error(InferenceFooError("x")) == "inference_error"
+
+    def test_approval_error_class_name_is_policy_denied(self) -> None:
+        class ApprovalRejectedError(Exception):
+            pass
+
+        assert agent_main._classify_error(ApprovalRejectedError("x")) == "policy_denied"
+
+    def test_default_is_other(self) -> None:
+        assert agent_main._classify_error(ValueError("x")) == "other"
