@@ -383,11 +383,19 @@ class DelegationManager:
 
         async def _spawn(sub_agent_sandbox_id: str, workspace_root: str) -> SpawnedAgent:
             env = os.environ.copy()
-            # The sub-agent reads broker_url + sandbox_id from
-            # config.nmb.  We pin sandbox_id here so the orchestrator
-            # knows what to address.
-            env["AGENT_SANDBOX_ID"] = sub_agent_sandbox_id
-            env["CODING_WORKSPACE_ROOT"] = workspace_root
+            # Pin the sub-agent's identity + workspace root through
+            # the documented runtime-overrides layer (M2b §5.3:
+            # non-secret deployment values flow via
+            # ``NEMOCLAW_*`` env vars handled by
+            # ``_apply_runtime_overrides``).  Without these, the
+            # sub-agent's ``create_coding_agent_config`` falls
+            # through to its default sandbox-id generator, the
+            # broker registers a different id, and our
+            # ``request(to=sub_agent_sandbox_id)`` retries hit
+            # ``TARGET_OFFLINE`` until ``spawn_ready_timeout_s``
+            # expires.
+            env["NEMOCLAW_SANDBOX_ID"] = sub_agent_sandbox_id
+            env["NEMOCLAW_WORKSPACE_ROOT"] = workspace_root
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
