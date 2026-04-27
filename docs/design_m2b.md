@@ -1452,13 +1452,13 @@ each job's failure mode is observable in the log.
 |------|-------|--------|
 | Progress relaying to Slack | `orchestrator/delegation.py` | ⏳ |
 | File tool edge case hardening (symlinks, binary files, encoding) | `tools/files.py` | ⏳ |
-| Skill-body-size startup log (`{skill_id, body_lines, body_bytes, has_references_dir, has_assets_dir}`) — observability for §17 Q5 | `agent/skill_loader.py` | ⏳ |
-| **Lazy `load_skill` capability** — sub-agent only; metadata in prompt, body materialised on demand. SDK §11.1.1 (Tier 1, ~1 day). Rationale: §1, §17 Q5. | `tools/load_skill.py` (new), `agent/skill_loader.py`, `tools/tool_registry_factory.py`, `prompts/coding_agent.md`, `tests/test_load_skill.py` (new) | ⏳ |
-| **Lazy-`load_skill` ↔ `tool_search` design sketch** — one-page note resolving §17 Q6 | `docs/deep_dives/lazy_loading_unification.md` (new) | ⏳ |
-| **Optional — `Capability`-style behaviour bundles** — SDK §11.3.1 (Tier 3). Skip unless M3 queues 3+ new bundles. | `src/nemoclaw_escapades/agent/capabilities/` (new), `tools/tool_registry_factory.py` | ⏳ (gated) |
-| **Optional — `AgentSpec` dataclass** — SDK §10 mapping. Clarifies orchestrator/sub-agent boundary for M3. No runtime change. | `src/nemoclaw_escapades/agent/spec.py` (new), `agent/__main__.py`, `orchestrator/delegation.py` | ⏳ (gated) |
-| **Optional — Option A multi-endpoint provider switching** — §6.5.1. Land only if a real per-task model requirement surfaces before M3. | `policies/orchestrator.yaml`, `config/defaults.yaml`, `src/nemoclaw_escapades/config.py`, `tools/delegation.py`, `tests/integration/test_delegation.py` | ⏳ (gated) |
-| `docs/DEFERRED.md` — features punted out of M2b (`Manifest`, snapshots, `Memory`, leftover Tier 3, operational per-task model selection) | `docs/DEFERRED.md` (new) | ⏳ |
+| Skill-body-size startup log — observability for §17 Q5 | `agent/skill_loader.py` | ⏳ |
+| Lazy `load_skill` capability — sub-agent only; metadata in prompt, body on demand (SDK §11.1.1) | `tools/load_skill.py` (new), `agent/skill_loader.py`, `tools/tool_registry_factory.py`, `prompts/coding_agent.md`, `tests/test_load_skill.py` (new) | ⏳ |
+| Lazy-`load_skill` ↔ `tool_search` design sketch (resolves §17 Q6) | `docs/deep_dives/lazy_loading_unification.md` (new) | ⏳ |
+| `Capability`-style behaviour bundles (SDK §11.3.1) — skip unless M3 queues 3+ new bundles | `src/nemoclaw_escapades/agent/capabilities/` (new), `tools/tool_registry_factory.py` | ⏳ (gated) |
+| `AgentSpec` dataclass (SDK §10 mapping) — clarifies orch/sub-agent boundary for M3 | `src/nemoclaw_escapades/agent/spec.py` (new), `agent/__main__.py`, `orchestrator/delegation.py` | ⏳ (gated) |
+| Option A multi-endpoint provider switching (§6.5.1) — only if a per-task model requirement surfaces before M3 | `policies/orchestrator.yaml`, `config/defaults.yaml`, `src/nemoclaw_escapades/config.py`, `tools/delegation.py`, `tests/integration/test_delegation.py` | ⏳ (gated) |
+| `docs/DEFERRED.md` — features punted out of M2b (`Manifest`, snapshots, `Memory`, leftover Tier 3, operational per-task model) | `docs/DEFERRED.md` (new) | ⏳ |
 
 **Exit criteria:** production-quality delegation with cleanup,
 progress, and edge-case hardening; lazy `load_skill` lands; §17 Q6
@@ -1903,7 +1903,7 @@ could:
 
 The OpenShell deep dive explicitly notes that the gateway itself
 **does not distinguish "orchestrator sandbox" from "sub-agent
-sandbox"** ([§3](deep_dives/openshell_deep_dive.md#3--core-components)
+sandbox"** ([§4](deep_dives/openshell_deep_dive.md#4--core-components)
 — "the hierarchy is an APPLICATION-LEVEL concern, defined by how
 YOU wire the agent code, not by OpenShell").  The trust split
 between "trusted parent that constrains children" and "untrusted
@@ -1952,7 +1952,7 @@ anything an operator can do."
 #### Sub-agent control-plane requests always route through NMB
 
 The sub-agent's NMB-mediated `policy.request` flow
-([`design_m3.md` §7.2](design_m3.md#72--request-flow)) is the
+([`design_m3.md` §7.2](design_m3.md#72-request-flow)) is the
 pattern for any future "sub-agent wants to influence the control
 plane" capability.  The sub-agent never reaches the gateway
 directly; it asks the orchestrator over NMB; the orchestrator
