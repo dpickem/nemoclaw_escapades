@@ -24,6 +24,7 @@ import pytest
 
 from nemoclaw_escapades.agent.git_helpers import (
     WorkspaceNotAGitRepoError,
+    _is_shallow,
     diff_against_baseline,
     resolve_baseline,
 )
@@ -110,6 +111,49 @@ class TestDiffAgainstBaseline:
         diff = await diff_against_baseline(str(repo), head)
         assert "a.py" in diff
         assert "b.py" in diff
+
+
+class TestIsShallow:
+    """Regression coverage for the ``_is_shallow`` conservative default.
+
+    The contract (per the docstring and the matching defaults on
+    ``WorkspaceBaseline.is_shallow`` / the ``delegate_task`` JSON
+    schema): only the literal ``"false"`` returned by
+    ``git rev-parse --is-shallow-repository`` flips the result to
+    "not shallow".  Everything else — ``"true"``, an old git that
+    doesn't know the flag, or a non-git workspace that hits an
+    ``Exit code: 128`` — must default to shallow so finalisation
+    safely deepens before rebasing.
+    """
+
+    async def test_full_clone_returns_false(self, repo: Path) -> None:
+        # ``git init`` + one commit is not shallow.
+        assert await _is_shallow(str(repo)) is False
+
+    async def test_shallow_clone_returns_true(self, repo: Path, tmp_path: Path) -> None:
+        # Make ``repo`` reachable as a local file:// remote, then
+        # ``--depth=1`` clone of it lands in a sibling dir.
+        shallow_dest = tmp_path / "shallow"
+        _git(
+            tmp_path,
+            "clone",
+            "--depth=1",
+            f"file://{repo}",
+            str(shallow_dest),
+        )
+        assert await _is_shallow(str(shallow_dest)) is True
+
+    async def test_non_git_workspace_defaults_to_shallow(self, tmp_path: Path) -> None:
+        # Regression for the ``out == "true"`` bug: a directory that
+        # isn't a git repo causes ``git rev-parse`` to exit non-zero,
+        # producing an ``"Exit code: 128\n..."`` string.  The helper
+        # must treat that as shallow per the docstring's conservative
+        # default — the previous ``out == "true"`` returned False
+        # here, which would silently skip the ``--unshallow`` step in
+        # finalisation.
+        bare_dir = tmp_path / "not_a_repo"
+        bare_dir.mkdir()
+        assert await _is_shallow(str(bare_dir)) is True
 
 
 @pytest.fixture

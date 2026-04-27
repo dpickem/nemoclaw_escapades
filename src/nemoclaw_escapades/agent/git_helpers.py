@@ -108,10 +108,19 @@ async def _is_shallow(workspace_root: str) -> bool:
     """Check whether the workspace is a shallow clone.
 
     ``git rev-parse --is-shallow-repository`` returns ``"true"`` /
-    ``"false"`` on stdout; anything else means an unexpected git
-    state and we conservatively treat it as shallow (the only
-    consequence of getting this wrong is that finalisation may
-    deepen unnecessarily).
+    ``"false"`` on stdout; anything else (a git error, an unfamiliar
+    repo state, an older git that doesn't know the flag) is treated
+    as shallow.
+
+    The asymmetry is deliberate: on an unknown state the safe move
+    is to assume *shallow*, because finalisation can then run
+    ``git fetch --unshallow`` defensively and proceed.  The opposite
+    default (``out == "true"``) would skip the deepen step on git
+    failure and crash at rebase time when the missing history
+    finally caught up with us.  The Pydantic model
+    (:class:`WorkspaceBaseline.is_shallow`) and the ``delegate_task``
+    JSON schema both default to ``True`` for the same reason — this
+    helper now matches them.
     """
     out = (await _run_git(workspace_root, "rev-parse", "--is-shallow-repository")).strip()
-    return out == "true"
+    return out != "false"
