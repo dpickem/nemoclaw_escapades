@@ -48,6 +48,18 @@ agent_loop:
   compaction_compress_ratio: 0.5
   compaction_min_keep: 4
 
+delegation:
+  # Hard cap on concurrent in-flight orchestrator → sub-agent delegations.
+  # Excess delegate_task calls block on a Semaphore until a slot frees up.
+  max_concurrent: 4
+  # Maximum delegation nesting depth.  M2b only supports orchestrator →
+  # coding-agent (depth 1); higher values are M3 review-agent territory.
+  max_spawn_depth: 1
+  # Seconds the orchestrator waits for a task.complete reply before
+  # failing the delegation.  Multi-file refactors that need longer
+  # bump this.
+  task_timeout_s: 300.0
+
 nmb:
   # Broker URL the orchestrator and sub-agents dial.  Inside the
   # sandbox the OpenShell gateway proxies this to the NMB broker

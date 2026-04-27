@@ -320,6 +320,54 @@ class OrchestratorConfig:
     max_tokens: int = DEFAULT_MAX_TOKENS
 
 
+# ── Delegation defaults (Phase 3a) ────────────────────────────────────
+
+# Maximum concurrent sub-agent delegations the orchestrator allows
+# system-wide.  Hard cap on inference cost + sandbox-process count.
+# §8.1 — per-agent semaphores.
+DEFAULT_MAX_CONCURRENT_DELEGATIONS: int = 4
+
+# Maximum nesting depth for sub-agent → sub-agent delegation.  M2b
+# only supports orchestrator → coding-agent (depth 1); higher values
+# are harmless until M3 introduces review agents.
+DEFAULT_MAX_SPAWN_DEPTH: int = 1
+
+# Default seconds the orchestrator waits for a ``task.complete`` reply
+# before failing the delegation.  Aligned with the BYOO tutorial's
+# "tasks usually < 5 minutes" rule of thumb; multi-file refactors that
+# need longer set ``DelegationConfig.task_timeout_s`` explicitly.
+DEFAULT_DELEGATION_TIMEOUT_S: float = 300.0
+
+
+@dataclass
+class DelegationConfig:
+    """Parameters for orchestrator → sub-agent delegation.
+
+    Attributes:
+        max_concurrent: Hard cap on concurrent in-flight delegations.
+            Enforced via ``asyncio.Semaphore`` in
+            :class:`DelegationManager`.  Excess ``delegate_task``
+            calls block until a slot frees up rather than failing.
+        max_spawn_depth: Maximum delegation nesting depth.  Each
+            ``TaskAssignPayload`` carries an implicit depth derived
+            from ``parent_sandbox_id`` lineage; over the cap we
+            refuse to spawn (sub-agents can't delegate further in
+            M2b — that's an M3 review-agent concern).
+        task_timeout_s: Seconds to wait for a ``task.complete``
+            reply.  ``None`` means "use NMB's
+            ``default_request_timeout``"; setting an explicit value
+            applies it through ``MessageBus.request(timeout=...)``.
+        sub_agent_module: Python ``-m`` module path for the
+            sub-agent process.  Made configurable so tests can
+            point at a stub.
+    """
+
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_DELEGATIONS
+    max_spawn_depth: int = DEFAULT_MAX_SPAWN_DEPTH
+    task_timeout_s: float | None = DEFAULT_DELEGATION_TIMEOUT_S
+    sub_agent_module: str = "nemoclaw_escapades.agent"
+
+
 @dataclass
 class LogConfig:
     """Logging configuration.
@@ -626,6 +674,7 @@ class AppConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     agent_loop: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+    delegation: DelegationConfig = field(default_factory=DelegationConfig)
     nmb: NmbClientConfig = field(default_factory=NmbClientConfig)
     log: LogConfig = field(default_factory=LogConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
@@ -691,6 +740,7 @@ _DIRECT_SECTIONS: tuple[str, ...] = (
     "inference",
     "orchestrator",
     "agent_loop",
+    "delegation",
     "nmb",
     "log",
     "audit",
