@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from nemoclaw_escapades.config import DelegationConfig
+from nemoclaw_escapades.nmb.client import NMBConnectionError
 from nemoclaw_escapades.nmb.protocol import (
     TASK_COMPLETE,
     TASK_ERROR,
@@ -308,9 +309,7 @@ class TestSemaphoreCap:
         )
 
         async def _run(idx: int) -> None:
-            await mgr.delegate(
-                _make_task(workflow_id=f"wf-{idx}", agent_id=f"coding-{idx:08d}")
-            )
+            await mgr.delegate(_make_task(workflow_id=f"wf-{idx}", agent_id=f"coding-{idx:08d}"))
 
         # Start all three concurrently.
         tasks = [asyncio.create_task(_run(i)) for i in range(3)]
@@ -332,3 +331,154 @@ class TestSemaphoreCap:
         events[2].set()
         await asyncio.gather(*tasks)
         assert spawn.terminated == ["coding-00000000", "coding-00000001", "coding-00000002"]
+
+
+# ── Readiness retry on TARGET_OFFLINE ──────────────────────────────
+
+
+class _ScriptedBus:
+    """Bus that runs through a queue of scripted ``request`` outcomes.
+
+    Each outcome is either a ``BaseException`` to raise or a payload
+    to return as a ``task.complete`` reply.  Lets us simulate "broker
+    rejected the first N requests with TARGET_OFFLINE, then accepted
+    the (N+1)th".
+    """
+
+    def __init__(self, script: list[BaseException | dict[str, Any]]) -> None:
+        self._script = list(script)
+        self.attempts = 0
+
+    async def request(
+        self,
+        *,
+        to: str,
+        type: str,  # noqa: A002
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> _FakeNMBMessage:
+        self.attempts += 1
+        if not self._script:
+            raise RuntimeError(f"_ScriptedBus exhausted after {self.attempts} calls")
+        outcome = self._script.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _FakeNMBMessage(type=TASK_COMPLETE, payload=outcome)
+
+
+class TestSpawnReadinessRetry:
+    """The fix for the spawn-vs-connect race documented in §3.
+
+    A subprocess takes hundreds of ms to start; the broker rejects
+    requests to a not-yet-connected sandbox with ``TARGET_OFFLINE``
+    instantly.  ``DelegationManager`` must retry until the sub-agent
+    registers, capped by ``spawn_ready_timeout_s``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retries_target_offline_until_subagent_connects(self) -> None:
+        """First two attempts hit ``TARGET_OFFLINE``; the third succeeds."""
+        bus = _ScriptedBus(
+            [
+                NMBConnectionError("Broker error TARGET_OFFLINE: coding-12345678 not connected"),
+                NMBConnectionError("Broker error TARGET_OFFLINE: coding-12345678 not connected"),
+                _complete_payload_dict(),
+            ]
+        )
+        spawn = _SpawnRecorder()
+        mgr = DelegationManager(
+            bus,  # type: ignore[arg-type]
+            DelegationConfig(
+                spawn_ready_timeout_s=2.0,
+                spawn_ready_poll_interval_s=0.0,  # tight loop, no real sleep
+            ),
+            spawn_callback=spawn,  # type: ignore[arg-type]
+        )
+
+        result = await mgr.delegate(_make_task())
+
+        assert bus.attempts == 3, "manager should have retried twice before succeeding"
+        assert result.complete.workflow_id == "wf-1"
+        # Spawn was not redone on each retry — one process, then the
+        # successful delivery, then a clean terminate.
+        assert spawn.spawned == [("coding-12345678", "/tmp/ws-wf-1")]
+        assert spawn.terminated == ["coding-12345678"]
+
+    @pytest.mark.asyncio
+    async def test_persistent_target_offline_fails_with_clear_error(self) -> None:
+        """When the sub-agent never registers, fail with a readiness-specific error.
+
+        Crucial for production debugging: a generic
+        ``NMBConnectionError`` would look indistinguishable from a
+        broker outage; the readiness window failure must call out
+        ``spawn_ready_timeout_s`` so operators know to bump it (or
+        fix the sub-agent) instead of the broker.
+        """
+        # The bus rejects every attempt — script never resolves.
+        offline = NMBConnectionError("Broker error TARGET_OFFLINE: coding-12345678 not connected")
+        bus = _ScriptedBus([offline] * 50)
+        spawn = _SpawnRecorder()
+        mgr = DelegationManager(
+            bus,  # type: ignore[arg-type]
+            DelegationConfig(
+                spawn_ready_timeout_s=0.05,  # blow through the budget fast
+                spawn_ready_poll_interval_s=0.01,
+            ),
+            spawn_callback=spawn,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(DelegationError) as excinfo:
+            await mgr.delegate(_make_task())
+
+        assert "spawn_ready_timeout_s=0.05" in str(excinfo.value)
+        assert "never came online" in str(excinfo.value)
+        # The terminate ran in the finally block — no orphaned process.
+        assert spawn.terminated == ["coding-12345678"]
+
+    @pytest.mark.asyncio
+    async def test_non_target_offline_error_propagates_immediately(self) -> None:
+        """Real transport failures bypass the retry loop.
+
+        We retry only on ``TARGET_OFFLINE`` (the documented "not yet
+        connected" signal); a different broker error — broker
+        misconfig, rate-limited, etc. — should fail fast with the
+        original message preserved.  Otherwise an operator chasing a
+        broker bug would wait the full ``spawn_ready_timeout_s``
+        before seeing it.
+        """
+        bus = _ScriptedBus(
+            [NMBConnectionError("Broker error RATE_LIMITED: too many pending requests")]
+        )
+        spawn = _SpawnRecorder()
+        mgr = DelegationManager(
+            bus,  # type: ignore[arg-type]
+            DelegationConfig(spawn_ready_timeout_s=10.0),
+            spawn_callback=spawn,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(DelegationError) as excinfo:
+            await mgr.delegate(_make_task())
+
+        assert "RATE_LIMITED" in str(excinfo.value)
+        # Only one attempt — no retry on a non-readiness error.
+        assert bus.attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_success_skips_retry(self) -> None:
+        """Happy path: the broker accepts the first delivery.
+
+        Regression guard for the readiness fix: if the manager were
+        to redundantly probe before sending the real assign, this
+        test would flag it (we'd see two attempts when only one is
+        needed).
+        """
+        bus = _ScriptedBus([_complete_payload_dict()])
+        spawn = _SpawnRecorder()
+        mgr = DelegationManager(
+            bus,  # type: ignore[arg-type]
+            DelegationConfig(spawn_ready_timeout_s=10.0),
+            spawn_callback=spawn,  # type: ignore[arg-type]
+        )
+
+        await mgr.delegate(_make_task())
+        assert bus.attempts == 1

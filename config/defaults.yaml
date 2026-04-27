@@ -59,6 +59,13 @@ delegation:
   # failing the delegation.  Multi-file refactors that need longer
   # bump this.
   task_timeout_s: 300.0
+  # Seconds the orchestrator waits for a freshly spawned sub-agent to
+  # register on the NMB broker.  Most spawns finish sub-second; this
+  # ceiling fails fast when the sub-agent crashed at startup instead
+  # of letting the full task timeout swallow the failure.
+  spawn_ready_timeout_s: 10.0
+  # Polling interval while waiting for the sub-agent to come online.
+  spawn_ready_poll_interval_s: 0.1
 
 nmb:
   # Broker URL the orchestrator and sub-agents dial.  Inside the

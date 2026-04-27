@@ -17,9 +17,13 @@ The lifecycle of one delegation:
    nemoclaw_escapades.agent --nmb``).  The process inherits the
    orchestrator's env, including the OpenShell-provider placeholder
    tokens.
-4. Wait for the sub-agent's NMB sandbox to come online (it announces
-   itself when it calls ``MessageBus.connect``), then send the
-   ``task.assign`` via ``bus.request(timeout=DelegationConfig.task_timeout_s)``.
+4. Wait for the sub-agent's NMB sandbox to come online — fresh
+   subprocesses need a beat to import, load config, and complete the
+   broker handshake.  Implemented by retrying the ``task.assign``
+   send on ``TARGET_OFFLINE`` until the configured
+   ``spawn_ready_timeout_s`` elapses; once any send succeeds, the
+   broker has accepted the request and we proceed to await the
+   reply with the full ``task_timeout_s`` budget.
 5. The sub-agent runs the task, replies with ``task.complete`` (or
    ``task.error``).  Validate the reply through Pydantic and return
    the typed payload.
@@ -39,7 +43,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from nemoclaw_escapades.config import DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT, DelegationConfig
-from nemoclaw_escapades.nmb.client import MessageBus
+from nemoclaw_escapades.nmb.client import MessageBus, NMBConnectionError
+from nemoclaw_escapades.nmb.models import NMBMessage
 from nemoclaw_escapades.nmb.protocol import (
     TASK_ASSIGN,
     TASK_COMPLETE,
@@ -193,7 +198,10 @@ class DelegationManager:
         async with self._semaphore:
             agent = await self._spawn(task.agent_id, task.workspace_root)
             try:
-                reply = await self._send_assign_and_await_reply(task, agent.sandbox_id)
+                reply = await self._send_assign_with_readiness_retry(
+                    task,
+                    agent.sandbox_id,
+                )
             finally:
                 await agent.terminate()
         return DelegationResult(complete=reply, sub_agent_sandbox_id=agent.sandbox_id)
@@ -224,40 +232,127 @@ class DelegationManager:
         # one-level cap is enforced by construction (sub-agents
         # don't have a delegate_task tool registered until M3).
 
-    async def _send_assign_and_await_reply(
+    async def _send_assign_with_readiness_retry(
         self,
         task: TaskAssignPayload,
         sub_agent_sandbox_id: str,
     ) -> TaskCompletePayload:
-        """Send ``task.assign``, await the typed reply, validate it.
+        """Send ``task.assign`` with retry-on-``TARGET_OFFLINE``, then await reply.
 
-        The ``request`` call blocks until the sub-agent replies (or
-        the configured timeout fires).  We catch validation errors
-        and transport failures separately so the
-        :class:`DelegationError` message tells the caller which
-        layer broke.
+        Bridges the gap between ``subprocess.exec`` returning and the
+        sub-agent's NMB connection becoming live: a freshly spawned
+        process needs a beat to import, load config, and finish the
+        broker handshake.  Without this loop the orchestrator would
+        race the sub-agent and reliably fail with ``TARGET_OFFLINE``
+        on every production delegation.
+
+        The retry window is **delivery-only**.  Once the broker has
+        accepted the request (i.e. the sub-agent's connection took
+        the frame), :meth:`_interpret_reply` validates the eventual
+        reply with the full ``task_timeout_s`` budget already applied
+        by :meth:`_send_assign_once`.  Any later transport error
+        reflects real task semantics, not readiness, and is reported
+        as-is.
+
+        Two distinct timeouts are at play:
+
+        - ``spawn_ready_timeout_s`` caps the *delivery* phase — how
+          long we keep retrying ``TARGET_OFFLINE``.  Sized for spawn
+          cost (subprocess + import + handshake), typically seconds.
+        - ``task_timeout_s`` caps the *reply* phase — how long we
+          wait for ``task.complete`` once the request has been
+          accepted.  Sized for actual task work, typically minutes.
 
         Raises:
-            DelegationError: On NMB transport failure, validation
-                failure, or a ``task.error`` reply.
+            DelegationError: If the readiness window elapses without
+                a successful delivery, or if the eventual reply
+                fails validation / is a ``task.error``.
         """
-        # ``request`` only accepts ``float``, so fall through to the
-        # NMB default when the operator hasn't pinned a timeout.
+        deadline = asyncio.get_running_loop().time() + self._config.spawn_ready_timeout_s
+        last_offline_error: NMBConnectionError | None = None
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                reply = await self._send_assign_once(task, sub_agent_sandbox_id)
+                if attempts > 1:
+                    logger.info(
+                        "Sub-agent %s came online after %d readiness probes",
+                        sub_agent_sandbox_id,
+                        attempts,
+                    )
+                return self._interpret_reply(reply)
+            except NMBConnectionError as exc:
+                if not _is_target_offline(exc):
+                    # Real broker error (rate-limited, broker
+                    # misconfig, etc.) — not a readiness issue.
+                    raise DelegationError(
+                        f"task.assign delivery failed: {exc}",
+                    ) from exc
+                last_offline_error = exc
+            except DelegationError:
+                # Already classified by ``_interpret_reply`` (e.g. a
+                # ``task.error`` reply — the typed error payload is
+                # already attached).  Propagate unchanged so callers
+                # can branch on ``error_payload.recoverable``.
+                raise
+            except Exception as exc:  # noqa: BLE001 — broad NMB transport surface
+                # Anything else from the bus (``TimeoutError``,
+                # generic transport errors, etc.) bypasses the retry
+                # loop — it's a real failure, not a readiness signal.
+                raise DelegationError(
+                    f"task.assign delivery failed: {exc}",
+                ) from exc
+
+            now = asyncio.get_running_loop().time()
+            if now >= deadline:
+                raise DelegationError(
+                    "sub-agent never came online within "
+                    f"spawn_ready_timeout_s={self._config.spawn_ready_timeout_s}s "
+                    f"(last broker error: {last_offline_error})",
+                ) from last_offline_error
+
+            # Sleep, but don't overshoot the deadline.
+            sleep_for = min(
+                self._config.spawn_ready_poll_interval_s,
+                max(0.0, deadline - now),
+            )
+            await asyncio.sleep(sleep_for)
+
+    async def _send_assign_once(
+        self,
+        task: TaskAssignPayload,
+        sub_agent_sandbox_id: str,
+    ) -> NMBMessage:
+        """One ``request`` attempt.  Returns the raw reply or raises.
+
+        Separated out so the retry loop in
+        :meth:`_send_assign_with_readiness_retry` can distinguish
+        ``TARGET_OFFLINE`` (retry) from other ``NMBConnectionError``
+        causes (propagate) without entangling the reply-validation
+        path.
+        """
         timeout = self._config.task_timeout_s
         if timeout is None:
             timeout = DEFAULT_NMB_DEFAULT_REQUEST_TIMEOUT
-        try:
-            reply = await self._bus.request(
-                to=sub_agent_sandbox_id,
-                type=TASK_ASSIGN,
-                payload=dump(task),
-                timeout=timeout,
-            )
-        except Exception as exc:  # noqa: BLE001 — broad NMB transport surface
-            raise DelegationError(
-                f"task.assign delivery failed: {exc}",
-            ) from exc
+        return await self._bus.request(
+            to=sub_agent_sandbox_id,
+            type=TASK_ASSIGN,
+            payload=dump(task),
+            timeout=timeout,
+        )
 
+    def _interpret_reply(self, reply: NMBMessage) -> TaskCompletePayload:
+        """Validate a raw NMB reply and return a typed ``TaskCompletePayload``.
+
+        Pulled out of :meth:`_send_assign_with_readiness_retry` so
+        the retry loop only handles delivery; reply interpretation
+        runs once, after a successful send.
+
+        Raises:
+            DelegationError: On a ``task.error`` reply, validation
+                failure, or unexpected reply type.
+        """
         if reply.type == TASK_COMPLETE:
             try:
                 return load(TaskCompletePayload, TASK_COMPLETE, reply.payload)
@@ -266,10 +361,6 @@ class DelegationManager:
                     f"task.complete payload validation failed: {exc}",
                 ) from exc
 
-        # Anything else (task.error or an unexpected type) is a
-        # delegation failure.  Wrap the typed error in
-        # DelegationError.error_payload so the finalization model
-        # can branch on ``recoverable``.
         try:
             error_payload = load(TaskErrorPayload, "task.error", reply.payload)
         except PayloadValidationError as exc:
@@ -317,3 +408,16 @@ class DelegationManager:
             return SpawnedAgent(sandbox_id=sub_agent_sandbox_id, terminate=_terminate)
 
         return _spawn
+
+
+def _is_target_offline(exc: NMBConnectionError) -> bool:
+    """True iff *exc* is the broker's "target not connected" rejection.
+
+    The broker formats these as ``Broker error TARGET_OFFLINE: ...``
+    (see ``nmb/broker.py::_handle_request``); we substring-match
+    rather than expose the ``ErrorCode`` enum because the public
+    surface of :class:`NMBConnectionError` only carries the message
+    string.  A more typed signal would be a nice cleanup, but it's
+    not worth blocking the readiness fix on.
+    """
+    return "TARGET_OFFLINE" in str(exc)

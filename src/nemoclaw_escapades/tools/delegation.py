@@ -149,7 +149,7 @@ def _make_delegate_task(
             workflow_id=f"wf-{uuid.uuid4().hex[:12]}",
             parent_sandbox_id=parent_sandbox_id,
             agent_id=agent_id,
-            workspace_root=f"{workspace_root}/agent-{agent_id[len('coding-'):]}",
+            workspace_root=f"{workspace_root}/agent-{agent_id[len('coding-') :]}",
             max_turns=max_turns or default_max_turns,
             model=model or default_model,
             workspace_baseline=baseline,

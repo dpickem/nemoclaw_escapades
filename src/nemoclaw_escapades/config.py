@@ -338,6 +338,21 @@ DEFAULT_MAX_SPAWN_DEPTH: int = 1
 # need longer set ``DelegationConfig.task_timeout_s`` explicitly.
 DEFAULT_DELEGATION_TIMEOUT_S: float = 300.0
 
+# Default seconds the orchestrator waits for a freshly spawned sub-agent
+# to register on the NMB broker before giving up.  Spawn cost is
+# typically sub-second (subprocess + import + broker handshake), but a
+# cold inference backend or NMB reconnect can stretch this.  Ten
+# seconds gives generous headroom while still failing fast when the
+# sub-agent crashed at startup.  See
+# ``DelegationManager._wait_for_sandbox_online``.
+DEFAULT_SPAWN_READY_TIMEOUT_S: float = 10.0
+
+# Polling interval used by ``_wait_for_sandbox_online`` when probing
+# whether the spawned sub-agent has connected to the broker yet.
+# Short enough that a sub-second spawn isn't gated on the next tick;
+# long enough that we don't melt the broker with probe traffic.
+DEFAULT_SPAWN_READY_POLL_INTERVAL_S: float = 0.1
+
 
 @dataclass
 class DelegationConfig:
@@ -357,6 +372,17 @@ class DelegationConfig:
             reply.  ``None`` means "use NMB's
             ``default_request_timeout``"; setting an explicit value
             applies it through ``MessageBus.request(timeout=...)``.
+        spawn_ready_timeout_s: Seconds to wait for a freshly spawned
+            sub-agent to register on the NMB broker before failing
+            the delegation.  Distinct from ``task_timeout_s``: a
+            sub-agent that crashed at import time should fail in
+            seconds, not after the full task timeout (which can be
+            5+ minutes).  See
+            :meth:`DelegationManager._wait_for_sandbox_online`.
+        spawn_ready_poll_interval_s: Backoff between readiness
+            probes.  Short enough that a sub-second spawn doesn't
+            wait for the next tick; long enough that probes don't
+            saturate the broker on slow startups.
         sub_agent_module: Python ``-m`` module path for the
             sub-agent process.  Made configurable so tests can
             point at a stub.
@@ -365,6 +391,8 @@ class DelegationConfig:
     max_concurrent: int = DEFAULT_MAX_CONCURRENT_DELEGATIONS
     max_spawn_depth: int = DEFAULT_MAX_SPAWN_DEPTH
     task_timeout_s: float | None = DEFAULT_DELEGATION_TIMEOUT_S
+    spawn_ready_timeout_s: float = DEFAULT_SPAWN_READY_TIMEOUT_S
+    spawn_ready_poll_interval_s: float = DEFAULT_SPAWN_READY_POLL_INTERVAL_S
     sub_agent_module: str = "nemoclaw_escapades.agent"
 
 
