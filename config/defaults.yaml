@@ -49,6 +49,10 @@ agent_loop:
   compaction_min_keep: 4
 
 delegation:
+  # When false, the orchestrator skips constructing a DelegationManager
+  # and delegate_task isn't registered.  Useful for one-process CLI runs
+  # or smoke tests that don't have a broker reachable.
+  enabled: true
   # Hard cap on concurrent in-flight orchestrator → sub-agent delegations.
   # Excess delegate_task calls block on a Semaphore until a slot frees up.
   max_concurrent: 4

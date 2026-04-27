@@ -42,7 +42,9 @@ from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
 from nemoclaw_escapades.config import create_orchestrator_config, load_dotenv_if_present
 from nemoclaw_escapades.connectors.slack import SlackConnector
+from nemoclaw_escapades.nmb.client import MessageBus
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
+from nemoclaw_escapades.orchestrator.delegation import DelegationManager
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
@@ -110,10 +112,69 @@ async def main() -> None:
             extra={"skills_dir": skills_dir, "count": len(skill_loader.skills)},
         )
 
-    # ── 4. Tool registry ──────────────────────────────────────────
+    # ── 4. Audit DB ───────────────────────────────────────────────
+    # SQLite database for tool-call + delegation logging.  Built
+    # *before* the tool registry so ``delegate_task`` can route
+    # ``log_delegation_*`` writes through the same DB the rest of
+    # the orchestrator uses.
+    audit: AuditDB | None = None
+    if config.audit.enabled:
+        audit_path = str(Path(config.audit.db_path).expanduser())
+        audit = AuditDB(audit_path, persist_payloads=config.audit.persist_payloads)
+        await audit.open()
+        await audit.start_background_writer()
+        logger.info("Audit DB opened", extra={"path": audit_path})
+
+    # ── 5. NMB bus + DelegationManager (optional) ─────────────────
+    # ``delegate_task`` needs a live ``MessageBus`` and a
+    # ``DelegationManager`` to actually reach a sub-agent.  Both are
+    # constructed here so the registry factory can register the tool
+    # in the same step.  A broker that's unreachable is *not* fatal —
+    # we log and run degraded (no delegation), since the orchestrator
+    # can still serve interactive coding requests.  Operators who
+    # don't want delegation at all set ``delegation.enabled=false``
+    # in YAML to skip the bus dial entirely.
+    nmb_bus: MessageBus | None = None
+    delegation_manager: DelegationManager | None = None
+    if config.delegation.enabled:
+        nmb_bus = MessageBus(
+            broker_url=config.nmb.broker_url,
+            sandbox_id=config.nmb.sandbox_id or "orchestrator",
+        )
+        try:
+            await nmb_bus.connect_with_retry()
+            delegation_manager = DelegationManager(nmb_bus, config.delegation)
+            logger.info(
+                "Delegation enabled",
+                extra={
+                    "broker_url": config.nmb.broker_url,
+                    "sandbox_id": nmb_bus.sandbox_id,
+                    "max_concurrent": config.delegation.max_concurrent,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "NMB broker unreachable — running without delegation",
+                exc_info=True,
+                extra={"broker_url": config.nmb.broker_url},
+            )
+            try:
+                await nmb_bus.close()
+            except Exception:
+                pass
+            nmb_bus = None
+            delegation_manager = None
+
+    # ── 6. Tool registry ──────────────────────────────────────────
     # Single-call factory builds the process-wide registry from config.
-    # See ``tools/tool_registry_factory.py`` for the composition logic.
-    registry = build_full_tool_registry(config, skill_loader=skill_loader)
+    # ``delegate_task`` is registered iff ``delegation_manager`` is set;
+    # see ``tools/tool_registry_factory.py``.
+    registry = build_full_tool_registry(
+        config,
+        skill_loader=skill_loader,
+        delegation_manager=delegation_manager,
+        audit=audit,
+    )
 
     tools: ToolRegistry | None
     if registry.names:
@@ -125,18 +186,7 @@ async def main() -> None:
     else:
         tools = None
 
-    # ── 5. Audit DB ───────────────────────────────────────────────
-    # SQLite database for tool-call logging.  The background writer
-    # batches inserts off the hot path so audit never blocks routing.
-    audit: AuditDB | None = None
-    if config.audit.enabled:
-        audit_path = str(Path(config.audit.db_path).expanduser())
-        audit = AuditDB(audit_path, persist_payloads=config.audit.persist_payloads)
-        await audit.open()
-        await audit.start_background_writer()
-        logger.info("Audit DB opened", extra={"path": audit_path})
-
-    # ── 6. Orchestrator + connector ───────────────────────────────
+    # ── 7. Orchestrator + connector ───────────────────────────────
     # The orchestrator owns the agent loop; the connector bridges
     # Slack events to orchestrator.handle().
     orchestrator = Orchestrator(
@@ -153,7 +203,7 @@ async def main() -> None:
         app_token=config.slack.app_token,
     )
 
-    # ── 7. Signal handling ────────────────────────────────────────
+    # ── 8. Signal handling ────────────────────────────────────────
     # First SIGINT/SIGTERM triggers graceful shutdown; a second one
     # forces immediate exit (useful when teardown hangs).
     shutdown_event = asyncio.Event()
@@ -172,7 +222,7 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    # ── 8. Run until shutdown ─────────────────────────────────────
+    # ── 9. Run until shutdown ─────────────────────────────────────
     try:
         await connector.start()
         logger.info("NemoClaw is running. Press Ctrl+C to stop.")
@@ -181,9 +231,15 @@ async def main() -> None:
         logger.error("Fatal error during startup", exc_info=True)
         sys.exit(1)
     finally:
-        # Teardown in reverse order: connector → audit → backend.
+        # Teardown in reverse order: connector → bus → audit → backend.
         logger.info("Shutting down...")
         await connector.stop()
+        if nmb_bus is not None:
+            try:
+                await nmb_bus.close()
+                logger.info("NMB bus closed")
+            except Exception:
+                logger.warning("NMB bus close failed", exc_info=True)
         if audit:
             await audit.stop_background_writer()
             await audit.close()
