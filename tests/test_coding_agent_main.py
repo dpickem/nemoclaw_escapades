@@ -804,9 +804,88 @@ class TestRunAssignedTask:
         assert complete.diff == ""
         assert complete.workspace_baseline is None
 
+    @pytest.mark.asyncio
+    async def test_hit_safety_limit_raises_max_turns_exceeded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``hit_safety_limit=True`` must surface as ``MaxTurnsExceededError``.
+
+        Regression for the design §6.4 violation: previously the
+        helper built a ``TaskCompletePayload`` even when the loop
+        capped out, which would have looked like a successful
+        delegation to the orchestrator's finalisation step.  Now it
+        raises so the caller's ``task.error`` path emits
+        ``error_kind="max_turns_exceeded"`` with ``recoverable=True``.
+        """
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        # Override the fake loop's run() to flag the safety-limit hit.
+        class _SafetyLimitLoop(_FakeAgentLoopForNmb):
+            async def run(self, *, messages: list[Any], request_id: str) -> Any:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": "got partway through",
+                        "rounds": 5,
+                        "tool_calls_made": 7,
+                        "hit_safety_limit": True,
+                        "working_messages": list(messages),
+                    },
+                )()
+
+        monkeypatch.setattr(agent_main, "AgentLoop", _SafetyLimitLoop)
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="something hard",
+            workflow_id="wf-5",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-cafebabe",
+            workspace_root=str(workspace),
+            max_turns=5,
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        with pytest.raises(agent_main.MaxTurnsExceededError) as excinfo:
+            await agent_main._run_assigned_task(
+                task,
+                config=config,
+                backend=_FakeBackend(),
+                logger=logging.getLogger("test"),
+            )
+
+        # Counters carried on the exception so the ``task.error``
+        # payload tells the orchestrator how much budget was burned.
+        assert excinfo.value.max_tool_rounds == 5
+        assert excinfo.value.rounds_used == 5
+        assert excinfo.value.tool_calls_made == 7
+        assert excinfo.value.partial_summary == "got partway through"
+
 
 class TestClassifyError:
     """``_classify_error`` maps Python exception types to wire literals."""
+
+    def test_max_turns_exceeded_is_max_turns_exceeded(self) -> None:
+        # Regression for design §6.4 — the literal value was defined
+        # but unreachable until ``_run_assigned_task`` started raising.
+        exc = agent_main.MaxTurnsExceededError(
+            max_tool_rounds=5,
+            rounds_used=5,
+            tool_calls_made=3,
+            partial_summary="x",
+        )
+        assert agent_main._classify_error(exc) == "max_turns_exceeded"
 
     def test_timeout_is_tool_failure(self) -> None:
         assert agent_main._classify_error(TimeoutError("timed out")) == "tool_failure"
@@ -825,3 +904,23 @@ class TestClassifyError:
 
     def test_default_is_other(self) -> None:
         assert agent_main._classify_error(ValueError("x")) == "other"
+
+
+class TestIsRecoverable:
+    """Only ``MaxTurnsExceededError`` is recoverable today (design §6.4)."""
+
+    def test_max_turns_exceeded_is_recoverable(self) -> None:
+        exc = agent_main.MaxTurnsExceededError(
+            max_tool_rounds=5,
+            rounds_used=5,
+            tool_calls_made=3,
+            partial_summary="x",
+        )
+        assert agent_main._is_recoverable(exc) is True
+
+    def test_other_errors_are_not_recoverable(self) -> None:
+        # Tool failures, policy denials, inference errors, generic
+        # bugs — all need a different prompt or a code change, not
+        # just another turn.
+        for exc in [TimeoutError("x"), ValueError("x"), RuntimeError("x")]:
+            assert agent_main._is_recoverable(exc) is False

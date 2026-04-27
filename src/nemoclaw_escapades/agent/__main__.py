@@ -390,7 +390,7 @@ async def _await_and_handle_one_task(
             workflow_id=task.workflow_id,
             error=f"{type(exc).__name__}: {exc}",
             error_kind=_classify_error(exc),
-            recoverable=False,
+            recoverable=_is_recoverable(exc),
             traceback=traceback.format_exc(),
         )
         await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error_payload))
@@ -470,11 +470,23 @@ async def _run_assigned_task(
     The process-wide ``config.agent_loop`` is untouched (design §6.4
     / §6.5.2).
 
-    Computes the baseline-anchored diff (``git diff <base_sha>..HEAD``)
-    when the orchestrator pinned a ``workspace_baseline``; otherwise
-    leaves ``diff`` empty per §6.6.
+    Computes the baseline-anchored diff (``git diff <base_sha>``,
+    working-tree-inclusive) when the orchestrator pinned a
+    ``workspace_baseline``; otherwise leaves ``diff`` empty per §6.6.
+
+    Hitting the per-task ``max_turns`` cap is **not** a success.
+    Per design §6.4 the sub-agent must surface that as a recoverable
+    ``task.error`` so the orchestrator's finalisation step (Phase
+    3b) can offer the user a ``re_delegate`` button.  We raise
+    :class:`MaxTurnsExceededError` here and let the existing
+    ``_classify_error`` path build a ``TaskErrorPayload`` with
+    ``error_kind="max_turns_exceeded"`` and ``recoverable=True``.
 
     Raises:
+        MaxTurnsExceededError: When the loop hit its per-task
+            ``max_tool_rounds`` cap.  Carries the partial assistant
+            content + tool-call counters for inclusion in the error
+            payload.
         Whatever the underlying ``AgentLoop`` raises.  The caller
         (``_await_and_handle_one_task``) wraps these into a
         ``task.error`` payload — this function never builds a
@@ -517,6 +529,17 @@ async def _run_assigned_task(
         logger,
         loop_config=loop_config,
     )
+
+    if result.hit_safety_limit:
+        # Design §6.4: the orchestrator's finalisation step needs to
+        # know this was a max-turns failure (recoverable, can offer
+        # re_delegate), not a successful task with a small diff.
+        raise MaxTurnsExceededError(
+            max_tool_rounds=loop_config.max_tool_rounds,
+            rounds_used=result.rounds,
+            tool_calls_made=result.tool_calls_made,
+            partial_summary=result.content,
+        )
 
     diff = await _compute_baseline_diff(task, logger)
     return TaskCompletePayload(
@@ -590,6 +613,38 @@ _ErrorKind = Literal[
 ]
 
 
+class MaxTurnsExceededError(Exception):
+    """Raised when the loop hit its per-task ``max_tool_rounds`` cap.
+
+    Distinguished from a generic loop failure so
+    :func:`_classify_error` can map it to the recoverable
+    ``"max_turns_exceeded"`` ``error_kind`` per design §6.4.  Carries
+    the partial assistant content + counters so the eventual
+    ``task.error`` payload tells the orchestrator's finalisation
+    model how much of the budget the sub-agent burned and what
+    progress (if any) was made before the cap fired — enough context
+    to decide between ``re_delegate`` (with a higher cap) and
+    ``discard_work``.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_tool_rounds: int,
+        rounds_used: int,
+        tool_calls_made: int,
+        partial_summary: str,
+    ) -> None:
+        super().__init__(
+            f"max_tool_rounds={max_tool_rounds} exceeded after "
+            f"{rounds_used} rounds, {tool_calls_made} tool calls"
+        )
+        self.max_tool_rounds = max_tool_rounds
+        self.rounds_used = rounds_used
+        self.tool_calls_made = tool_calls_made
+        self.partial_summary = partial_summary
+
+
 def _classify_error(exc: BaseException) -> _ErrorKind:
     """Map a Python exception type to a ``TaskErrorPayload.error_kind``.
 
@@ -597,6 +652,8 @@ def _classify_error(exc: BaseException) -> _ErrorKind:
     Default is ``"other"`` — we'd rather be honest about an
     unclassified failure than mis-bucket it.
     """
+    if isinstance(exc, MaxTurnsExceededError):
+        return "max_turns_exceeded"
     if isinstance(exc, TimeoutError):
         return "tool_failure"
     name = type(exc).__name__
@@ -605,6 +662,20 @@ def _classify_error(exc: BaseException) -> _ErrorKind:
     if "Approval" in name or "Policy" in name:
         return "policy_denied"
     return "other"
+
+
+def _is_recoverable(exc: BaseException) -> bool:
+    """Whether *exc* is the kind of failure ``re_delegate`` could fix.
+
+    Per design §6.4 only ``max_turns_exceeded`` is considered
+    recoverable today: bumping the cap and re-running the same
+    prompt against the same baseline is a sensible response.  Tool
+    failures, policy denials, and inference errors all need a
+    different prompt or a code change, not just another turn —
+    finalisation surfaces them as terminal errors so the user can
+    decide.
+    """
+    return isinstance(exc, MaxTurnsExceededError)
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────
