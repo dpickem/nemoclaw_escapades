@@ -212,6 +212,11 @@ class TestCodingToolRegistry:
         assert "git_clone" in names
         assert "git_commit" not in names
         assert "skill" not in names  # no skill_loader → no skill tool
+        # M2b §16.3 "No recursive delegation": ``delegate_task`` is
+        # an orchestrator-only tool.  Sub-agents must not be able to
+        # spawn their own children — enforced here by the absence of
+        # the tool from the registry the sub-agent ever sees.
+        assert "delegate_task" not in names
 
     def test_factory_registers_skill_when_loader_provided(
         self,

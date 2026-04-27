@@ -721,6 +721,7 @@ class TestRunAssignedTask:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When the orchestrator pinned a baseline, the diff is computed."""
+
         # Make the diff helper return a known string so we don't need
         # a real git repo here — the git-helper tests exercise the
         # real-git path.
