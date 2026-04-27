@@ -2,7 +2,7 @@
 
 > **Tagline:** The enterprisified OpenClaw with practical use-cases.
 >
-> **Started:** 2026-02-24 &nbsp;|&nbsp; **Last updated:** 2026-04-01
+> **Started:** 2026-02-24 &nbsp;|&nbsp; **Last updated:** 2026-04-25
 
 ---
 
@@ -30,20 +30,33 @@
 
 ### Companion Design Documents
 
-- **[M2a Design — Reusable Agent Loop](design_m2a.md)** — `AgentLoop`
-  extraction, coding file tools, two-tier context compaction (promoted
-  from M3), basic `SKILL.md` loading (promoted from M6), layered prompt
-  builder with cache boundary.  Agents manage working memory via the
-  `scratchpad` skill — a convention for using the ordinary file tools
-  against a well-known notes file (no dedicated class or tools).
-- **[M2b Design — Multi-Agent Orchestration](design_m2b.md)** — sub-agent
-  delegation via NMB, sandbox lifecycle, work collection and finalization,
-  per-agent concurrency caps, at-least-once delivery, in-process dispatch,
-  `ToolSearch`, basic operational cron (promoted from M6).
-- **[M2 Design (original)](design_m2.md)** — the original unified M2 design
-  before the M2a/M2b split. Full content preserved — detailed specs, comparison
-  tables, implementation phases, and multi-sandbox flows remain valuable as the
-  M3 design foundation.
+- **[M2a Design — Reusable Agent Loop](design_m2a.md)** *(landed)* —
+  `AgentLoop` extraction, coding file tools, two-tier context compaction
+  (promoted from M3), basic `SKILL.md` loading (promoted from M6),
+  layered prompt builder with cache boundary.  Agents manage working
+  memory via the `scratchpad` skill — a convention for using the
+  ordinary file tools against a well-known notes file (no dedicated
+  class or tools).  See the [M2a blog post](blog_posts/m2a/m2a_reusable_agent_loop_and_coding_tools.md)
+  for the implementation retrospective.
+- **[M2b Design — Multi-Agent Orchestration](design_m2b.md)** *(in
+  progress)* — sub-agent delegation via NMB, sandbox lifecycle, work
+  collection and finalization, per-agent concurrency caps, at-least-once
+  delivery, `ToolSearch` meta-tool, basic operational cron (promoted
+  from M6).  Coding sub-agent runs as a separate process **in the same
+  sandbox** as the orchestrator.
+- **[M3 Design — Multi-Sandbox Delegation, Review Agent & Skill Auto-Policy](design_m3.md)** —
+  the protocol M2b ships extended to **separate sandboxes per
+  sub-agent**: per-role policy files, skill-driven policy generation
+  (auto-policy), policy hot-reload via `policy.request`, the review
+  agent and its local-collaboration loop, artifact transport via
+  `openshell sandbox download`, and `Manifest`-style declarative
+  workspace contracts inspired by the
+  [OpenAI Agents SDK](deep_dives/openai_agents_sdk_deep_dive.md).
+- **[M2 Design (original)](design_m2.md)** — the original unified M2
+  design before the M2a/M2b split.  Full content preserved — the
+  multi-sandbox flows (uploads/downloads, policy hot-reload, separate
+  per-role policies) **migrated forward into M3 design** and remain
+  here as the historical record.
 - **[Orchestrator Agent Design](orchestrator_design.md)** — agent loop
   architecture, streaming tool execution, system prompt construction, multi-agent
   coordinator mode, permission system, session compaction, model behavioral
@@ -51,6 +64,10 @@
 - **[NemoClaw Message Bus (NMB) Design](nmb_design.md)** — real-time
   inter-sandbox messaging protocol, broker, client library, security model,
   multi-host deployment, coordinator integration, session forking, peer discovery.
+- **[OpenAI Agents SDK Deep Dive](deep_dives/openai_agents_sdk_deep_dive.md)** —
+  what to lift from OpenAI's official Agents SDK (sandbox agents,
+  `Manifest`, capabilities, lazy `load_skill`, snapshots) — informs the
+  M3 multi-sandbox design.
 - **[nv-tools Integration Design (abandoned)](abandoned/nv_tools_integration_design.md)** — integrating
   the nv-tools CLI (Jira, Confluence, Slack, GitLab, Gerrit) into the
   orchestrator for multi-step tool calling; stubbing strategy for open-source
@@ -146,23 +163,30 @@ tasks and their results. Must own the agentic loop.
 - Pluggable backend similar to Hermes.
 - Must be compatible with inference hub, or adaptable to it.
 
-**Coding Agent** — A custom coding sub-agent that runs inside an ephemeral
-OpenShell sandbox. Input: task + source code. Output: PR / patch. Containers
-are auto-garbage-collected. Calls `inference.local` (model-agnostic via
-OpenShell routing) so it can run on Nemotron, Claude, or any other model.
+**Coding Agent** — A custom coding sub-agent built on M2a's reusable
+`AgentLoop`. Input: task + source code. Output: PR / patch. Calls
+`inference.local` (model-agnostic via OpenShell routing) so it can run
+on Nemotron, Claude, or any other model.
 
 The coding agent evolves across milestones:
-- **M2:** Start with Claude Code for fast proof-of-concept (best code quality,
-  one-command setup, but Anthropic-locked and off-policy for the training
-  flywheel).
-- **M6+:** Replace with a custom coding agent that lifts the best patterns from
-  both OpenClaw (Pi's 20+ tools, `apply_patch`, block streaming, tool
-  profiles) and Hermes (provider resolver, context compression, prompt
-  caching, concurrent tool execution). The custom agent is model-agnostic,
-  Python-based (same stack as the orchestrator), and generates on-policy
-  training data for the Nemotron flywheel.
+- **M2a (landed):** `AgentLoop` extracted from the orchestrator and
+  equipped with the file / search / bash / git tool suite.  The
+  orchestrator is the first caller; the standalone coding sub-agent
+  process is the second.
+- **M2b (in progress):** Coding sub-agent runs as a separate process
+  **in the same sandbox** as the orchestrator and receives tasks via
+  NMB `task.assign`.  Same protocol as multi-sandbox; only the spawn
+  mechanism differs.
+- **M3:** Coding sub-agent runs in a **separate sandbox** spawned via
+  `openshell sandbox create`.  Per-role policies, skill-driven
+  auto-policy generation, and policy hot-reload come online here.
+- **M6+:** Self-learning loop adds skill auto-creation and policy
+  refinement on top of the M3 sandbox baseline.
 
-Supports git-worktree-based parallelism for multiple concurrent coding tasks.
+Multiple coding sub-agents can run concurrently — one sandbox per task,
+isolated by policy and filesystem (M3+).  Each sub-agent's workspace is
+its own — git-worktree-style parallelism is unnecessary because the
+sandbox boundary already provides isolation.
 
 **Review Agent** — Collaborates with the coding agent *before* the PR is
 pushed ("local" collaboration without Git in the loop). Can also post reviews
@@ -312,16 +336,38 @@ sub-agent via NMB and collects completed work.
 
 See [M2b Design Document](design_m2b.md) for the full specification.
 
-### Milestone 3 — Review Agent
+### Milestone 3 — Multi-Sandbox Delegation, Review Agent & Skill Auto-Policy
 
-Add a review agent that collaborates with the coding agent before code is
-pushed.
+The M2b protocol generalises to **per-sub-agent sandboxes**: each coding
+or review task spawns its own OpenShell sandbox with a role-specific
+policy.  This brings real isolation (separate filesystems, separate
+credential scopes, separate network policies) and unlocks the review
+agent's local-collaboration loop.
 
 **Deliverables:**
-- Review agent that reads diffs and provides structured feedback.
-- "Local" collaboration loop: coding agent ↔ review agent iterate without
-  Git round-trips.
+- Multi-sandbox spawn via `openshell sandbox create` (M2b's `subprocess`
+  path replaced; NMB protocol unchanged).
+- Per-role OpenShell policy files (`policies/coding-agent.yaml`,
+  `policies/review-agent.yaml`).
+- **Skill-driven auto-policy** — skills declare their own
+  `nemoclaw.infrastructure` block (network endpoints, filesystem paths,
+  binaries); a policy generator produces the OpenShell YAML
+  automatically. Fallback: deny-and-approve discovery via OpenShell TUI.
+- **Policy hot-reload** via `policy.request` NMB messages — sub-agents
+  request additional permissions mid-task; orchestrator auto-approves
+  known-safe endpoints (PyPI, npm) or escalates to user via Slack.
+- Artifact transport via `openshell sandbox upload` / `download` for
+  workspace seeding and result collection (replaces the same-sandbox
+  filesystem reads M2b uses).
+- **Review agent** that reads diffs and provides structured feedback.
+- "Local" collaboration loop: coding agent ↔ review agent iterate
+  via NMB without Git round-trips.
 - Post-push review integration via Gerrit/GitLab (using nv-tools).
+- `Manifest`-style declarative workspace contracts (inspired by the
+  [OpenAI Agents SDK](deep_dives/openai_agents_sdk_deep_dive.md))
+  replace the M2b shell-based seeding script.
+
+See [M3 Design Document](design_m3.md) for the full specification.
 
 ### Milestone 4 — Note-Taking & Professional Knowledge Base
 
@@ -382,10 +428,10 @@ project progresses.
 | 6 | Does NemoClaw provide a harness? Or computer use? | M1 | [NemoClaw Deep Dive §15-Q6](deep_dives/nemoclaw_deep_dive.md#q6-does-nemoclaw-provide-a-harness-or-computer-use) — **Harness**, not computer use; wraps OpenClaw in sandboxed runtime with policy controls, inference routing, lifecycle mgmt |
 | 7 | What should be the "main brain" — where does the orchestrator run? | M1 | [NemoClaw Deep Dive §15-Q7](deep_dives/nemoclaw_deep_dive.md#q7-what-should-be-the-main-brain--where-does-the-orchestrator-run) + [Hosting Deep Dive §11](deep_dives/hosting_deep_dive.md#11--where-the-core-agent-loop-runs) — Inside OpenShell sandbox; **Brev** recommended for always-on, DGX Spark for local |
 | 8 | Can existing slackbot workflows convert to NemoClaw policies? | M1 | [NemoClaw Deep Dive §15-Q8](deep_dives/nemoclaw_deep_dive.md#q8-can-existing-slackbot-workflows-convert-to-nemoclaw-policies) — Partially; workflow logic → OpenClaw skills, API access → NemoClaw network policies |
-| 9 | Can we auto-generate OpenShell sandbox policies from skills? | M2 | [OpenClaw Deep Dive §20-Q9](deep_dives/openclaw_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions) — **Yes**, via a `nemoclaw.infrastructure` block in SKILL.md metadata that declares network endpoints, filesystem paths, and binaries; a policy generator produces the OpenShell YAML. Fallback: deny-and-approve discovery via [OpenShell TUI](deep_dives/openshell_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions). |
-| 10 | Should each workflow run in its own sandbox container? | M2 | [NemoClaw Deep Dive §15-Q10](deep_dives/nemoclaw_deep_dive.md#q10-should-each-workflow-run-in-its-own-sandbox-container) + [OpenShell Deep Dive §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — **Yes**; one orchestrator sandbox (always-on) + ephemeral per-workflow sandboxes |
-| 11 | Which coding agent to run in OpenShell? Input/output contract? | M2 | **Phased approach:** M2 = Claude Code (fastest path, best code quality, but Anthropic-locked). M6+ = custom coding agent that lifts the best patterns from Claude Code (streaming tool execution, three-tier compaction, behavioral contract with transcript repair, prompt cache boundary), OpenClaw (Pi's 20+ tools, `apply_patch`, block streaming, tool profiles), and Hermes (provider resolver, context compression, concurrent tool execution). Custom agent is Python, model-agnostic (`inference.local`), and on-policy for the Nemotron training flywheel. I/O contract is agent-agnostic: seed workspace → task via NMB → results via NMB → cleanup. See [Orchestrator Design](orchestrator_design.md) for the detailed agent loop architecture. |
-| 12 | Can the review agent and coding agent collaborate locally without Git in the loop? | M3 | [Hermes §13](deep_dives/hermes_deep_dive.md#13--sub-agent-delegation) + [OpenShell §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — Hermes sub-agent delegation + OpenShell multi-sandbox architecture enables local coordination |
+| 9 | Can we auto-generate OpenShell sandbox policies from skills? | M3 | [OpenClaw Deep Dive §20-Q9](deep_dives/openclaw_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions) — **Yes**, via a `nemoclaw.infrastructure` block in SKILL.md metadata that declares network endpoints, filesystem paths, and binaries; a policy generator produces the OpenShell YAML. Fallback: deny-and-approve discovery via [OpenShell TUI](deep_dives/openshell_deep_dive.md#q9-can-we-auto-identify-a-workflows-required-permissions). Land in M3 alongside multi-sandbox delegation, where per-role policies become a real boundary. |
+| 10 | Should each workflow run in its own sandbox container? | M3 | [NemoClaw Deep Dive §15-Q10](deep_dives/nemoclaw_deep_dive.md#q10-should-each-workflow-run-in-its-own-sandbox-container) + [OpenShell Deep Dive §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — **Yes**; one orchestrator sandbox (always-on) + ephemeral per-workflow sandboxes. M2b ships the protocol against a same-sandbox subprocess; M3 swaps the spawn mechanism to `openshell sandbox create` without changing the NMB protocol. |
+| 11 | Which coding agent to run in OpenShell? Input/output contract? | M2a/M2b/M3 | **Built it ourselves, not Claude Code.** M2a (landed) extracted `AgentLoop` and equipped it with the file/search/bash/git tool suite — the custom coding agent is just `AgentLoop` plus those tools. M2b (in progress) wraps the agent in a separate process driven by NMB `task.assign` / `task.complete`, in the same sandbox as the orchestrator. M3 moves it into its own sandbox via `openshell sandbox create`. The agent is Python, model-agnostic (`inference.local`), and on-policy for the Nemotron training flywheel. I/O contract: seed workspace → task via NMB → results via NMB → cleanup. See [M2a Design](design_m2a.md), [M2b Design](design_m2b.md), [M3 Design](design_m3.md). |
+| 12 | Can the review agent and coding agent collaborate locally without Git in the loop? | M3 | [Hermes §13](deep_dives/hermes_deep_dive.md#13--sub-agent-delegation) + [OpenShell §17](deep_dives/openshell_deep_dive.md#17--what-to-lift-for-nemoclaw-escapades) — **Yes**, via NMB-mediated diff exchange. The two agents run in sibling sandboxes; the coding agent emits diffs as NMB messages, the review agent reads them, comments are routed back, and the coding agent iterates. No Git round-trips needed until the orchestrator decides to push the final result. See [M3 Design](design_m3.md). |
 | 13 | How can we access Teams for the note-taking system? | M5 | |
 | 14 | How to add another server backend to the Slack integration? | M1 | [Hermes §11](deep_dives/hermes_deep_dive.md#11--messaging-gateway) + [NemoClaw §13](deep_dives/nemoclaw_deep_dive.md#13--relationship-to-openclaw) — Hermes gateway uses platform adapter pattern; NemoClaw adds Telegram bridge |
 | 15 | What are formal sources on harness engineering? | — | [OpenShell blog](https://developer.nvidia.com/blog/run-autonomous-self-evolving-agents-more-safely-with-nvidia-openshell/) — OpenShell is the definitive example of agent harness engineering (out-of-process policy enforcement) |
@@ -412,10 +458,11 @@ post should explicitly include:
 |---|-----------------|-----------|-------|
 | 0 | **Building Agents from Scratch — Series Introduction** | — | [Intro post](blog_posts/series_introduction/series_introduction.md) |
 | 1 | **Building Our Own Agent: Local Orchestrator + NVIDIA Inference Hub** | M1 | [M1 post](blog_posts/m1/m1_setting_up_nemoclaw.md) |
-| 2 | **Sandboxed Coding Agents with OpenShell** | M2 | TBD |
-| 3 | **Adding a Review Agent: Local Collaboration Before Push** | M3 | TBD |
-| 4 | **Giving the Agent a Memory: SecondBrain + Honcho Integration** | M4 | TBD |
-| 5 | **Building a Professional Knowledge Base from Slack & Teams** | M5 | TBD |
+| 2a | **Reusable Agent Loop and Coding Tools** | M2a | [M2a post](blog_posts/m2a/m2a_reusable_agent_loop_and_coding_tools.md) |
+| 2b | **Multi-Agent Orchestration with NMB** | M2b | TBD |
+| 3 | **One Sandbox Per Sub-Agent: Multi-Sandbox Delegation, Skill-Driven Auto-Policy & the Review Loop** | M3 | TBD |
+| 4 | **Building a Professional Knowledge Base from Slack & Teams** | M4 | TBD |
+| 5 | **Giving the Agent a Memory: SecondBrain + Honcho Integration** | M5 | TBD |
 | 6 | **The Self-Improvement Loop: Teaching the Agent to Learn** | M6 | TBD |
 
 ## 7  Capabilities the System Should Eventually Have
@@ -736,10 +783,11 @@ The web UI is not a standalone milestone — it evolves alongside the core syste
 | Core Milestone | Web UI Additions |
 |----------------|------------------|
 | M1 — Foundation | Chat interface, basic agent dashboard, health indicators |
-| M2 — Coding Agent | Kanban board, diff viewer, worktree management, auto-commit/PR |
-| M3 — Review Agent | Inline commenting on diffs, review status indicators |
-| M4 — Memory orchestration | Memory routing view, working / user / knowledge tier indicators |
-| M5 — Knowledge capture | KB browser, Slack/Teams ingestion dashboard, search, ingestion status |
+| M2a — Reusable agent loop & coding tools | Diff viewer, agent activity stream |
+| M2b — Multi-agent orchestration | Kanban board, sub-agent activity panels, finalization preview, auto-commit/PR |
+| M3 — Multi-sandbox & review agent | Per-sandbox panels, inline commenting on diffs, review-status indicators, policy-request approval UI |
+| M4 — Note-taking & professional KB | Slack/Teams ingestion dashboard, ingestion status |
+| M5 — Memory orchestration | KB browser, search, memory routing view, working / user / knowledge tier indicators |
 | M6 — Self-Learning Loop | Memory inspector, skills inventory, learning timeline, policy diffs |
 | — (cross-cutting) | Approval gates, scheduler view, notification bridge |
 
@@ -764,14 +812,17 @@ considered as the system matures.
 
 | Feature | Source | Description | Likely Milestone |
 |---------|--------|-------------|-----------------|
-| **Three-tier context compaction** | Claude Code `compact/` | Micro-compaction (~256 tokens, no API call), full compaction (~4K tokens, LLM summary), session memory (zero-cost in-memory key-fact cache). Essential for long-running conversations. | M2 |
-| **Cache-aware system prompt** | Claude Code `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | Split system prompt into static prefix (cached) and dynamic suffix (per-turn). Reduces cost by ~90% on subsequent turns via provider prompt caching. | M2 |
-| **Prompt cache break detection** | Claude Code `promptCacheBreakDetection.ts` | Monitor whether the system prompt's static prefix changed between turns; log warnings when cache effectiveness drops | M2 |
-| **Proactive tick system** | Claude Code `KAIROS` / `PROACTIVE` flags | Periodic `<proactive_tick>` events for always-on daemon behavior; check for pending Slack messages, cron jobs, stalled tasks | M1 |
-| **ToolSearch (deferred loading)** | Claude Code `ToolSearchTool` | As tool count grows (built-in + MCP + plugins), lazy-load tool definitions on demand to keep prompt size manageable | M2 |
-| **`batch` skill pattern** | Claude Code bundled skill | Research → decompose → distribute across worktree agents → verify → track; essential for large multi-file tasks | M2 |
-| **`verify` skill pattern** | Claude Code bundled skill | "Prove it works" workflow that pushes the model toward real validation (run the app, check CLI output) rather than static reasoning | M2 |
-| **IDE bridge system** | Claude Code `bridge/` + `BRIDGE_MODE` | Bidirectional VS Code / JetBrains integration; adopt for ACP integration (§7) | M2+ |
+| **Two-tier context compaction** *(landed in M2a)* | Claude Code `compact/` | Micro-compaction (~256 tokens, no API call) + full compaction (LLM summary + session roll). Session-memory tier deferred to M5 (overlaps with the long-term memory layer). | ✅ M2a |
+| **Cache-aware system prompt** *(landed in M2a)* | Claude Code `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | Split system prompt into static prefix (cached) and dynamic suffix (per-turn). Reduces cost by ~90% on subsequent turns via provider prompt caching. | ✅ M2a |
+| **Prompt cache break detection** | Claude Code `promptCacheBreakDetection.ts` | Monitor whether the system prompt's static prefix changed between turns; log warnings when cache effectiveness drops. *(Not yet shipped — M2b polish.)* | M2b |
+| **Proactive tick system** | Claude Code `KAIROS` / `PROACTIVE` flags | Periodic `<proactive_tick>` events for always-on daemon behavior; check for pending Slack messages, cron jobs, stalled tasks. *(Operational cron landed in M2b; proactive ticks remain future work.)* | M6 |
+| **ToolSearch (deferred loading)** *(landed in M2b Phase 2)* | Claude Code `ToolSearchTool` | Tools registered with `is_core=False` are hidden from the prompt until `tool_search` surfaces them on demand. Prompt-token impact is the explicit driver. | ✅ M2b |
+| **Lazy `load_skill` (skill bodies on demand)** | OpenAI Agents SDK `Skills.lazy_from` | Skill metadata in the system prompt; bodies + scripts/references/assets copied into the workspace only when `load_skill` is called. See [OpenAI Agents SDK Deep Dive §8](deep_dives/openai_agents_sdk_deep_dive.md#8--lazy-skills-with-load_skill). | M3 |
+| **`batch` skill pattern** | Claude Code bundled skill | Research → decompose → distribute across worktree agents → verify → track; essential for large multi-file tasks | M3+ |
+| **`verify` skill pattern** | Claude Code bundled skill | "Prove it works" workflow that pushes the model toward real validation (run the app, check CLI output) rather than static reasoning | M2b/M3 |
+| **IDE bridge system** | Claude Code `bridge/` + `BRIDGE_MODE` | Bidirectional VS Code / JetBrains integration; adopt for ACP integration (§7) | M3+ |
+| **`Manifest`-style declarative workspace contract** | OpenAI Agents SDK `Manifest` | Replace ad-hoc `setup-workspace.sh` + scattered `coding.*` config with one Pydantic-validated dataclass per sub-agent. Useful when M3 multi-sandbox makes per-task workspaces a first-class concept. See [OpenAI Agents SDK Deep Dive §5](deep_dives/openai_agents_sdk_deep_dive.md#5--manifests-a-first-class-workspace-contract). | M3 |
+| **Per-task `max_turns`** | OpenAI Agents SDK `Agent.as_tool(max_turns=...)` | Add `max_turns` to NMB `task.assign` payload so the orchestrator can bound short tasks tighter than the global `max_tool_rounds`. ~1 hour of work. | M2b |
 
 ### Medium Priority (nice to have)
 
