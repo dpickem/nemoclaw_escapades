@@ -7,10 +7,12 @@ the model.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.nmb.protocol import (
     TaskAssignPayload,
     TaskCompletePayload,
@@ -250,3 +252,96 @@ class TestDelegateTaskSpec:
         assert "workspace_baseline" in properties
         # Only prompt is required; the rest are optional.
         assert schema["required"] == ["prompt"]
+
+
+# ── Audit DB integration ───────────────────────────────────────────
+
+
+@pytest.fixture
+async def audit_db(tmp_path: Path) -> AuditDB:
+    db = AuditDB(str(tmp_path / "test_delegation_audit.db"))
+    await db.open()
+    yield db  # type: ignore[misc]
+    await db.close()
+
+
+class TestDelegationAuditTrail:
+    @pytest.mark.asyncio
+    async def test_successful_delegation_logs_started_then_complete(
+        self,
+        audit_db: AuditDB,
+    ) -> None:
+        registry = ToolRegistry()
+        manager = _FakeManager(complete_summary="ok done")
+        register_delegation_tool(
+            registry,
+            manager=manager,  # type: ignore[arg-type]
+            parent_sandbox_id="orch",
+            workspace_root="/ws",
+            audit=audit_db,
+        )
+        spec = registry.get("delegate_task")
+        await spec.handler(  # type: ignore[arg-type]
+            prompt="task",
+            max_turns=10,
+            model="some-model",
+        )
+        rows = await audit_db.query("SELECT * FROM delegations")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "complete"
+        assert row["completed_at"] is not None
+        assert row["requested_model"] == "some-model"
+        assert row["requested_max_turns"] == 10
+        assert row["model_used"] is None  # _FakeManager doesn't set it
+        assert row["summary"] == "ok done"
+
+    @pytest.mark.asyncio
+    async def test_failed_delegation_logs_started_then_error(
+        self,
+        audit_db: AuditDB,
+    ) -> None:
+        registry = ToolRegistry()
+        error = DelegationError(
+            "sub-agent failed",
+            error_payload=TaskErrorPayload(
+                workflow_id="ignored-overwritten-by-row",
+                error="ran out of rounds",
+                error_kind="max_turns_exceeded",
+                recoverable=True,
+            ),
+        )
+        manager = _FakeManager(raise_error=error)
+        register_delegation_tool(
+            registry,
+            manager=manager,  # type: ignore[arg-type]
+            parent_sandbox_id="orch",
+            workspace_root="/ws",
+            audit=audit_db,
+        )
+        spec = registry.get("delegate_task")
+        await spec.handler(prompt="task")  # type: ignore[arg-type]
+        rows = await audit_db.query("SELECT * FROM delegations")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "error"
+        assert row["error_kind"] == "max_turns_exceeded"
+        assert row["error_message"] == "ran out of rounds"
+        assert row["recoverable"] == 1
+
+    @pytest.mark.asyncio
+    async def test_audit_argument_is_optional(self) -> None:
+        # The tool works without audit (matches the existing
+        # Orchestrator behaviour where audit DB is opt-in).
+        registry = ToolRegistry()
+        manager = _FakeManager()
+        register_delegation_tool(
+            registry,
+            manager=manager,  # type: ignore[arg-type]
+            parent_sandbox_id="orch",
+            workspace_root="/ws",
+            # No audit kwarg.
+        )
+        spec = registry.get("delegate_task")
+        result = await spec.handler(prompt="task")  # type: ignore[arg-type]
+        assert result == "did the work"

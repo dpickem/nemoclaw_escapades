@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from nemoclaw_escapades.nmb.protocol import (
     TaskAssignPayload,
@@ -30,6 +31,9 @@ from nemoclaw_escapades.nmb.protocol import (
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.orchestrator.delegation import DelegationError, DelegationManager
 from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec, tool
+
+if TYPE_CHECKING:
+    from nemoclaw_escapades.audit.db import AuditDB
 
 logger = get_logger("tools.delegation")
 
@@ -43,6 +47,7 @@ def _make_delegate_task(
     workspace_root: str,
     default_max_turns: int | None = None,
     default_model: str | None = None,
+    audit: AuditDB | None = None,
 ) -> ToolSpec:
     """Bind a ``delegate_task`` tool spec to a manager + workspace.
 
@@ -158,6 +163,19 @@ def _make_delegate_task(
                 "model": task.model,
             },
         )
+        if audit is not None:
+            await audit.log_delegation_started(
+                workflow_id=task.workflow_id,
+                parent_sandbox_id=task.parent_sandbox_id,
+                agent_id=task.agent_id,
+                workspace_root=task.workspace_root,
+                prompt=task.prompt,
+                requested_model=task.model,
+                requested_max_turns=task.max_turns,
+                base_sha=baseline.base_sha if baseline else None,
+                base_repo_url=baseline.repo_url if baseline else None,
+                base_branch=baseline.branch if baseline else None,
+            )
         try:
             result = await manager.delegate(task)
         except DelegationError as exc:
@@ -165,7 +183,24 @@ def _make_delegate_task(
                 "Delegation failed",
                 extra={"workflow_id": task.workflow_id, "error": str(exc)},
             )
+            if audit is not None:
+                payload = exc.error_payload
+                await audit.log_delegation_error(
+                    workflow_id=task.workflow_id,
+                    error_kind=payload.error_kind if payload else "other",
+                    error_message=payload.error if payload else str(exc),
+                    recoverable=payload.recoverable if payload else False,
+                )
             return f"Delegation failed: {exc}"
+        if audit is not None:
+            await audit.log_delegation_complete(
+                workflow_id=task.workflow_id,
+                rounds_used=result.complete.rounds_used,
+                tool_calls_made=result.complete.tool_calls_made,
+                model_used=result.complete.model_used,
+                summary=result.complete.summary,
+                diff_size=len(result.complete.diff.encode()),
+            )
         return result.complete.summary
 
     return delegate_task
@@ -179,6 +214,7 @@ def register_delegation_tool(
     workspace_root: str,
     default_max_turns: int | None = None,
     default_model: str | None = None,
+    audit: AuditDB | None = None,
 ) -> None:
     """Register the orchestrator's ``delegate_task`` tool.
 
@@ -193,6 +229,10 @@ def register_delegation_tool(
         workspace_root: Base path for sub-agent workspaces.
         default_max_turns: Optional per-shape default.
         default_model: Optional per-shape default.
+        audit: Optional :class:`AuditDB`.  When supplied, every
+            delegation goes through ``log_delegation_started`` /
+            ``log_delegation_complete`` / ``log_delegation_error``
+            so the workflow trail is queryable post-hoc.
     """
     registry.register(
         _make_delegate_task(
@@ -201,6 +241,7 @@ def register_delegation_tool(
             workspace_root=workspace_root,
             default_max_turns=default_max_turns,
             default_model=default_model,
+            audit=audit,
         ),
     )
 
