@@ -84,11 +84,31 @@ async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaselin
 
 
 async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
-    """Compute the unified diff between *base_sha* and HEAD.
+    """Compute the unified diff between *base_sha* and the working tree.
 
     Used by the sub-agent's NMB receive loop to populate
     ``TaskCompletePayload.diff``.  The orchestrator can re-derive
     the same diff at finalisation time as a cross-check (§6.6.3).
+
+    Working tree, not ``HEAD``.  The sub-agent's tool surface
+    deliberately omits ``git_commit`` (orchestrator-only per §7.1),
+    so a normal sub-agent run leaves all of its edits in the working
+    tree and never advances ``HEAD``.  ``git diff <base_sha>..HEAD``
+    would silently return empty for those runs; ``git diff
+    <base_sha>`` (no ``..HEAD``) compares ``<base_sha>`` against the
+    working tree, picking up modifications and deletions of tracked
+    files.
+
+    To also include **untracked** files (the common case for
+    sub-agent-created files like new modules), we first mark every
+    untracked path with ``git add --intent-to-add --all``.  That
+    registers the paths in the index without staging their content,
+    so the subsequent ``git diff`` reports them as additions
+    starting from an empty state.  The index mutation is harmless
+    here: the sub-agent process is single-shot and the workspace is
+    either thrown away on completion (Phase 3b) or re-cloned by
+    finalisation, so we never need a pristine ``.git/index`` past
+    this point.
 
     Args:
         workspace_root: Absolute path to the workspace.
@@ -101,7 +121,12 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
         ``_run_git`` helper uses, so callers that want to
         distinguish "no changes" from "git failed" check the prefix.
     """
-    return await _run_git(workspace_root, "diff", f"{base_sha}..HEAD")
+    # Best-effort: ``--intent-to-add`` failures (read-only repo,
+    # weird permissions) shouldn't sink the diff entirely — we still
+    # get the tracked-file diff below.  The error string surfaces in
+    # the sub-agent's structured log via ``_run_git``.
+    await _run_git(workspace_root, "add", "--intent-to-add", "--all")
+    return await _run_git(workspace_root, "diff", base_sha)
 
 
 async def _is_shallow(workspace_root: str) -> bool:

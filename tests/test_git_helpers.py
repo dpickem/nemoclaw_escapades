@@ -112,6 +112,48 @@ class TestDiffAgainstBaseline:
         assert "a.py" in diff
         assert "b.py" in diff
 
+    async def test_diff_picks_up_uncommitted_modifications(self, repo: Path) -> None:
+        # Regression for the original ``<base_sha>..HEAD`` formulation:
+        # the sub-agent's tool registry has no ``git_commit``, so a
+        # realistic run modifies tracked files without committing.
+        # ``..HEAD`` would have returned empty here; the working-tree
+        # diff must surface the change.
+        (repo / "tracked.txt").write_text("baseline\n")
+        _git(repo, "add", "tracked.txt")
+        _git(repo, "commit", "-q", "-m", "add tracked.txt")
+        head = _git(repo, "rev-parse", "HEAD")
+
+        # Modify the file but don't commit.
+        (repo / "tracked.txt").write_text("baseline\nedit\n")
+        diff = await diff_against_baseline(str(repo), head)
+        assert "tracked.txt" in diff
+        assert "+edit" in diff
+
+    async def test_diff_picks_up_untracked_files(self, repo: Path) -> None:
+        # The other half of the regression: a sub-agent that creates
+        # a brand-new file via the ``write_file`` tool ends up with
+        # an *untracked* file.  Plain ``git diff <sha>`` ignores
+        # untracked content; the helper's ``--intent-to-add --all``
+        # pre-step is what makes this work.
+        head = _git(repo, "rev-parse", "HEAD")
+        (repo / "new_module.py").write_text("def hello():\n    return 'hi'\n")
+        diff = await diff_against_baseline(str(repo), head)
+        assert "new_module.py" in diff
+        assert "+def hello" in diff
+
+    async def test_diff_picks_up_deletions(self, repo: Path) -> None:
+        # Deletions of tracked files should also surface — equally
+        # invisible to ``..HEAD`` when the sub-agent never commits.
+        (repo / "to_delete.txt").write_text("doomed\n")
+        _git(repo, "add", "to_delete.txt")
+        _git(repo, "commit", "-q", "-m", "add to_delete")
+        head = _git(repo, "rev-parse", "HEAD")
+
+        (repo / "to_delete.txt").unlink()
+        diff = await diff_against_baseline(str(repo), head)
+        assert "to_delete.txt" in diff
+        assert "-doomed" in diff
+
 
 class TestIsShallow:
     """Regression coverage for the ``_is_shallow`` conservative default.
