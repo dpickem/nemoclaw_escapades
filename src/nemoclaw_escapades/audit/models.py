@@ -86,6 +86,93 @@ class ConnectionRow(Base):
     disconnect_reason: Mapped[str | None] = mapped_column(String)
 
 
+class DelegationRow(Base):
+    """A single orchestrator → sub-agent delegation.
+
+    Inserted at ``delegate_task`` start (status="started"); updated
+    in-place when the sub-agent replies with ``task.complete`` or
+    ``task.error``.  Phase 3a populates the request-side fields and
+    the terminal outcome; Phase 3b's finalisation flow may extend
+    with finalisation-action fields (push / discard / iterate).
+
+    Attributes:
+        workflow_id: Primary key — the same UUID that threads through
+            every NMB message and audit record for the workflow.
+        started_at: Unix epoch seconds when ``delegate_task`` was
+            invoked.
+        completed_at: Unix epoch seconds when the sub-agent replied
+            (``None`` while in flight).
+        parent_sandbox_id: NMB sandbox identity of the orchestrator
+            that issued the delegation.
+        agent_id: NMB sandbox identity of the spawned sub-agent.
+        workspace_root: Path the sub-agent's per-task workspace
+            subdirectory landed at.
+        prompt: Natural-language task description.
+        requested_model: Model the orchestrator pinned on
+            ``TaskAssignPayload.model``.  ``None`` means "fall back
+            to ``cfg.agent_loop.model``" — recorded even though M2b's
+            L7 proxy may have rewritten the request en route, so M3
+            can correlate against the realised upstream.
+        requested_max_turns: Per-task ``max_turns`` cap.  ``None``
+            means "use ``cfg.agent_loop.max_tool_rounds``".
+        base_sha: ``WorkspaceBaseline.base_sha`` if the orchestrator
+            pinned one (the diff anchor); ``None`` for non-diff
+            tasks.
+        base_repo_url: ``WorkspaceBaseline.repo_url``.
+        base_branch: ``WorkspaceBaseline.branch``.
+        status: ``"started"`` while in flight, ``"complete"`` on
+            success, ``"error"`` on ``task.error``.
+        error_kind: One of the ``TaskErrorPayload.error_kind`` literals
+            (``"max_turns_exceeded"`` etc.); ``None`` on success.
+        error_message: Human-readable error description; ``None`` on
+            success.
+        recoverable: Whether the finalisation model may
+            ``re_delegate`` — preserved from
+            ``TaskErrorPayload.recoverable``.
+        rounds_used: Total inference calls the sub-agent made.
+        tool_calls_made: Total tool invocations.
+        model_used: Echoed from ``TaskCompletePayload.model_used``.
+            With M3's Option D this becomes the *realised* model;
+            in M2b it equals ``requested_model`` because the wire
+            field is the same one we recorded at delegation time.
+        summary: One-paragraph user-facing description from the
+            sub-agent's reply.  May exceed prompt-display length;
+            the row stores the full text.
+        diff_size: Bytes of unified diff in the reply.  The diff
+            itself is *not* stored here — finalisation owns the
+            diff content (Phase 3b) and persists it elsewhere.
+    """
+
+    __tablename__ = "delegations"
+
+    workflow_id: Mapped[str] = mapped_column(String, primary_key=True)
+    started_at: Mapped[float] = mapped_column(Float, nullable=False)
+    completed_at: Mapped[float | None] = mapped_column(Float)
+
+    parent_sandbox_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    workspace_root: Mapped[str] = mapped_column(String, nullable=False)
+    prompt: Mapped[str] = mapped_column(String, nullable=False)
+
+    requested_model: Mapped[str | None] = mapped_column(String)
+    requested_max_turns: Mapped[int | None] = mapped_column(Integer)
+
+    base_sha: Mapped[str | None] = mapped_column(String)
+    base_repo_url: Mapped[str | None] = mapped_column(String)
+    base_branch: Mapped[str | None] = mapped_column(String)
+
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_kind: Mapped[str | None] = mapped_column(String)
+    error_message: Mapped[str | None] = mapped_column(String)
+    recoverable: Mapped[int | None] = mapped_column(Integer)
+
+    rounds_used: Mapped[int | None] = mapped_column(Integer)
+    tool_calls_made: Mapped[int | None] = mapped_column(Integer)
+    model_used: Mapped[str | None] = mapped_column(String)
+    summary: Mapped[str | None] = mapped_column(String)
+    diff_size: Mapped[int | None] = mapped_column(Integer)
+
+
 class ToolCallRow(Base):
     """A single audited nv-tools invocation.
 

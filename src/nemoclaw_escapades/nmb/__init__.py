@@ -8,13 +8,37 @@ from nemoclaw_escapades.nmb.models import (
     Op,
     PendingRequest,
 )
+from nemoclaw_escapades.nmb.protocol import (
+    TASK_ASSIGN,
+    TASK_COMPLETE,
+    TASK_ERROR,
+    TASK_PROGRESS,
+    ContextFile,
+    PayloadValidationError,
+    TaskAssignPayload,
+    TaskCompletePayload,
+    TaskErrorPayload,
+    TaskProgressPayload,
+    WorkspaceBaseline,
+)
 
 __all__ = [
+    "TASK_ASSIGN",
+    "TASK_COMPLETE",
+    "TASK_ERROR",
+    "TASK_PROGRESS",
+    "ContextFile",
     "DeliveryStatus",
     "ErrorCode",
     "MessageBus",
     "NMBConnectionError",
     "NMBMessage",
     "Op",
+    "PayloadValidationError",
     "PendingRequest",
+    "TaskAssignPayload",
+    "TaskCompletePayload",
+    "TaskErrorPayload",
+    "TaskProgressPayload",
+    "WorkspaceBaseline",
 ]

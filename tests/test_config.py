@@ -483,6 +483,72 @@ class TestSecretEnvOverrides:
         assert config.coding.git_clone_allowed_hosts == "yaml-host.example.com"
 
 
+class TestRuntimeEnvOverrides:
+    """The narrow, named ``NEMOCLAW_*`` non-secret runtime layer.
+
+    Distinct from :class:`TestSecretEnvOverrides` (credentials) and
+    from :class:`TestNonSecretEnvIgnored`-style YAML-only fields.
+    These two env vars exist because the orchestrator's spawn
+    callback needs to assign per-process identity + workspace at
+    delegation time, and that's not expressible as shared YAML.
+    Adding new entries here should be rare and obvious in review.
+    """
+
+    def test_nemoclaw_sandbox_id_overrides_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Simulates the orchestrator spawning a sub-agent with a
+        # specific, broker-known id.  The YAML's value (e.g. left
+        # empty for "auto-generate") must yield to the env knob —
+        # otherwise the orchestrator dials a sandbox the sub-agent
+        # never registers under, hitting the readiness retry.
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("nmb:\n  sandbox_id: yaml-default\n")
+        monkeypatch.setenv("NEMOCLAW_SANDBOX_ID", "coding-12345678")
+        config = AppConfig.load(path=yaml_path)
+        assert config.nmb.sandbox_id == "coding-12345678"
+
+    def test_nemoclaw_workspace_root_overrides_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Same shape: the orchestrator picks a per-agent subdir at
+        # spawn time so concurrent sub-agents don't clobber each
+        # other's scratchpad / notes (M2b §16.2 row "Sub-agent
+        # workspace isolation").
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("coding:\n  workspace_root: /sandbox/workspace\n")
+        monkeypatch.setenv("NEMOCLAW_WORKSPACE_ROOT", "/sandbox/workspace/agent-deadbeef")
+        config = AppConfig.load(path=yaml_path)
+        assert config.coding.workspace_root == "/sandbox/workspace/agent-deadbeef"
+
+    def test_unset_means_yaml_wins(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Sanity check the contract is "env wins when set" not "env
+        # always wins".  An unset env var leaves YAML alone — the
+        # default sub-agent self-generates an id from
+        # ``_make_agent_id`` if neither layer pinned one.
+        _set_required_secrets(monkeypatch)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text(
+            "nmb:\n  sandbox_id: yaml-default\n"
+            "coding:\n  workspace_root: /sandbox/workspace\n"
+        )
+        monkeypatch.delenv("NEMOCLAW_SANDBOX_ID", raising=False)
+        monkeypatch.delenv("NEMOCLAW_WORKSPACE_ROOT", raising=False)
+        config = AppConfig.load(path=yaml_path)
+        assert config.nmb.sandbox_id == "yaml-default"
+        assert config.coding.workspace_root == "/sandbox/workspace"
+
+
 # ── Secret validation ──────────────────────────────────────────────
 
 

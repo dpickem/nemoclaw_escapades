@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from nemoclaw_escapades.tools.bash import register_bash_tool
 from nemoclaw_escapades.tools.confluence import register_confluence_tools
+from nemoclaw_escapades.tools.delegation import register_delegation_tool
 from nemoclaw_escapades.tools.files import register_file_tools
 from nemoclaw_escapades.tools.gerrit import register_gerrit_tools
 from nemoclaw_escapades.tools.git import register_git_tools
@@ -39,7 +40,9 @@ from nemoclaw_escapades.tools.web_search import register_web_search_tools
 
 if TYPE_CHECKING:
     from nemoclaw_escapades.agent.skill_loader import SkillLoader
+    from nemoclaw_escapades.audit.db import AuditDB
     from nemoclaw_escapades.config import AppConfig
+    from nemoclaw_escapades.orchestrator.delegation import DelegationManager
 
 
 def create_coding_tool_registry(
@@ -106,6 +109,9 @@ def create_coding_tool_registry(
 def build_full_tool_registry(
     config: AppConfig,
     skill_loader: SkillLoader | None = None,
+    *,
+    delegation_manager: DelegationManager | None = None,
+    audit: AuditDB | None = None,
 ) -> ToolRegistry:
     """Top-level factory — assemble the full process-wide tool registry.
 
@@ -118,6 +124,15 @@ def build_full_tool_registry(
             each sub-config gates whether its tools are registered.
         skill_loader: Optional skill loader.  When provided (and
             non-empty), the ``skill`` tool is registered.
+        delegation_manager: Optional :class:`DelegationManager`
+            already constructed by the entrypoint.  When supplied,
+            the orchestrator-only ``delegate_task`` tool is
+            registered.  Sub-agents do **not** receive this tool —
+            recursive delegation is an M3 review-agent concern, not
+            an M2b capability (see §16.3 "No recursive delegation").
+        audit: Optional :class:`AuditDB`.  Forwarded to
+            ``register_delegation_tool`` so the per-workflow
+            ``log_delegation_*`` calls land in the central DB.
 
     Returns:
         A fully populated ``ToolRegistry``.  May be empty if nothing
@@ -154,6 +169,23 @@ def build_full_tool_registry(
             registry,
             workspace_root=workspace_root,
             git_clone_allowed_hosts=config.coding.git_clone_allowed_hosts,
+        )
+
+    # ── Delegation tool (orchestrator only) ────────────────────────
+    # Only registers when the entrypoint supplied a manager — that's
+    # the wire that connects ``delegate_task`` to a live NMB bus.
+    # Without this guard a ``delegate_task`` invocation would have no
+    # way to actually reach a sub-agent, defeating the point.  The
+    # sub-agent's ``create_coding_tool_registry`` factory deliberately
+    # never reaches this branch; recursive delegation is M3 territory.
+    if delegation_manager is not None:
+        workspace_root = str(Path(config.coding.workspace_root).expanduser())
+        register_delegation_tool(
+            registry,
+            manager=delegation_manager,
+            parent_sandbox_id=config.nmb.sandbox_id or "orchestrator",
+            workspace_root=workspace_root,
+            audit=audit,
         )
 
     # ── Skill tool ─────────────────────────────────────────────────

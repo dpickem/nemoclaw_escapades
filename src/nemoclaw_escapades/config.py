@@ -320,6 +320,90 @@ class OrchestratorConfig:
     max_tokens: int = DEFAULT_MAX_TOKENS
 
 
+# ── Delegation defaults (Phase 3a) ────────────────────────────────────
+
+# Maximum concurrent sub-agent delegations the orchestrator allows
+# system-wide.  Hard cap on inference cost + sandbox-process count.
+# §8.1 — per-agent semaphores.
+DEFAULT_MAX_CONCURRENT_DELEGATIONS: int = 4
+
+# Maximum nesting depth for sub-agent → sub-agent delegation.  M2b
+# only supports orchestrator → coding-agent (depth 1); higher values
+# are harmless until M3 introduces review agents.
+DEFAULT_MAX_SPAWN_DEPTH: int = 1
+
+# Default seconds the orchestrator waits for a ``task.complete`` reply
+# before failing the delegation.  Aligned with the BYOO tutorial's
+# "tasks usually < 5 minutes" rule of thumb; multi-file refactors that
+# need longer set ``DelegationConfig.task_timeout_s`` explicitly.
+DEFAULT_DELEGATION_TIMEOUT_S: float = 300.0
+
+# Default seconds the orchestrator waits for a freshly spawned sub-agent
+# to register on the NMB broker before giving up.  Spawn cost is
+# typically sub-second (subprocess + import + broker handshake), but a
+# cold inference backend or NMB reconnect can stretch this.  Ten
+# seconds gives generous headroom while still failing fast when the
+# sub-agent crashed at startup.  See
+# ``DelegationManager._wait_for_sandbox_online``.
+DEFAULT_SPAWN_READY_TIMEOUT_S: float = 10.0
+
+# Polling interval used by ``_wait_for_sandbox_online`` when probing
+# whether the spawned sub-agent has connected to the broker yet.
+# Short enough that a sub-second spawn isn't gated on the next tick;
+# long enough that we don't melt the broker with probe traffic.
+DEFAULT_SPAWN_READY_POLL_INTERVAL_S: float = 0.1
+
+
+@dataclass
+class DelegationConfig:
+    """Parameters for orchestrator → sub-agent delegation.
+
+    Attributes:
+        enabled: When ``False``, the orchestrator's startup wiring
+            skips constructing a :class:`DelegationManager` and the
+            tool registry omits ``delegate_task``.  Disable for
+            deployments without a reachable NMB broker (single-
+            process CLI runs, audit-only smoke tests).  Default
+            ``True`` — the supported runtime is the OpenShell
+            sandbox where the broker is always present.
+        max_concurrent: Hard cap on concurrent in-flight delegations.
+            Enforced via ``asyncio.Semaphore`` in
+            :class:`DelegationManager`.  Excess ``delegate_task``
+            calls block until a slot frees up rather than failing.
+        max_spawn_depth: Maximum delegation nesting depth.  Each
+            ``TaskAssignPayload`` carries an implicit depth derived
+            from ``parent_sandbox_id`` lineage; over the cap we
+            refuse to spawn (sub-agents can't delegate further in
+            M2b — that's an M3 review-agent concern).
+        task_timeout_s: Seconds to wait for a ``task.complete``
+            reply.  ``None`` means "use NMB's
+            ``default_request_timeout``"; setting an explicit value
+            applies it through ``MessageBus.request(timeout=...)``.
+        spawn_ready_timeout_s: Seconds to wait for a freshly spawned
+            sub-agent to register on the NMB broker before failing
+            the delegation.  Distinct from ``task_timeout_s``: a
+            sub-agent that crashed at import time should fail in
+            seconds, not after the full task timeout (which can be
+            5+ minutes).  See
+            :meth:`DelegationManager._wait_for_sandbox_online`.
+        spawn_ready_poll_interval_s: Backoff between readiness
+            probes.  Short enough that a sub-second spawn doesn't
+            wait for the next tick; long enough that probes don't
+            saturate the broker on slow startups.
+        sub_agent_module: Python ``-m`` module path for the
+            sub-agent process.  Made configurable so tests can
+            point at a stub.
+    """
+
+    enabled: bool = True
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_DELEGATIONS
+    max_spawn_depth: int = DEFAULT_MAX_SPAWN_DEPTH
+    task_timeout_s: float | None = DEFAULT_DELEGATION_TIMEOUT_S
+    spawn_ready_timeout_s: float = DEFAULT_SPAWN_READY_TIMEOUT_S
+    spawn_ready_poll_interval_s: float = DEFAULT_SPAWN_READY_POLL_INTERVAL_S
+    sub_agent_module: str = "nemoclaw_escapades.agent"
+
+
 @dataclass
 class LogConfig:
     """Logging configuration.
@@ -626,6 +710,7 @@ class AppConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     agent_loop: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+    delegation: DelegationConfig = field(default_factory=DelegationConfig)
     nmb: NmbClientConfig = field(default_factory=NmbClientConfig)
     log: LogConfig = field(default_factory=LogConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
@@ -672,6 +757,7 @@ class AppConfig:
         config = cls()
         _apply_yaml_overlay(config, path)
         _load_secrets_from_env(config)
+        _apply_runtime_overrides(config)
         _sync_agent_loop_prompting_fields(config)
         _check_required_config(config, require_slack=require_slack)
         return config
@@ -691,6 +777,7 @@ _DIRECT_SECTIONS: tuple[str, ...] = (
     "inference",
     "orchestrator",
     "agent_loop",
+    "delegation",
     "nmb",
     "log",
     "audit",
@@ -925,6 +1012,56 @@ def _load_secrets_from_env(config: AppConfig) -> None:
         config.web_search.api_key = val
     if val := os.environ.get("JINA_API_KEY"):
         config.web_search.jina_api_key = val
+
+
+# ── Runtime (non-secret) env overrides ───────────────────────────────
+#
+# Strict separation from :func:`_load_secrets_from_env`: that function
+# is for credentials injected by OpenShell providers / `.env`, and is
+# the *only* layer that consumes secret env vars.  This one is for
+# **non-secret deployment-time runtime values** that are awkward to
+# express in YAML because they need to be set per-process — sandbox
+# id and workspace root being the canonical examples (the
+# orchestrator's spawn callback assigns one identity per sub-agent
+# at delegation time, so they can't be baked into shared
+# ``defaults.yaml``).
+#
+# YAML stays the source of truth for everything else.  This list is
+# intentionally tiny and gated behind a documented prefix
+# (``NEMOCLAW_*``) so additions are visible in code review.
+
+
+def _apply_runtime_overrides(config: AppConfig) -> None:
+    """Populate non-secret runtime fields from per-process env vars.
+
+    Strictly limited to **non-secret** values that need to vary per
+    process invocation rather than per deployment.  Secrets go
+    through :func:`_load_secrets_from_env`; everything else flows
+    through :func:`_apply_yaml_overlay`.
+
+    Currently honours:
+
+    - ``NEMOCLAW_SANDBOX_ID`` → ``config.nmb.sandbox_id``.  Lets the
+      orchestrator's spawn callback pin the sub-agent's NMB identity
+      to the same id it just told the broker to dial; the sub-agent
+      reads it back here so the two halves of the protocol agree on
+      who they're talking to (M2b §6.1).
+    - ``NEMOCLAW_WORKSPACE_ROOT`` → ``config.coding.workspace_root``.
+      Same shape — the orchestrator picks a per-agent subdir at
+      spawn time and the sub-agent reads it back without a YAML
+      round-trip.
+
+    Both values are non-secret and are logged at sub-agent startup
+    (see ``agent/__main__.py``) so an operator can verify the
+    handoff worked.
+
+    Args:
+        config: ``AppConfig`` instance to mutate.
+    """
+    if val := os.environ.get("NEMOCLAW_SANDBOX_ID"):
+        config.nmb.sandbox_id = val
+    if val := os.environ.get("NEMOCLAW_WORKSPACE_ROOT"):
+        config.coding.workspace_root = val
 
 
 # ── Inter-section sync ──────────────────────────────────────────────
