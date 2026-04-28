@@ -373,15 +373,6 @@ async def _await_and_handle_one_task(
 
     try:
         complete = await _run_assigned_task(task, config, backend, logger)
-        await bus.reply(assign_msg, type=TASK_COMPLETE, payload=dump(complete))
-        logger.info(
-            "Sent task.complete",
-            extra={
-                "workflow_id": task.workflow_id,
-                "rounds_used": complete.rounds_used,
-                "tool_calls_made": complete.tool_calls_made,
-            },
-        )
     except Exception as exc:
         # Don't crash the process — emit a structured task.error so
         # the orchestrator's finalisation flow can surface the failure
@@ -402,6 +393,33 @@ async def _await_and_handle_one_task(
             },
             exc_info=True,
         )
+        return 0
+
+    try:
+        await bus.reply(assign_msg, type=TASK_COMPLETE, payload=dump(complete))
+    except Exception:
+        # The task succeeded; only delivery of the success payload failed.
+        # Do not reclassify this as task.error, otherwise the orchestrator
+        # may discard completed work or offer a spurious re-delegate path.
+        logger.error(
+            "Failed to send task.complete after successful task",
+            extra={
+                "workflow_id": task.workflow_id,
+                "rounds_used": complete.rounds_used,
+                "tool_calls_made": complete.tool_calls_made,
+            },
+            exc_info=True,
+        )
+        return 1
+
+    logger.info(
+        "Sent task.complete",
+        extra={
+            "workflow_id": task.workflow_id,
+            "rounds_used": complete.rounds_used,
+            "tool_calls_made": complete.tool_calls_made,
+        },
+    )
     return 0
 
 

@@ -540,6 +540,85 @@ class TestNmbMode:
         assert len(captured["sandbox_id"]) == len("coding-") + 8
 
 
+class TestAwaitAndHandleOneTask:
+    """Task execution failures are distinct from reply delivery failures."""
+
+    @pytest.mark.asyncio
+    async def test_task_complete_reply_failure_does_not_emit_task_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A completed task should not be reclassified when the reply send fails."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.models import NMBMessage, Op
+        from nemoclaw_escapades.nmb.protocol import TASK_ASSIGN, TASK_COMPLETE, TASK_ERROR
+
+        task = agent_main.TaskAssignPayload(
+            prompt="complete successfully",
+            workflow_id="wf-reply-fails",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef01",
+            workspace_root=str(tmp_path),
+        )
+        assign_msg = NMBMessage(
+            op=Op.DELIVER,
+            from_sandbox="orchestrator",
+            type=TASK_ASSIGN,
+            payload=agent_main.dump(task),
+        )
+        replies: list[tuple[str, dict[str, Any]]] = []
+
+        class _FakeBus:
+            async def listen(self) -> Any:
+                yield assign_msg
+
+            async def reply(
+                self,
+                _original: NMBMessage,
+                type: str,
+                payload: dict[str, Any],
+            ) -> None:
+                replies.append((type, payload))
+                if type == TASK_COMPLETE:
+                    raise RuntimeError("websocket dropped")
+
+        async def _fake_run_assigned_task(
+            _task: Any,
+            _config: Any,
+            _backend: Any,
+            _logger: Any,
+        ) -> agent_main.TaskCompletePayload:
+            return agent_main.TaskCompletePayload(
+                workflow_id=task.workflow_id,
+                summary="done",
+                diff="",
+                tool_calls_made=1,
+                rounds_used=1,
+                model_used="test-model",
+            )
+
+        monkeypatch.setattr(agent_main, "_run_assigned_task", _fake_run_assigned_task)
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        rc = await agent_main._await_and_handle_one_task(
+            bus=_FakeBus(),
+            config=AppConfig(),
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+            shutdown_event=asyncio.Event(),
+        )
+
+        assert rc == 1
+        assert [reply_type for reply_type, _ in replies] == [TASK_COMPLETE]
+        assert all(reply_type != TASK_ERROR for reply_type, _ in replies)
+
+
 # ── AgentSetupBundle round-trip ─────────────────────────────────────
 
 
