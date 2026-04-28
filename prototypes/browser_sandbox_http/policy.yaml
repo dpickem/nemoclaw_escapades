@@ -1,0 +1,55 @@
+# Prototype policy for browser -> sandbox HTTP reachability.
+#
+# OpenShell network_policies govern sandbox egress. Host/browser ingress for
+# this prototype is intentionally operator-created with:
+#
+#   openshell sandbox create ... --forward 8000 -- python /app/sandbox_http_server.py
+#
+# That forward exposes host http://127.0.0.1:8000 to the server listening inside
+# the sandbox on 0.0.0.0:8000. The policy below keeps the sandbox's outbound
+# HTTP(S) surface narrow while we prove the reachability path.
+version: 1
+
+filesystem_policy:
+  read_only:
+    - /usr
+    - /lib
+    - /etc
+    - /proc
+    - /dev/urandom
+    - /app
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  outbound_http:
+    name: browser-sandbox-prototype-http
+    endpoints:
+      - host: example.com
+        port: 80
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+    binaries:
+      - path: /usr/local/bin/python*
+      - path: /usr/bin/curl
+
+  outbound_https:
+    name: browser-sandbox-prototype-https
+    endpoints:
+      - host: example.com
+        port: 443
+        access: full
+    binaries:
+      - path: /usr/local/bin/python*
+      - path: /usr/bin/curl
