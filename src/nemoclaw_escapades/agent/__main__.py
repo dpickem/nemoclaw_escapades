@@ -39,10 +39,11 @@ import sys
 import traceback
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from nemoclaw_escapades.agent.approval import AutoApproval
 from nemoclaw_escapades.agent.git_helpers import (
+    GitDiffError,
     WorkspaceNotAGitRepoError,
     diff_against_baseline,
 )
@@ -60,11 +61,13 @@ from nemoclaw_escapades.config import (
     load_system_prompt,
 )
 from nemoclaw_escapades.nmb.protocol import (
+    TASK_ASSIGN,
     TASK_COMPLETE,
     TASK_ERROR,
     PayloadValidationError,
     TaskAssignPayload,
     TaskCompletePayload,
+    TaskErrorKind,
     TaskErrorPayload,
     dump,
     load,
@@ -111,6 +114,13 @@ def _load_coding_prompt(path: str = _DEFAULT_CODING_PROMPT) -> str:
 
     Uses ``load_system_prompt`` so a missing file falls back to the
     module-level fallback text rather than failing startup.
+
+    Args:
+        path: Prompt file path, relative to the current process or
+            absolute.
+
+    Returns:
+        Prompt text for the coding sub-agent.
     """
     resolved = Path(path).expanduser()
     return load_system_prompt(str(resolved))
@@ -135,6 +145,13 @@ def _build_tool_registry(config: AppConfig, bundle: AgentSetupBundle) -> ToolReg
     tool" errors.  ``register_skill_tool`` is a no-op when the
     skills directory is empty, so this is safe to wire
     unconditionally when skills are enabled.
+
+    Args:
+        config: Loaded application config.
+        bundle: Per-task setup details, including workspace root.
+
+    Returns:
+        Tool registry rooted at ``bundle.workspace_root``.
     """
     workspace_root = str(Path(bundle.workspace_root).expanduser())
     Path(workspace_root).mkdir(parents=True, exist_ok=True)
@@ -169,12 +186,21 @@ async def _run_task(
     reads ``result.content``.
 
     Args:
+        backend: Inference backend used by ``AgentLoop``.
+        tools: Tool registry exposed to the sub-agent.
+        identity_prompt: System-prompt identity layer.
+        bundle: Per-task setup metadata and workspace root.
+        config: Process-wide application config.
+        logger: Logger for completion metadata.
         loop_config: Per-task ``AgentLoopConfig`` override.  ``None``
             means "use ``config.agent_loop`` verbatim" — that's the
             CLI-mode path.  NMB mode passes a one-shot config built
             via ``dataclasses.replace`` so per-task ``max_turns`` and
             ``model`` apply for this run only and don't mutate the
             process-wide config (design §6.4 / §6.5.2).
+
+    Returns:
+        The completed ``AgentLoopResult``.
     """
     prompt_builder = LayeredPromptBuilder(
         identity=identity_prompt,
@@ -255,6 +281,16 @@ async def _run_cli_mode(
     ``notes-<task-slug>-<agent-id>.md`` scratch files.  Matches the
     design §4.2 isolation invariant: the sub-agent's ``agent_id``
     appears in both the workspace path and the scratchpad filename.
+
+    Args:
+        task_description: Natural-language task to run.
+        workspace_root: Optional base workspace directory.
+        config: Loaded application config.
+        backend: Inference backend used by ``AgentLoop``.
+        logger: Logger for failures.
+
+    Returns:
+        Process exit code.
     """
     agent_id = _make_agent_id()
     base_workspace = Path(workspace_root or config.coding.workspace_root).expanduser()
@@ -301,6 +337,12 @@ async def _run_nmb_mode(
         ``0`` on a handled ``task.error`` (the error's been delivered
         upstream), ``1`` on anything that prevented us from even
         opening the connection.
+
+    Args:
+        config: Loaded application config.
+        backend: Inference backend used by assigned tasks.
+        logger: Logger for lifecycle events.
+        shutdown_event: Event set by the signal handler.
     """
     # NMB client is imported lazily so CLI mode doesn't pay the import
     # cost when NMB isn't being used.
@@ -317,7 +359,11 @@ async def _run_nmb_mode(
         "Connecting to NMB broker",
         extra={"broker_url": broker_url, "sandbox_id": agent_sandbox_id},
     )
-    bus = MessageBus(broker_url=broker_url, sandbox_id=agent_sandbox_id)
+    bus = MessageBus(
+        broker_url=broker_url,
+        sandbox_id=agent_sandbox_id,
+        append_random_suffix=False,
+    )
     try:
         await bus.connect_with_retry()
     except Exception:
@@ -342,6 +388,16 @@ async def _await_and_handle_one_task(
     Split out from ``_run_nmb_mode`` so the bus lifecycle (connect /
     close) stays in one obvious place and the per-task logic is
     testable in isolation against a stub bus.
+
+    Args:
+        bus: Connected message bus.
+        config: Loaded application config.
+        backend: Inference backend used by assigned tasks.
+        logger: Logger for task lifecycle events.
+        shutdown_event: Event set by the signal handler.
+
+    Returns:
+        Process exit code for this single-shot sub-agent.
     """
     assign_msg = await _wait_for_assign(bus, logger, shutdown_event)
     if assign_msg is None:
@@ -441,6 +497,14 @@ async def _wait_for_assign(
     The single ``async for msg in bus.listen()`` pattern is what NMB
     expects (see ``nmb/client.py``); we layer a shutdown-event race
     on top so SIGINT / SIGTERM during connection idle exits cleanly.
+
+    Args:
+        bus: Connected message bus.
+        logger: Logger for ignored messages and shutdown.
+        shutdown_event: Event set by the signal handler.
+
+    Returns:
+        The first assign message, or ``None`` if shutdown wins.
     """
     listen_task = asyncio.create_task(_first_assign(bus))
     shutdown_task = asyncio.create_task(shutdown_event.wait())
@@ -466,12 +530,19 @@ async def _first_assign(bus: MessageBus) -> NMBMessage:
 
     Lazily skips over non-``task.assign`` deliveries so a stray
     message from a confused orchestrator doesn't crash the sub-agent.
+
+    Args:
+        bus: Connected message bus.
+
+    Returns:
+        The first ``task.assign`` message.
+
+    Raises:
+        RuntimeError: If the bus closes before an assignment arrives.
     """
     async for msg in bus.listen():
-        if msg.type == "task.assign":
+        if msg.type == TASK_ASSIGN:
             return msg
-        # Else: log and keep waiting; an unsolicited task.complete
-        # for a different workflow is a misroute, not a fatal error.
     raise RuntimeError("NMB listen() ended without delivering a task.assign")
 
 
@@ -500,6 +571,12 @@ async def _run_assigned_task(
     ``_classify_error`` path build a ``TaskErrorPayload`` with
     ``error_kind="max_turns_exceeded"`` and ``recoverable=True``.
 
+    Args:
+        task: Validated task assignment.
+        config: Loaded application config.
+        backend: Inference backend used by the task.
+        logger: Logger for task lifecycle events.
+
     Raises:
         MaxTurnsExceededError: When the loop hit its per-task
             ``max_tool_rounds`` cap.  Carries the partial assistant
@@ -509,6 +586,9 @@ async def _run_assigned_task(
         (``_await_and_handle_one_task``) wraps these into a
         ``task.error`` payload — this function never builds a
         ``TaskErrorPayload`` itself.
+
+    Returns:
+        Success payload ready to send over NMB.
     """
     bundle = AgentSetupBundle(
         task_id=task.workflow_id,
@@ -549,9 +629,6 @@ async def _run_assigned_task(
     )
 
     if result.hit_safety_limit:
-        # Design §6.4: the orchestrator's finalisation step needs to
-        # know this was a max-turns failure (recoverable, can offer
-        # re_delegate), not a successful task with a small diff.
         raise MaxTurnsExceededError(
             max_tool_rounds=loop_config.max_tool_rounds,
             rounds_used=result.rounds,
@@ -575,13 +652,20 @@ async def _compute_baseline_diff(
     task: TaskAssignPayload,
     logger: logging.Logger | _MergingAdapter,
 ) -> str:
-    """Compute ``git diff <base_sha>..HEAD`` against the assigned baseline.
+    """Compute ``git diff <base_sha>`` against the assigned baseline.
 
     Returns the empty string when no baseline was pinned (the
     orchestrator's "non-diff-producing task" signal — §6.6).  Logs
     and returns empty on git failure rather than raising; the diff
     is informational, the source of truth is the orchestrator's
     re-derivation at finalisation (§6.6.3).
+
+    Args:
+        task: Validated task assignment.
+        logger: Logger for git-diff failures.
+
+    Returns:
+        Baseline diff text, or an empty string when unavailable.
     """
     if task.workspace_baseline is None:
         return ""
@@ -593,10 +677,10 @@ async def _compute_baseline_diff(
             extra={"workflow_id": task.workflow_id, "workspace": task.workspace_root},
         )
         return ""
-    if diff.startswith(("Exit code:", "Error:")):
+    except GitDiffError as exc:
         logger.warning(
             "git diff failed",
-            extra={"workflow_id": task.workflow_id, "stderr": diff[:500]},
+            extra={"workflow_id": task.workflow_id, "stderr": exc.output[:500]},
         )
         return ""
     return diff
@@ -607,42 +691,33 @@ async def _reply_validation_error(
     assign_msg: NMBMessage,
     exc: PayloadValidationError,
 ) -> None:
-    """Reply with a ``task.error`` for a payload that failed validation.
+    """Reply with ``task.error`` keyed by the original NMB message id.
 
-    Without a workflow_id (the very thing we couldn't parse), we use
-    the original NMB message id as a workflow placeholder — the
-    orchestrator's listener can correlate via the reply-to chain.
+    Args:
+        bus: Connected message bus.
+        assign_msg: Malformed assignment message.
+        exc: Validation error raised while decoding the payload.
     """
     error = TaskErrorPayload(
         workflow_id=assign_msg.id,
         error=f"task.assign payload validation failed: {exc}",
-        error_kind="other",
+        error_kind=TaskErrorKind.OTHER,
         recoverable=False,
     )
     await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error))
 
 
-_ErrorKind = Literal[
-    "max_turns_exceeded",
-    "tool_failure",
-    "policy_denied",
-    "inference_error",
-    "other",
-]
-
-
 class MaxTurnsExceededError(Exception):
     """Raised when the loop hit its per-task ``max_tool_rounds`` cap.
 
-    Distinguished from a generic loop failure so
-    :func:`_classify_error` can map it to the recoverable
-    ``"max_turns_exceeded"`` ``error_kind`` per design §6.4.  Carries
-    the partial assistant content + counters so the eventual
-    ``task.error`` payload tells the orchestrator's finalisation
-    model how much of the budget the sub-agent burned and what
-    progress (if any) was made before the cap fired — enough context
-    to decide between ``re_delegate`` (with a higher cap) and
-    ``discard_work``.
+    The partial summary and counters are carried for the eventual
+    recoverable ``task.error`` payload.
+
+    Attributes:
+        max_tool_rounds: Configured round cap.
+        rounds_used: Rounds consumed before the cap fired.
+        tool_calls_made: Tool calls made before the cap fired.
+        partial_summary: Assistant content produced before stopping.
     """
 
     def __init__(
@@ -663,23 +738,25 @@ class MaxTurnsExceededError(Exception):
         self.partial_summary = partial_summary
 
 
-def _classify_error(exc: BaseException) -> _ErrorKind:
+def _classify_error(exc: BaseException) -> TaskErrorKind:
     """Map a Python exception type to a ``TaskErrorPayload.error_kind``.
 
-    The five literal values come from the design (§6.3, §6.5).
-    Default is ``"other"`` — we'd rather be honest about an
-    unclassified failure than mis-bucket it.
+    Args:
+        exc: Exception raised while handling a task.
+
+    Returns:
+        Structured error kind for the wire payload.
     """
     if isinstance(exc, MaxTurnsExceededError):
-        return "max_turns_exceeded"
+        return TaskErrorKind.MAX_TURNS_EXCEEDED
     if isinstance(exc, TimeoutError):
-        return "tool_failure"
+        return TaskErrorKind.TOOL_FAILURE
     name = type(exc).__name__
     if "Inference" in name or "Backend" in name:
-        return "inference_error"
+        return TaskErrorKind.INFERENCE_ERROR
     if "Approval" in name or "Policy" in name:
-        return "policy_denied"
-    return "other"
+        return TaskErrorKind.POLICY_DENIED
+    return TaskErrorKind.OTHER
 
 
 def _is_recoverable(exc: BaseException) -> bool:
@@ -692,6 +769,12 @@ def _is_recoverable(exc: BaseException) -> bool:
     different prompt or a code change, not just another turn —
     finalisation surfaces them as terminal errors so the user can
     decide.
+
+    Args:
+        exc: Exception raised while handling a task.
+
+    Returns:
+        ``True`` when a retry with adjusted parameters may help.
     """
     return isinstance(exc, MaxTurnsExceededError)
 
@@ -704,6 +787,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     Mutually exclusive run modes: ``--task`` (CLI) or ``--nmb``
     (broker).  Exactly one must be supplied.
+
+    Args:
+        argv: Optional argument vector.  ``None`` reads from
+            ``sys.argv``.
+
+    Returns:
+        Parsed CLI namespace.
     """
     parser = argparse.ArgumentParser(
         prog="python -m nemoclaw_escapades.agent",
@@ -749,6 +839,13 @@ async def _async_main(argv: list[str] | None = None) -> int:
     Phase 2 introduces an ``AuditBuffer`` that flushes over NMB to the
     orchestrator's single authoritative DB.  See ``docs/design_m2b.md``
     §13.
+
+    Args:
+        argv: Optional argument vector.  ``None`` reads from
+            ``sys.argv``.
+
+    Returns:
+        Process exit code.
     """
     args = _parse_args(argv)
 
@@ -815,7 +912,15 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
 
 def run(argv: list[str] | None = None) -> int:
-    """Synchronous entrypoint for ``python -m nemoclaw_escapades.agent``."""
+    """Synchronous entrypoint for ``python -m nemoclaw_escapades.agent``.
+
+    Args:
+        argv: Optional argument vector.  ``None`` reads from
+            ``sys.argv``.
+
+    Returns:
+        Process exit code.
+    """
     return asyncio.run(_async_main(argv))
 
 

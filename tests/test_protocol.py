@@ -25,12 +25,16 @@ import pytest
 from pydantic import ValidationError
 
 from nemoclaw_escapades.nmb.protocol import (
+    TASK_ASSIGN,
     ContextFile,
+    MessageType,
     PayloadValidationError,
     TaskAssignPayload,
     TaskCompletePayload,
+    TaskErrorKind,
     TaskErrorPayload,
     TaskProgressPayload,
+    TaskProgressStatus,
     WorkspaceBaseline,
     dump,
     load,
@@ -73,6 +77,29 @@ _PROGRESS_REQUIRED: dict[str, object] = {
 
 
 # ── WorkspaceBaseline ──────────────────────────────────────────────
+
+
+class TestProtocolEnums:
+    """Wire strings are backed by ``StrEnum`` members."""
+
+    def test_message_type_constant_is_str_enum(self) -> None:
+        assert TASK_ASSIGN is MessageType.TASK_ASSIGN
+        assert TASK_ASSIGN == "task.assign"
+
+    def test_progress_status_serialises_as_string(self) -> None:
+        payload = TaskProgressPayload(
+            workflow_id="wf-abc123",
+            status=TaskProgressStatus.WRITING_CODE,
+        )
+        assert dump(payload)["status"] == "writing_code"
+
+    def test_error_kind_serialises_as_string(self) -> None:
+        payload = TaskErrorPayload(
+            workflow_id="wf-abc123",
+            error="Tool round limit exceeded",
+            error_kind=TaskErrorKind.MAX_TURNS_EXCEEDED,
+        )
+        assert dump(payload)["error_kind"] == "max_turns_exceeded"
 
 
 class TestWorkspaceBaseline:
@@ -270,7 +297,7 @@ class TestTaskErrorPayload:
         assert recovered == payload
 
     def test_invalid_error_kind_rejected(self) -> None:
-        # ``error_kind`` is a Literal — the closed enum prevents
+        # ``error_kind`` is a closed enum — prevents
         # sub-agents from inventing new failure categories the
         # orchestrator's finalization model doesn't know how to
         # branch on.

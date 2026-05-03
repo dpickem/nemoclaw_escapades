@@ -1015,45 +1015,13 @@ def _load_secrets_from_env(config: AppConfig) -> None:
 
 
 # ── Runtime (non-secret) env overrides ───────────────────────────────
-#
-# Strict separation from :func:`_load_secrets_from_env`: that function
-# is for credentials injected by OpenShell providers / `.env`, and is
-# the *only* layer that consumes secret env vars.  This one is for
-# **non-secret deployment-time runtime values** that are awkward to
-# express in YAML because they need to be set per-process — sandbox
-# id and workspace root being the canonical examples (the
-# orchestrator's spawn callback assigns one identity per sub-agent
-# at delegation time, so they can't be baked into shared
-# ``defaults.yaml``).
-#
-# YAML stays the source of truth for everything else.  This list is
-# intentionally tiny and gated behind a documented prefix
-# (``NEMOCLAW_*``) so additions are visible in code review.
 
 
 def _apply_runtime_overrides(config: AppConfig) -> None:
     """Populate non-secret runtime fields from per-process env vars.
 
-    Strictly limited to **non-secret** values that need to vary per
-    process invocation rather than per deployment.  Secrets go
-    through :func:`_load_secrets_from_env`; everything else flows
-    through :func:`_apply_yaml_overlay`.
-
-    Currently honours:
-
-    - ``NEMOCLAW_SANDBOX_ID`` → ``config.nmb.sandbox_id``.  Lets the
-      orchestrator's spawn callback pin the sub-agent's NMB identity
-      to the same id it just told the broker to dial; the sub-agent
-      reads it back here so the two halves of the protocol agree on
-      who they're talking to (M2b §6.1).
-    - ``NEMOCLAW_WORKSPACE_ROOT`` → ``config.coding.workspace_root``.
-      Same shape — the orchestrator picks a per-agent subdir at
-      spawn time and the sub-agent reads it back without a YAML
-      round-trip.
-
-    Both values are non-secret and are logged at sub-agent startup
-    (see ``agent/__main__.py``) so an operator can verify the
-    handoff worked.
+    Only ``NEMOCLAW_SANDBOX_ID`` and ``NEMOCLAW_WORKSPACE_ROOT`` are
+    accepted; secrets still go through :func:`_load_secrets_from_env`.
 
     Args:
         config: ``AppConfig`` instance to mutate.

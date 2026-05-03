@@ -37,6 +37,19 @@ async def broker_and_url() -> tuple[NMBBroker, str]:
 
 
 class TestClientConnect:
+    def test_default_sandbox_id_gets_random_suffix(self) -> None:
+        bus = MessageBus(sandbox_id="test-client", broker_url="ws://127.0.0.1:1")
+        assert bus.sandbox_id.startswith("test-client-")
+        assert len(bus.sandbox_id) == len("test-client-") + 8
+
+    def test_can_use_exact_sandbox_id_without_suffix(self) -> None:
+        bus = MessageBus(
+            sandbox_id="coding-12345678",
+            broker_url="ws://127.0.0.1:1",
+            append_random_suffix=False,
+        )
+        assert bus.sandbox_id == "coding-12345678"
+
     async def test_connect_and_close(self, broker_and_url: tuple[NMBBroker, str]) -> None:
         _, url = broker_and_url
         bus = MessageBus(sandbox_id="test-client", broker_url=url)

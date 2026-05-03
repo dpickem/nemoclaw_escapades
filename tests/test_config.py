@@ -539,8 +539,7 @@ class TestRuntimeEnvOverrides:
         _set_required_secrets(monkeypatch)
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text(
-            "nmb:\n  sandbox_id: yaml-default\n"
-            "coding:\n  workspace_root: /sandbox/workspace\n"
+            "nmb:\n  sandbox_id: yaml-default\ncoding:\n  workspace_root: /sandbox/workspace\n"
         )
         monkeypatch.delenv("NEMOCLAW_SANDBOX_ID", raising=False)
         monkeypatch.delenv("NEMOCLAW_WORKSPACE_ROOT", raising=False)

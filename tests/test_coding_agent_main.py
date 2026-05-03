@@ -449,9 +449,16 @@ class TestNmbMode:
         captured: dict[str, Any] = {}
 
         class _FakeBus:
-            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+            def __init__(
+                self,
+                *,
+                broker_url: str,
+                sandbox_id: str,
+                append_random_suffix: bool,
+            ) -> None:
                 captured["broker_url"] = broker_url
                 captured["sandbox_id"] = sandbox_id
+                captured["append_random_suffix"] = append_random_suffix
 
             async def connect_with_retry(self) -> None:
                 captured["connected"] = True
@@ -490,6 +497,7 @@ class TestNmbMode:
         assert captured["broker_url"] == "ws://test-broker:1234"
         # Non-empty sandbox_id → used as-is (no ``coding-…`` prefix).
         assert captured["sandbox_id"] == "pinned-sub-agent-id"
+        assert captured["append_random_suffix"] is False
         assert captured["connected"] is True
         assert captured["closed"] is True
 
@@ -502,8 +510,15 @@ class TestNmbMode:
         captured: dict[str, Any] = {}
 
         class _FakeBus:
-            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+            def __init__(
+                self,
+                *,
+                broker_url: str,
+                sandbox_id: str,
+                append_random_suffix: bool,
+            ) -> None:
                 captured["sandbox_id"] = sandbox_id
+                captured["append_random_suffix"] = append_random_suffix
 
             async def connect_with_retry(self) -> None:
                 pass
@@ -538,6 +553,7 @@ class TestNmbMode:
         assert captured["sandbox_id"].startswith("coding-")
         # ``_make_agent_id`` truncates to 8 hex chars.
         assert len(captured["sandbox_id"]) == len("coding-") + 8
+        assert captured["append_random_suffix"] is False
 
 
 class TestAwaitAndHandleOneTask:
@@ -848,6 +864,51 @@ class TestRunAssignedTask:
         assert complete.workspace_baseline == baseline
 
     @pytest.mark.asyncio
+    async def test_baseline_diff_git_error_logs_and_returns_empty(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A structured git diff error does not require prefix parsing."""
+
+        async def _fake_diff(workspace_root: str, base_sha: str) -> str:
+            raise agent_main.GitDiffError(workspace_root, base_sha, "Exit code: 128\nbad sha")
+
+        monkeypatch.setattr(agent_main, "diff_against_baseline", _fake_diff)
+
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, WorkspaceBaseline
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-git-error",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-deadbeef",
+            workspace_root=str(workspace),
+            workspace_baseline=WorkspaceBaseline(
+                repo_url="https://example.com/x.git",
+                branch="main",
+                base_sha="cafebabecafebabecafebabecafebabecafebabe",
+            ),
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=AppConfig.load(),
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        assert complete.diff == ""
+
+    @pytest.mark.asyncio
     async def test_no_baseline_means_empty_diff(
         self,
         tmp_path: Path,
@@ -964,25 +1025,34 @@ class TestClassifyError:
             tool_calls_made=3,
             partial_summary="x",
         )
-        assert agent_main._classify_error(exc) == "max_turns_exceeded"
+        assert agent_main._classify_error(exc) is agent_main.TaskErrorKind.MAX_TURNS_EXCEEDED
 
     def test_timeout_is_tool_failure(self) -> None:
-        assert agent_main._classify_error(TimeoutError("timed out")) == "tool_failure"
+        assert (
+            agent_main._classify_error(TimeoutError("timed out"))
+            is agent_main.TaskErrorKind.TOOL_FAILURE
+        )
 
     def test_inference_error_class_name_is_inference_error(self) -> None:
         class InferenceFooError(Exception):
             pass
 
-        assert agent_main._classify_error(InferenceFooError("x")) == "inference_error"
+        assert (
+            agent_main._classify_error(InferenceFooError("x"))
+            is agent_main.TaskErrorKind.INFERENCE_ERROR
+        )
 
     def test_approval_error_class_name_is_policy_denied(self) -> None:
         class ApprovalRejectedError(Exception):
             pass
 
-        assert agent_main._classify_error(ApprovalRejectedError("x")) == "policy_denied"
+        assert (
+            agent_main._classify_error(ApprovalRejectedError("x"))
+            is agent_main.TaskErrorKind.POLICY_DENIED
+        )
 
     def test_default_is_other(self) -> None:
-        assert agent_main._classify_error(ValueError("x")) == "other"
+        assert agent_main._classify_error(ValueError("x")) is agent_main.TaskErrorKind.OTHER
 
 
 class TestIsRecoverable:

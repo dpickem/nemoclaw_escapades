@@ -5,7 +5,7 @@ Two helpers, both wrappers around ``tools.git._run_git``:
 - ``resolve_baseline`` reads HEAD + ``remote.origin.url`` after
   workspace seeding so the orchestrator can pin a
   ``WorkspaceBaseline`` for the workflow.
-- ``diff_against_baseline`` emits ``git diff <base_sha>..HEAD`` for
+- ``diff_against_baseline`` emits ``git diff <base_sha>`` for
   ``TaskCompletePayload.diff``.
 
 These tests use real ``git`` invocations against a tmp-path repo —
@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from nemoclaw_escapades.agent.git_helpers import (
+    GitDiffError,
     WorkspaceNotAGitRepoError,
     _is_shallow,
     diff_against_baseline,
@@ -153,6 +154,12 @@ class TestDiffAgainstBaseline:
         diff = await diff_against_baseline(str(repo), head)
         assert "to_delete.txt" in diff
         assert "-doomed" in diff
+
+    async def test_git_diff_failure_raises_structured_error(self, repo: Path) -> None:
+        with pytest.raises(GitDiffError) as excinfo:
+            await diff_against_baseline(str(repo), "not-a-sha")
+        assert excinfo.value.base_sha == "not-a-sha"
+        assert "Exit code:" in excinfo.value.output
 
 
 class TestIsShallow:

@@ -10,7 +10,7 @@ It proves the path with real OpenShell sandboxes by launching:
 
 - an NMB broker sandbox that runs `nemoclaw_escapades.nmb.broker`,
 - a client sandbox with an NMB-only egress policy,
-- a host-side preflight probe, and
+- a client-side preflight probe, and
 - a task smoke flow: `client.ready -> task.assign -> task.complete`.
 
 ## Run
@@ -40,13 +40,7 @@ The working topology mirrors the `browser_sandbox_http` prototype:
    openshell sandbox create ... --forward 0.0.0.0:9876
    ```
 
-3. The host reaches the broker at:
-
-   ```text
-   ws://127.0.0.1:9876
-   ```
-
-4. The client sandbox reaches the same forwarded listener through OpenShell's
+3. The client sandbox reaches the forwarded listener through OpenShell's
    outbound proxy at:
 
    ```text
@@ -59,7 +53,6 @@ The client policy grants only NMB WebSocket egress for this route.
 
 The full smoke test completed end-to-end:
 
-- host WebSocket preflight connected to the forwarded broker,
 - client sandbox WebSocket probe connected through the OpenShell proxy,
 - client sandbox published `client.ready`,
 - broker-side peer sent `task.assign`,
@@ -103,10 +96,9 @@ image tag from the broker log and uses it for the client sandbox.
 Stage the proof instead of jumping straight to two sandboxes:
 
 1. Prove the broker starts inside a sandbox.
-2. Prove the host can reach it through the OpenShell forward.
-3. Prove the client sandbox can reach that forwarded broker with a diagnostic
+2. Prove the client sandbox can reach that forwarded broker with a diagnostic
    probe.
-4. Only then run the task exchange.
+3. Only then run the task exchange.
 
 Keep a client-side diagnostic mode. The `debug-client` target prints proxy
 environment, discovered proxies, DNS resolution, raw TCP results, WebSocket via
@@ -129,7 +121,8 @@ the image includes `iproute2`, creates a `sandbox` user/group, and avoids settin
 - What is the production mechanism for binding `messages.local:9876` to a
   broker process inside the orchestrator sandbox?
 - Can OpenShell expose a sandbox-resident TCP service to other sandboxes without
-  going through a host forward?
+  going through a host forward? This is the gating question before replacing
+  the forward-rendezvous route.
 - Should the dashboard MVP intentionally use the forward-rendezvous route, or
   should implementation wait for a gateway-level service binding?
 - How should production policy constrain the Docker host-gateway route if this

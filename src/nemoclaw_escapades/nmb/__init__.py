@@ -14,11 +14,14 @@ from nemoclaw_escapades.nmb.protocol import (
     TASK_ERROR,
     TASK_PROGRESS,
     ContextFile,
+    MessageType,
     PayloadValidationError,
     TaskAssignPayload,
     TaskCompletePayload,
+    TaskErrorKind,
     TaskErrorPayload,
     TaskProgressPayload,
+    TaskProgressStatus,
     WorkspaceBaseline,
 )
 
@@ -31,6 +34,7 @@ __all__ = [
     "DeliveryStatus",
     "ErrorCode",
     "MessageBus",
+    "MessageType",
     "NMBConnectionError",
     "NMBMessage",
     "Op",
@@ -38,7 +42,9 @@ __all__ = [
     "PendingRequest",
     "TaskAssignPayload",
     "TaskCompletePayload",
+    "TaskErrorKind",
     "TaskErrorPayload",
+    "TaskProgressStatus",
     "TaskProgressPayload",
     "WorkspaceBaseline",
 ]

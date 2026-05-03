@@ -21,7 +21,6 @@ agent shouldn't be able to delegate further (the depth-1 cap in
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from nemoclaw_escapades.nmb.protocol import (
@@ -62,7 +61,10 @@ def _make_delegate_task(
         workspace_root: Absolute path the sub-agent's workspace
             subdirectories will land under.  Each delegation gets
             its own ``<workspace_root>/agent-<id>`` subdir
-            (matching the §4.2.1 isolation invariant).
+            (matching the §4.2.1 isolation invariant).  This is
+            registration-time runtime context, not a model argument;
+            a future nested agent would register its own tool with
+            its own parent identity and workspace root.
         default_max_turns: Per-shape default for ``max_turns`` (the
             §17 Q4 lookup table).  ``None`` means "inherit the
             sub-agent's config default."
@@ -140,10 +142,6 @@ def _make_delegate_task(
             if workspace_baseline is not None
             else None
         )
-        # Build the full assign payload.  ``workflow_id`` is just a
-        # fresh UUID at this layer — the orchestrator's audit DB
-        # threads it through every record for the workflow (Phase
-        # 3a-6).
         task = TaskAssignPayload(
             prompt=prompt,
             workflow_id=f"wf-{uuid.uuid4().hex[:12]}",
@@ -244,6 +242,3 @@ def register_delegation_tool(
             audit=audit,
         ),
     )
-
-
-__all__: Sequence[str] = ("register_delegation_tool",)

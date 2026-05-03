@@ -192,16 +192,21 @@ class DelegationManager:
         """
         self._check_spawn_depth(task)
 
-        # Hold the semaphore for the whole delegation lifecycle —
-        # spawn + send + reply.  An eight-tasks-deep refactor still
-        # only counts as one delegation against the cap.
         async with self._semaphore:
-            agent = await self._spawn(task.agent_id, task.workspace_root)
+            try:
+                agent = await self._spawn(task.agent_id, task.workspace_root)
+            except Exception as exc:  # noqa: BLE001 — spawn callback is pluggable
+                raise DelegationError(f"failed to spawn sub-agent: {exc}") from exc
+
             try:
                 reply = await self._send_assign_with_readiness_retry(
                     task,
                     agent.sandbox_id,
                 )
+            except DelegationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — defensive around transport implementations
+                raise DelegationError(f"delegation failed: {exc}") from exc
             finally:
                 await agent.terminate()
         return DelegationResult(complete=reply, sub_agent_sandbox_id=agent.sandbox_id)
@@ -383,17 +388,8 @@ class DelegationManager:
 
         async def _spawn(sub_agent_sandbox_id: str, workspace_root: str) -> SpawnedAgent:
             env = os.environ.copy()
-            # Pin the sub-agent's identity + workspace root through
-            # the documented runtime-overrides layer (M2b §5.3:
-            # non-secret deployment values flow via
-            # ``NEMOCLAW_*`` env vars handled by
-            # ``_apply_runtime_overrides``).  Without these, the
-            # sub-agent's ``create_coding_agent_config`` falls
-            # through to its default sandbox-id generator, the
-            # broker registers a different id, and our
-            # ``request(to=sub_agent_sandbox_id)`` retries hit
-            # ``TARGET_OFFLINE`` until ``spawn_ready_timeout_s``
-            # expires.
+            # Pin per-process runtime values so the child connects
+            # with the same identity and workspace we assign here.
             env["NEMOCLAW_SANDBOX_ID"] = sub_agent_sandbox_id
             env["NEMOCLAW_WORKSPACE_ROOT"] = workspace_root
             proc = await asyncio.create_subprocess_exec(

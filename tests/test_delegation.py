@@ -183,6 +183,24 @@ class TestSuccessfulDelegation:
         assert spawn.spawned == [("coding-12345678", "/tmp/ws-wf-1")]
         assert spawn.terminated == ["coding-12345678"]
 
+    @pytest.mark.asyncio
+    async def test_spawn_failure_is_wrapped(self) -> None:
+        """A failed spawn surfaces as ``DelegationError``."""
+
+        async def _fail_spawn(_sandbox_id: str, _workspace_root: str) -> SpawnedAgent:
+            raise OSError("python missing")
+
+        mgr = DelegationManager(
+            _FakeBus(reply_payload=_complete_payload_dict()),  # type: ignore[arg-type]
+            DelegationConfig(),
+            spawn_callback=_fail_spawn,
+        )
+
+        with pytest.raises(DelegationError) as excinfo:
+            await mgr.delegate(_make_task())
+
+        assert "failed to spawn sub-agent" in str(excinfo.value)
+
 
 # ── Failure modes ──────────────────────────────────────────────────
 

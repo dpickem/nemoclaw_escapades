@@ -53,6 +53,10 @@ make -k test-services-sandbox  # test all tools inside the sandbox
   agent interactions into SFT and RL training data; two-layer trace capture
   (per-sandbox + NMB audit log), quality filtering, DPO preference pairs from
   review loops, Nemotron fine-tuning pipeline
+- [Cursor SDK Agent Harness Adoption](docs/cursor_sdk_harness_adoption.md) —
+  what to adopt from Cursor's public agent SDK: Agent/Run APIs, event streams,
+  runtime abstraction, artifacts, resumability, hooks, and declarative
+  subagents
 
 ### Deep Dives
 

@@ -9,7 +9,7 @@ Two responsibilities:
 - **Baseline resolution** — given a freshly seeded workspace, return
   the ``WorkspaceBaseline`` the orchestrator pinned the workflow to
   (``git rev-parse origin/<branch>`` + ``git config --get remote.origin.url``).
-- **Baseline-anchored diff** — ``git diff <base_sha>..HEAD`` for
+- **Baseline-anchored diff** — ``git diff <base_sha>`` for
   ``TaskCompletePayload.diff``.
 
 Both reuse ``tools.git._run_git`` so timeout / TLS-bundle / output-cap
@@ -32,6 +32,22 @@ class WorkspaceNotAGitRepoError(Exception):
     sends ``workspace_baseline=None`` for those cases), so callers
     catch this specifically and fall back to the no-baseline path.
     """
+
+
+class GitDiffError(Exception):
+    """Raised when baseline diff computation fails.
+
+    Attributes:
+        workspace_root: Workspace path that failed.
+        base_sha: Baseline SHA passed to ``git diff``.
+        output: Structured git-tool error text returned by ``_run_git``.
+    """
+
+    def __init__(self, workspace_root: str, base_sha: str, output: str) -> None:
+        super().__init__(f"git diff {base_sha} failed in {workspace_root}: {output}")
+        self.workspace_root = workspace_root
+        self.base_sha = base_sha
+        self.output = output
 
 
 async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaseline:
@@ -115,18 +131,26 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
         base_sha: 40-char SHA the workspace started at.
 
     Returns:
-        The diff text (possibly empty if the working tree matches
-        ``base_sha``).  Errors from git are returned verbatim with
-        the same ``"Exit code:"`` / ``"Error:"`` prefix as the
-        ``_run_git`` helper uses, so callers that want to
-        distinguish "no changes" from "git failed" check the prefix.
+        The diff text, possibly empty if the working tree matches
+        ``base_sha``.
+
+    Raises:
+        GitDiffError: If ``git diff`` itself fails.
     """
     # Best-effort: ``--intent-to-add`` failures (read-only repo,
     # weird permissions) shouldn't sink the diff entirely — we still
     # get the tracked-file diff below.  The error string surfaces in
     # the sub-agent's structured log via ``_run_git``.
     await _run_git(workspace_root, "add", "--intent-to-add", "--all")
-    return await _run_git(workspace_root, "diff", base_sha)
+    diff = await _run_git(workspace_root, "diff", base_sha)
+    if _is_git_error(diff):
+        raise GitDiffError(workspace_root, base_sha, diff)
+    return diff
+
+
+def _is_git_error(output: str) -> bool:
+    """Return whether ``_run_git`` produced its structured error text."""
+    return output.startswith(("Exit code:", "Error:"))
 
 
 async def _is_shallow(workspace_root: str) -> bool:

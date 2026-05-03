@@ -240,8 +240,9 @@ explicitly **deferred** out of M2b:
    path, and the pinned `WorkspaceBaseline`.
 7. Sub-agent runs `AgentLoop` with coding file tools.
 8. Sub-agent sends `task.complete` with result, diff (`git diff
-   <base_sha>..HEAD`), echoed `WorkspaceBaseline`, and any notes file
-   the agent created in its workspace.
+   <base_sha>` against the working tree), echoed
+   `WorkspaceBaseline`, and any notes file the agent created in its
+   workspace.
 9. Orchestrator verifies the echoed baseline matches what it
    assigned (§6.6.3) and runs model-driven finalization (§7).
 
@@ -961,7 +962,7 @@ invariants before running the finalisation `AgentLoop`:
    wrong base.
 2. **Diff sanity.** When the orchestrator has the workspace on
    disk (M2b same-sandbox case), it can run `git diff
-   <base_sha>..HEAD` itself and compare the result to the
+   <base_sha>` itself and compare the result to the
    sub-agent's reported `diff`.  Any disagreement is logged at
    `WARNING` level; the orchestrator's locally-computed diff wins.
    M3's multi-sandbox case skips this — the orchestrator doesn't
@@ -2283,8 +2284,32 @@ so neither can drift.
 ```python
 # nmb/protocol.py
 
+from enum import StrEnum
 from typing import Literal
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
+
+
+class MessageType(StrEnum):
+    TASK_ASSIGN = "task.assign"
+    TASK_PROGRESS = "task.progress"
+    TASK_COMPLETE = "task.complete"
+    TASK_ERROR = "task.error"
+
+
+class TaskProgressStatus(StrEnum):
+    STARTING = "starting"
+    READING_WORKSPACE = "reading_workspace"
+    WRITING_CODE = "writing_code"
+    RUNNING_TESTS = "running_tests"
+    FINALIZING = "finalizing"
+
+
+class TaskErrorKind(StrEnum):
+    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    TOOL_FAILURE = "tool_failure"
+    POLICY_DENIED = "policy_denied"
+    INFERENCE_ERROR = "inference_error"
+    OTHER = "other"
 ```
 
 ### E.1 `TaskAssignPayload`
@@ -2370,7 +2395,8 @@ class WorkspaceBaseline(BaseModel):
     base_sha: str
     """The 40-char commit SHA the workspace's working tree was at
     when ``setup-workspace.sh`` finished.  ``TaskCompletePayload.diff``
-    is ``git diff <base_sha>..HEAD`` after the sub-agent's edits."""
+    is ``git diff <base_sha>`` against the working tree after the
+    sub-agent's edits."""
 
     is_shallow: bool = True
     """Most M2b clones are shallow (`depth=1`); recorded so finalisation
@@ -2385,10 +2411,7 @@ class TaskProgressPayload(BaseModel):
     """Sub-Agent → Orchestrator. Optional, periodic, best-effort."""
 
     workflow_id: str
-    status: Literal[
-        "starting", "reading_workspace", "writing_code",
-        "running_tests", "finalizing"
-    ]
+    status: TaskProgressStatus
     pct: int | None = Field(default=None, ge=0, le=100)
     current_round: NonNegativeInt | None = None
     tokens_used: NonNegativeInt | None = None
@@ -2411,7 +2434,7 @@ class TaskCompletePayload(BaseModel):
     diff: str = ""
     """Unified diff between ``workspace_baseline.base_sha`` (set on
     the matching ``TaskAssignPayload``, echoed below) and the
-    workspace's HEAD after the sub-agent's edits.  Empty when the
+    workspace's working tree after the sub-agent's edits.  Empty when the
     task didn't modify any tracked files (e.g. "summarize this repo")
     or when the assigned ``workspace_baseline`` was ``None``."""
 
@@ -2468,10 +2491,7 @@ class TaskErrorPayload(BaseModel):
 
     workflow_id: str
     error: str
-    error_kind: Literal[
-        "max_turns_exceeded", "tool_failure",
-        "policy_denied", "inference_error", "other"
-    ]
+    error_kind: TaskErrorKind
     recoverable: bool = False
     notes_path: str | None = None
     traceback: str | None = None

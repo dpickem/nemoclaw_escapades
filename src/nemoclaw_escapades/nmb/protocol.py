@@ -33,21 +33,47 @@ Appendix E (full Pydantic source).
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt, ValidationError
 
-# ── Message type strings on the wire ───────────────────────────────
-#
-# These are the values of ``NMBMessage.type`` for the payload models
-# below.  Both sides import these constants instead of re-typing the
-# strings, so a typo is a NameError at import time rather than a
-# silent send-and-discard at runtime.
+# ── Wire enums ─────────────────────────────────────────────────────
 
-TASK_ASSIGN: str = "task.assign"
-TASK_PROGRESS: str = "task.progress"
-TASK_COMPLETE: str = "task.complete"
-TASK_ERROR: str = "task.error"
+
+class MessageType(StrEnum):
+    """NMB ``type`` values for the task protocol."""
+
+    TASK_ASSIGN = "task.assign"
+    TASK_PROGRESS = "task.progress"
+    TASK_COMPLETE = "task.complete"
+    TASK_ERROR = "task.error"
+
+
+class TaskProgressStatus(StrEnum):
+    """Coarse progress states a sub-agent may report."""
+
+    STARTING = "starting"
+    READING_WORKSPACE = "reading_workspace"
+    WRITING_CODE = "writing_code"
+    RUNNING_TESTS = "running_tests"
+    FINALIZING = "finalizing"
+
+
+class TaskErrorKind(StrEnum):
+    """Structured categories for terminal ``task.error`` messages."""
+
+    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    TOOL_FAILURE = "tool_failure"
+    POLICY_DENIED = "policy_denied"
+    INFERENCE_ERROR = "inference_error"
+    OTHER = "other"
+
+
+TASK_ASSIGN: MessageType = MessageType.TASK_ASSIGN
+TASK_PROGRESS: MessageType = MessageType.TASK_PROGRESS
+TASK_COMPLETE: MessageType = MessageType.TASK_COMPLETE
+TASK_ERROR: MessageType = MessageType.TASK_ERROR
 
 
 # ── Workspace baseline ─────────────────────────────────────────────
@@ -70,10 +96,11 @@ class WorkspaceBaseline(BaseModel):
             baseline.
         base_sha: 40-char commit SHA the working tree was at when
             workspace seeding finished.  ``TaskCompletePayload.diff``
-            is ``git diff <base_sha>..HEAD``.
+            is ``git diff <base_sha>`` against the working tree.
         is_shallow: True for ``depth=1`` clones; recorded so
             finalisation knows whether ``git pull --rebase`` is safe
-            or whether it needs to deepen first.
+            or whether it needs to deepen first.  Defaults to true so
+            unknown clone state takes the conservative deepen path.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -195,13 +222,7 @@ class TaskProgressPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workflow_id: str = Field(min_length=1)
-    status: Literal[
-        "starting",
-        "reading_workspace",
-        "writing_code",
-        "running_tests",
-        "finalizing",
-    ]
+    status: TaskProgressStatus
     pct: int | None = Field(default=None, ge=0, le=100)
     current_round: NonNegativeInt | None = None
     tokens_used: NonNegativeInt | None = None
@@ -305,13 +326,7 @@ class TaskErrorPayload(BaseModel):
 
     workflow_id: str = Field(min_length=1)
     error: str = Field(min_length=1)
-    error_kind: Literal[
-        "max_turns_exceeded",
-        "tool_failure",
-        "policy_denied",
-        "inference_error",
-        "other",
-    ]
+    error_kind: TaskErrorKind
     recoverable: bool = False
     notes_path: str | None = None
     traceback: str | None = None
@@ -394,10 +409,13 @@ __all__ = [
     "TASK_ERROR",
     "TASK_PROGRESS",
     "ContextFile",
+    "MessageType",
     "PayloadValidationError",
     "TaskAssignPayload",
     "TaskCompletePayload",
+    "TaskErrorKind",
     "TaskErrorPayload",
+    "TaskProgressStatus",
     "TaskProgressPayload",
     "WorkspaceBaseline",
     "dump",
