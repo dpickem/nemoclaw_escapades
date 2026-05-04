@@ -240,8 +240,9 @@ explicitly **deferred** out of M2b:
    path, and the pinned `WorkspaceBaseline`.
 7. Sub-agent runs `AgentLoop` with coding file tools.
 8. Sub-agent sends `task.complete` with result, diff (`git diff
-   <base_sha>..HEAD`), echoed `WorkspaceBaseline`, and any notes file
-   the agent created in its workspace.
+   <base_sha>` against the working tree), echoed
+   `WorkspaceBaseline`, and any notes file the agent created in its
+   workspace.
 9. Orchestrator verifies the echoed baseline matches what it
    assigned (§6.6.3) and runs model-driven finalization (§7).
 
@@ -284,7 +285,9 @@ if the starting state is recorded somewhere both sides can refer to.
 The orchestrator needs that record to:
 
 1. Independently re-derive the diff for verification (`git diff
-   <baseline>..<head>`) instead of trusting the sub-agent's free-text
+   <baseline>` — working-tree-inclusive, since sub-agents don't have
+   `git_commit` per §7.1, so a `..HEAD` form would silently drop
+   uncommitted edits) instead of trusting the sub-agent's free-text
    `diff` field.
 2. Build a sensible PR base when finalisation chooses Strategy A
    (orchestrator pulls + pushes from a known commit — see §17 Q3 and
@@ -959,7 +962,7 @@ invariants before running the finalisation `AgentLoop`:
    wrong base.
 2. **Diff sanity.** When the orchestrator has the workspace on
    disk (M2b same-sandbox case), it can run `git diff
-   <base_sha>..HEAD` itself and compare the result to the
+   <base_sha>` itself and compare the result to the
    sub-agent's reported `diff`.  Any disagreement is logged at
    `WARNING` level; the orchestrator's locally-computed diff wins.
    M3's multi-sandbox case skips this — the orchestrator doesn't
@@ -1377,15 +1380,15 @@ plus the audit flush behind it.
 
 | Task | Files | Status |
 |------|-------|--------|
-| Typed Pydantic payloads (§6.3) | `nmb/protocol.py` | ⏳ |
-| Per-task `max_turns` + `model` plumbing into a one-shot `AgentLoopConfig` (§6.4, §6.5.2) | `agent/__main__.py` | ⏳ |
-| Per-workflow `WorkspaceBaseline` pinning + sub-agent baseline-anchored diff (§6.6) | `orchestrator/delegation.py`, `agent/__main__.py` | ⏳ |
-| `delegate_task` tool | `tools/delegation.py` | ⏳ |
-| Spawn → workspace-seeding → `task.assign` flow | `orchestrator/delegation.py` | ⏳ |
-| Per-agent `asyncio.Semaphore` + `max_spawn_depth` caps (§8.1) | `orchestrator/delegation.py` | ⏳ |
-| NMB event loop (`task.complete` / `task.progress` / `task.error` dispatch to per-workflow handlers) | `orchestrator/orchestrator.py` | ⏳ |
-| Audit-record requested `model` per delegation (§6.5.2) | `agent/audit/db.py`, `orchestrator/delegation.py` | ⏳ |
-| Tests | `tests/test_protocol.py`, `tests/test_workspace_baseline.py`, `tests/test_delegation.py`, `tests/integration/test_delegation.py` | ⏳ |
+| Typed Pydantic payloads (§6.3) | `nmb/protocol.py` | ✅ |
+| Per-task `max_turns` + `model` plumbing into a one-shot `AgentLoopConfig` (§6.4, §6.5.2) | `agent/__main__.py` | ✅ |
+| Per-workflow `WorkspaceBaseline` pinning + sub-agent baseline-anchored diff (§6.6) | `orchestrator/delegation.py`, `agent/__main__.py`, `agent/git_helpers.py` | ✅ |
+| `delegate_task` tool | `tools/delegation.py` | ✅ |
+| Spawn → workspace-seeding → `task.assign` flow | `orchestrator/delegation.py` | ✅ |
+| Per-agent `asyncio.Semaphore` + `max_spawn_depth` caps (§8.1) | `orchestrator/delegation.py` | ✅ |
+| NMB event loop (`task.complete` / `task.progress` / `task.error` dispatch to per-workflow handlers) | `orchestrator/orchestrator.py` | ⏳ Pending (Phase 3b) — `DelegationManager` already round-trips `task.complete` / `task.error`; the centralized router for `task.progress` lands with finalization |
+| Audit-record requested `model` per delegation (§6.5.2) | `audit/db.py`, `audit/models.py`, `audit/alembic/versions/005_delegations.py`, `orchestrator/delegation.py` | ✅ — new `delegations` table captures requested + used model, baseline, status, and outcome |
+| Tests | `tests/test_protocol.py`, `tests/test_git_helpers.py`, `tests/test_delegation.py`, `tests/test_delegation_tool.py`, `tests/test_audit_delegation.py`, `tests/integration/test_delegation.py` | ✅ |
 
 **Exit criteria:** orchestrator spawns a sub-agent over NMB; the
 sub-agent runs `AgentLoop` with the assigned `max_turns` and
@@ -1492,8 +1495,8 @@ only if the M3 design review pulls them in.
 | AgentLoop + NMB config sections | YAML `agent_loop:` / `nmb:` populate the matching `AppConfig` fields | ✅ `tests/test_config.py::TestYamlOverlay::test_agent_loop_section_populates_config`, `TestYamlPrecedence::test_nmb_section_populates_config`, `::test_agent_loop_section_populates_runtime_knobs` |
 | Sub-agent workspace isolation | Each sub-agent invocation lands in a distinct `<base>/agent-<hex>` subdirectory so concurrent runs can't clobber each other's scratchpad / notes | ✅ `tests/test_coding_agent_main.py::TestCliMode::test_cli_mode_per_agent_subdirectory_is_created` |
 | Sub-agent tool surface (enforcement-by-construction) | Sub-agent registry excludes `git_commit`; orchestrator retains it for finalisation | ✅ `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit`, `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface` |
-| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ⏳ Pending (Phase 3a) |
-| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ⏳ Pending (Phase 3a) |
+| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ✅ `tests/test_delegation.py::TestSemaphoreCap::test_third_call_blocks_until_a_slot_frees` |
+| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ✅ `tests/test_delegation.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations` |
 | NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 4) |
 | NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 4) |
 | `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ✅ `tests/test_tool_search.py` — `TestRegistrySearch` (scoring), `TestRegistrySurface::test_default_tool_definitions_excludes_non_core`, `TestToolSearchTool::test_tool_search_returns_matches_and_surfaces_them`, `TestFullToolRegistryIntegration::test_default_prompt_surface_shrinks` |
@@ -1507,10 +1510,10 @@ only if the M3 design review pulls them in.
 | Sandbox boot — happy path | `make run-local-sandbox` → log shows `classification: SANDBOX` with all 6 signals present | 🟡 Manual smoke only — the positive path needs a real OpenShell sandbox so `/sandbox`, `/app/src`, and `inference.local` DNS resolve.  Automation would require mocking OpenShell itself, out of scope for unit / integration tests.  The runtime classifier logic is fully covered at the unit level (`tests/test_runtime.py::TestClassification`); operators verify the end-to-end wiring with `make run-local-sandbox`. |
 | Sandbox boot — broken env | Manually unset `OPENSHELL_SANDBOX` in a test image → self-check fails with `INCONSISTENT` and the process exits nonzero before Slack connects | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_inconsistent_runtime_fails_fast` — spawns `python -m nemoclaw_escapades.agent` with an env mix the multi-signal detector classifies `INCONSISTENT`; asserts non-zero exit and `SandboxConfigurationError` + `refusing to start` on stderr, before any config load or I/O. |
 | Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_honours_yaml_deployment_override` — custom YAML via `NEMOCLAW_CONFIG_PATH` directs the sub-agent's workspace root without a rebuild; asserts the per-agent subdir lands under the YAML-supplied path. |
-| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | 🟡 Partial — (a) NMB wire-level transport covered by `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent-side connect / close wiring (reads broker URL + sandbox id from `config.nmb`, calls `connect_with_retry`, closes on shutdown) covered by `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body awaits Phase 3 |
+| Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | ✅ End-to-end coverage: (a) NMB wire-level transport via `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent connect / close wiring via `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body via `tests/integration/test_delegation.py::TestDelegationEndToEnd` |
 | Coding agent end-to-end | Agent receives task, uses file tools, returns diff | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call` — subprocess + stateful OpenAI-format mock serves a `write_file` tool_call then a terminating reply; assertions: file lands on disk inside the per-agent workspace, final reply reaches stdout. |
-| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ⏳ Pending (spawn→complete lands in 3a; finalize closes the loop in 3b) |
-| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ⏳ Pending (Phase 3a) |
+| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | 🟡 Partial — spawn→complete shipped via `tests/integration/test_delegation.py::TestDelegationEndToEnd::test_delegate_task_round_trip_through_broker` (Phase 3a); finalize closes the loop in Phase 3b |
+| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ✅ `tests/test_delegation.py::TestSemaphoreCap::test_third_call_blocks_until_a_slot_frees` (in-process semaphore proof at unit level — full multi-broker integration in Phase 3b) |
 | Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] | ⏳ Pending (Phase 3b) |
 | Iteration flow | User feedback → `re_delegate` → same agent → updated result | ⏳ Pending (Phase 3b) |
 | Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ⏳ Pending (Phase 3b) |
@@ -1524,9 +1527,9 @@ only if the M3 design review pulls them in.
 |------|-----------------|--------|
 | Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | 🟡 Partial — Phase 1 enforces by *construction*: `create_coding_tool_registry` deliberately omits `git_commit` (orchestrator-only, per §7.1), so the sub-agent's `ToolRegistry` has no entry the model could invoke.  Covered by `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit` and `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Phase 3 will add a runtime allow-list check for the broader "tool_surface"-as-policy story (e.g. orchestrator-granted per-task tool restrictions). |
 | Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` | ✅ `tests/test_file_tools.py::TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `::test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` (M2a) |
-| No recursive delegation | Coding agent cannot spawn sub-agents | ⏳ Pending (Phase 3a) |
+| No recursive delegation | Coding agent cannot spawn sub-agents | ✅ Orchestrator-only by construction: `create_coding_tool_registry` (used by `agent/__main__.py`) never registers `delegate_task` — verified by `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Defence in depth at the `DelegationManager` layer is verified by `tests/test_delegation.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations`. |
 | Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 3b) |
-| Diff baseline integrity | (a) `task.complete` carrying a `workspace_baseline.base_sha` that doesn't match the assigned one fails finalisation with `BaselineDriftError`; (b) two sub-agents in the same workflow both observe the same `base_sha` after independent spawn; (c) sub-agent's reported `diff` matches `git diff <base_sha>..HEAD` re-derived by the orchestrator; (d) `re_delegate`'s second `task.assign` carries the same baseline as the first (§6.6) | ⏳ Pending: (b) shared-baseline parallel spawn in Phase 3a; (a), (c), (d) in Phase 3b |
+| Diff baseline integrity | (a) `task.complete` carrying a `workspace_baseline.base_sha` that doesn't match the assigned one fails finalisation with `BaselineDriftError`; (b) two sub-agents in the same workflow both observe the same `base_sha` after independent spawn; (c) sub-agent's reported `diff` matches `git diff <base_sha>` (working-tree-inclusive — sub-agents never commit, so `..HEAD` would silently drop their edits) re-derived by the orchestrator; (d) `re_delegate`'s second `task.assign` carries the same baseline as the first (§6.6) | ⏳ Pending: (b) shared-baseline parallel spawn in Phase 3a; (a), (c), (d) in Phase 3b |
 
 ---
 
@@ -1546,7 +1549,7 @@ only if the M3 design review pulls them in.
 | Internal infrastructure leaked via public source | Category-B values (internal hostnames, host allowlists, infra URLs) inlined as `_SANDBOX_*` constants in `config.py` ship with every public `git push` | Public `config/defaults.yaml` holds only fail-closed placeholders for category-B fields. Real values live in gitignored `.env` and are merged into a gitignored `config/orchestrator.resolved.yaml` at build time by `scripts/gen_config.py` (same pattern as `gen_policy.py`). (§5.3.2 / §5.3.3) |
 | Accidental secret exposure via config YAML | An operator could copy a token into `defaults.yaml` or `gen_config.py` could inadvertently route a `.env` secret into the resolved YAML | `gen_config.py` maintains an explicit category-B allowlist of keys it will honour; any `.env` key outside the allowlist is ignored. Any `.env` key matching the secret suffix list (`*_TOKEN`, `*_AUTH`, `*_PASSWORD`, `*_KEY`) included in the allowlist is a hard error. Loader-side guard rejects any YAML key that maps to a known secret field. (§5.3.4) |
 | Operators expect per-task `model` selection to work in M2b | The wire field exists (§6.3, §6.5) but is operationally a no-op until Option A polish (M2b Phase 6) or Option D (M3, gated on §17 Q10) lands; an operator setting `task.model="haiku"` and watching their Opus bill not change would reasonably file a bug | Documented as a deliberate scope choice in §6.5 / §6.5.1; `delegate_task` audit-records the requested model so operators can see the field is being respected at the protocol layer; Option A is the documented unblock path if a real per-task requirement shows up before M3. |
-| Diff is "against the workspace's starting state" but the starting state isn't tracked | Without a pinned baseline, `TaskCompletePayload.diff` is unverifiable, parallel sub-agents on the same repo could end up rooted at different commits if upstream advanced between spawns, and `re_delegate` can't reproduce the original baseline for iteration #2 — silent correctness failure at finalisation, not a crash | `WorkspaceBaseline` Pydantic dataclass on both `TaskAssignPayload` and `TaskCompletePayload` (§6.3); orchestrator pins one baseline per workflow at delegation time and reuses it across all sub-agents in that workflow (§6.6.2 cases A and C); sub-agent computes `diff` as `git diff <base_sha>..HEAD` and echoes the baseline back; orchestrator verifies the echo and (same-sandbox case) re-derives the diff to cross-check (§6.6.3). Phase 3 unit + integration tests cover both the parallel-spawn shared-baseline case and the mid-task drift case. |
+| Diff is "against the workspace's starting state" but the starting state isn't tracked | Without a pinned baseline, `TaskCompletePayload.diff` is unverifiable, parallel sub-agents on the same repo could end up rooted at different commits if upstream advanced between spawns, and `re_delegate` can't reproduce the original baseline for iteration #2 — silent correctness failure at finalisation, not a crash | `WorkspaceBaseline` Pydantic dataclass on both `TaskAssignPayload` and `TaskCompletePayload` (§6.3); orchestrator pins one baseline per workflow at delegation time and reuses it across all sub-agents in that workflow (§6.6.2 cases A and C); sub-agent computes `diff` as `git diff <base_sha>` against the working tree (sub-agents have no `git_commit`, so a `..HEAD` form would drop their edits) and echoes the baseline back; orchestrator verifies the echo and (same-sandbox case) re-derives the diff to cross-check (§6.6.3). Phase 3 unit + integration tests cover both the parallel-spawn shared-baseline case and the mid-task drift case. |
 
 ---
 
@@ -2281,8 +2284,32 @@ so neither can drift.
 ```python
 # nmb/protocol.py
 
+from enum import StrEnum
 from typing import Literal
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
+
+
+class MessageType(StrEnum):
+    TASK_ASSIGN = "task.assign"
+    TASK_PROGRESS = "task.progress"
+    TASK_COMPLETE = "task.complete"
+    TASK_ERROR = "task.error"
+
+
+class TaskProgressStatus(StrEnum):
+    STARTING = "starting"
+    READING_WORKSPACE = "reading_workspace"
+    WRITING_CODE = "writing_code"
+    RUNNING_TESTS = "running_tests"
+    FINALIZING = "finalizing"
+
+
+class TaskErrorKind(StrEnum):
+    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    TOOL_FAILURE = "tool_failure"
+    POLICY_DENIED = "policy_denied"
+    INFERENCE_ERROR = "inference_error"
+    OTHER = "other"
 ```
 
 ### E.1 `TaskAssignPayload`
@@ -2368,7 +2395,8 @@ class WorkspaceBaseline(BaseModel):
     base_sha: str
     """The 40-char commit SHA the workspace's working tree was at
     when ``setup-workspace.sh`` finished.  ``TaskCompletePayload.diff``
-    is ``git diff <base_sha>..HEAD`` after the sub-agent's edits."""
+    is ``git diff <base_sha>`` against the working tree after the
+    sub-agent's edits."""
 
     is_shallow: bool = True
     """Most M2b clones are shallow (`depth=1`); recorded so finalisation
@@ -2383,10 +2411,7 @@ class TaskProgressPayload(BaseModel):
     """Sub-Agent → Orchestrator. Optional, periodic, best-effort."""
 
     workflow_id: str
-    status: Literal[
-        "starting", "reading_workspace", "writing_code",
-        "running_tests", "finalizing"
-    ]
+    status: TaskProgressStatus
     pct: int | None = Field(default=None, ge=0, le=100)
     current_round: NonNegativeInt | None = None
     tokens_used: NonNegativeInt | None = None
@@ -2409,7 +2434,7 @@ class TaskCompletePayload(BaseModel):
     diff: str = ""
     """Unified diff between ``workspace_baseline.base_sha`` (set on
     the matching ``TaskAssignPayload``, echoed below) and the
-    workspace's HEAD after the sub-agent's edits.  Empty when the
+    workspace's working tree after the sub-agent's edits.  Empty when the
     task didn't modify any tracked files (e.g. "summarize this repo")
     or when the assigned ``workspace_baseline`` was ``None``."""
 
@@ -2466,10 +2491,7 @@ class TaskErrorPayload(BaseModel):
 
     workflow_id: str
     error: str
-    error_kind: Literal[
-        "max_turns_exceeded", "tool_failure",
-        "policy_denied", "inference_error", "other"
-    ]
+    error_kind: TaskErrorKind
     recoverable: bool = False
     notes_path: str | None = None
     traceback: str | None = None

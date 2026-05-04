@@ -92,10 +92,12 @@ class NMBConnectionError(Exception):
 class MessageBus:
     """Async client for the NemoClaw Message Bus.
 
-    On construction, a globally unique ``sandbox_id`` is generated
-    from the caller-supplied name + a random suffix (e.g.
-    ``"coding-sandbox-1-a3f7b2c8"``).  This single ID is used for
-    all routing, channel subscriptions, and audit.
+    By default, construction turns a caller-supplied display name into
+    a globally unique ``sandbox_id`` by appending a random suffix (e.g.
+    ``"coding-sandbox-1-a3f7b2c8"``).  Callers that already generated
+    and shared an exact routing identity can disable that suffix.  The
+    resulting ``sandbox_id`` is used for all routing, channel
+    subscriptions, and audit.
 
     Public attributes:
         broker_url: WebSocket URL of the NMB broker.
@@ -132,20 +134,29 @@ class MessageBus:
         self,
         sandbox_id: str,
         broker_url: str = DEFAULT_NMB_URL,
+        *,
+        append_random_suffix: bool = True,
     ) -> None:
         """Initialise the client (does not connect).
 
         Args:
             sandbox_id: Human-readable name for this sandbox
-                (e.g. ``"orchestrator"``).  A random 8-hex-char suffix
-                is appended automatically to make it globally unique.
+                (e.g. ``"orchestrator"``), or an exact routing
+                identity when ``append_random_suffix`` is ``False``.
             broker_url: WebSocket URL of the NMB broker.
+            append_random_suffix: Append an 8-hex-char suffix to
+                ``sandbox_id`` for display-name style clients.  Disable
+                this when the orchestrator has already generated and
+                targeted an exact sub-agent identity.
         """
         self.broker_url: str = broker_url
 
         # Globally unique per launch — the caller-supplied name is
-        # used as a human-readable prefix.
-        self.sandbox_id: str = f"{sandbox_id}-{uuid.uuid4().hex[:8]}"
+        # used as a human-readable prefix unless it is already the
+        # exact routing identity shared with another peer.
+        self.sandbox_id: str = (
+            f"{sandbox_id}-{uuid.uuid4().hex[:8]}" if append_random_suffix else sandbox_id
+        )
         self._ws: ClientConnection | None = None
         self._recv_task: asyncio.Task[None] | None = None
 

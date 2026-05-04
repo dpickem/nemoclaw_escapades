@@ -449,9 +449,16 @@ class TestNmbMode:
         captured: dict[str, Any] = {}
 
         class _FakeBus:
-            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+            def __init__(
+                self,
+                *,
+                broker_url: str,
+                sandbox_id: str,
+                append_random_suffix: bool,
+            ) -> None:
                 captured["broker_url"] = broker_url
                 captured["sandbox_id"] = sandbox_id
+                captured["append_random_suffix"] = append_random_suffix
 
             async def connect_with_retry(self) -> None:
                 captured["connected"] = True
@@ -490,6 +497,7 @@ class TestNmbMode:
         assert captured["broker_url"] == "ws://test-broker:1234"
         # Non-empty sandbox_id → used as-is (no ``coding-…`` prefix).
         assert captured["sandbox_id"] == "pinned-sub-agent-id"
+        assert captured["append_random_suffix"] is False
         assert captured["connected"] is True
         assert captured["closed"] is True
 
@@ -502,8 +510,15 @@ class TestNmbMode:
         captured: dict[str, Any] = {}
 
         class _FakeBus:
-            def __init__(self, *, broker_url: str, sandbox_id: str) -> None:
+            def __init__(
+                self,
+                *,
+                broker_url: str,
+                sandbox_id: str,
+                append_random_suffix: bool,
+            ) -> None:
                 captured["sandbox_id"] = sandbox_id
+                captured["append_random_suffix"] = append_random_suffix
 
             async def connect_with_retry(self) -> None:
                 pass
@@ -538,6 +553,86 @@ class TestNmbMode:
         assert captured["sandbox_id"].startswith("coding-")
         # ``_make_agent_id`` truncates to 8 hex chars.
         assert len(captured["sandbox_id"]) == len("coding-") + 8
+        assert captured["append_random_suffix"] is False
+
+
+class TestAwaitAndHandleOneTask:
+    """Task execution failures are distinct from reply delivery failures."""
+
+    @pytest.mark.asyncio
+    async def test_task_complete_reply_failure_does_not_emit_task_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A completed task should not be reclassified when the reply send fails."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.models import NMBMessage, Op
+        from nemoclaw_escapades.nmb.protocol import TASK_ASSIGN, TASK_COMPLETE, TASK_ERROR
+
+        task = agent_main.TaskAssignPayload(
+            prompt="complete successfully",
+            workflow_id="wf-reply-fails",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef01",
+            workspace_root=str(tmp_path),
+        )
+        assign_msg = NMBMessage(
+            op=Op.DELIVER,
+            from_sandbox="orchestrator",
+            type=TASK_ASSIGN,
+            payload=agent_main.dump(task),
+        )
+        replies: list[tuple[str, dict[str, Any]]] = []
+
+        class _FakeBus:
+            async def listen(self) -> Any:
+                yield assign_msg
+
+            async def reply(
+                self,
+                _original: NMBMessage,
+                type: str,
+                payload: dict[str, Any],
+            ) -> None:
+                replies.append((type, payload))
+                if type == TASK_COMPLETE:
+                    raise RuntimeError("websocket dropped")
+
+        async def _fake_run_assigned_task(
+            _task: Any,
+            _config: Any,
+            _backend: Any,
+            _logger: Any,
+        ) -> agent_main.TaskCompletePayload:
+            return agent_main.TaskCompletePayload(
+                workflow_id=task.workflow_id,
+                summary="done",
+                diff="",
+                tool_calls_made=1,
+                rounds_used=1,
+                model_used="test-model",
+            )
+
+        monkeypatch.setattr(agent_main, "_run_assigned_task", _fake_run_assigned_task)
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        rc = await agent_main._await_and_handle_one_task(
+            bus=_FakeBus(),
+            config=AppConfig(),
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+            shutdown_event=asyncio.Event(),
+        )
+
+        assert rc == 1
+        assert [reply_type for reply_type, _ in replies] == [TASK_COMPLETE]
+        assert all(reply_type != TASK_ERROR for reply_type, _ in replies)
 
 
 # ── AgentSetupBundle round-trip ─────────────────────────────────────
@@ -571,3 +666,410 @@ class TestAgentSetupBundleSerde:
     def test_from_dict_missing_field_raises(self) -> None:
         with pytest.raises(KeyError):
             AgentSetupBundle.from_dict({"task_id": "t1"})
+
+
+# ── NMB receive loop ────────────────────────────────────────────────
+
+
+class _FakeAgentLoopForNmb:
+    """Records the AgentLoopConfig it was constructed with.
+
+    Per-task ``max_turns`` / ``model`` flow through
+    ``dataclasses.replace``; this fake makes the resulting config
+    visible to the test so we can assert the override landed.
+    """
+
+    captured: dict[str, Any] = {}
+
+    def __init__(self, *, config: Any, **_: Any) -> None:
+        type(self).captured["config"] = config
+
+    async def run(self, *, messages: list[Any], request_id: str) -> Any:
+        return type(
+            "R",
+            (),
+            {
+                "content": "did the work",
+                "rounds": 3,
+                "tool_calls_made": 5,
+                "hit_safety_limit": False,
+                "working_messages": list(messages),
+            },
+        )()
+
+
+class TestRunAssignedTask:
+    """``_run_assigned_task`` builds the per-task config and produces complete payload."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _FakeAgentLoopForNmb.captured = {}
+        monkeypatch.setattr(agent_main, "AgentLoop", _FakeAgentLoopForNmb)
+
+    @pytest.mark.asyncio
+    async def test_per_task_max_turns_and_model_replace_global(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``task.max_turns`` / ``task.model`` flow into a one-shot config.
+
+        The process-wide ``config.agent_loop`` must stay untouched —
+        the next ``task.assign`` shouldn't inherit this assignment's
+        overrides.  Verified via the global-config-instance identity
+        check below.
+        """
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        global_loop_config = config.agent_loop
+        original_max = global_loop_config.max_tool_rounds
+        original_model = global_loop_config.model
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        task = TaskAssignPayload(
+            prompt="add a /api/health endpoint",
+            workflow_id="wf-1",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef01",
+            workspace_root=str(workspace),
+            max_turns=42,
+            model="azure/anthropic/claude-haiku-4",
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+
+        captured_cfg = _FakeAgentLoopForNmb.captured["config"]
+        # Per-task config has the overrides applied.
+        assert captured_cfg.max_tool_rounds == 42
+        assert captured_cfg.model == "azure/anthropic/claude-haiku-4"
+        # The process-wide config is untouched.
+        assert global_loop_config.max_tool_rounds == original_max
+        assert global_loop_config.model == original_model
+        assert global_loop_config is config.agent_loop  # identity unchanged
+
+        # Complete payload reports the requested model + actual round count.
+        assert complete.workflow_id == "wf-1"
+        assert complete.summary == "did the work"
+        assert complete.rounds_used == 3
+        assert complete.tool_calls_made == 5
+        assert complete.model_used == "azure/anthropic/claude-haiku-4"
+
+    @pytest.mark.asyncio
+    async def test_no_overrides_uses_global_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``max_turns=None`` and ``model=None`` → loop gets the unchanged global."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        task = TaskAssignPayload(
+            prompt="task body",
+            workflow_id="wf-2",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef02",
+            workspace_root=str(workspace),
+            # No max_turns, no model — global wins.
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+
+        captured_cfg = _FakeAgentLoopForNmb.captured["config"]
+        # When no overrides, the helper passes the global config
+        # by identity, not a replaced copy.
+        assert captured_cfg is config.agent_loop
+
+    @pytest.mark.asyncio
+    async def test_baseline_diff_when_baseline_pinned(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the orchestrator pinned a baseline, the diff is computed."""
+
+        # Make the diff helper return a known string so we don't need
+        # a real git repo here — the git-helper tests exercise the
+        # real-git path.
+        async def _fake_diff(workspace_root: str, base_sha: str) -> str:
+            return f"diff against {base_sha[:7]}"
+
+        monkeypatch.setattr(agent_main, "diff_against_baseline", _fake_diff)
+
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, WorkspaceBaseline
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        baseline = WorkspaceBaseline(
+            repo_url="https://example.com/x.git",
+            branch="main",
+            base_sha="cafebabecafebabecafebabecafebabecafebabe",
+        )
+        task = TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-3",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-deadbeef",
+            workspace_root=str(workspace),
+            workspace_baseline=baseline,
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        # Diff was computed against the assigned baseline.
+        assert complete.diff == "diff against cafebab"
+        # Baseline echoed verbatim — drift detection on the
+        # orchestrator's side compares against the original.
+        assert complete.workspace_baseline == baseline
+
+    @pytest.mark.asyncio
+    async def test_baseline_diff_git_error_logs_and_returns_empty(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A structured git diff error does not require prefix parsing."""
+
+        async def _fake_diff(workspace_root: str, base_sha: str) -> str:
+            raise agent_main.GitDiffError(workspace_root, base_sha, "Exit code: 128\nbad sha")
+
+        monkeypatch.setattr(agent_main, "diff_against_baseline", _fake_diff)
+
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, WorkspaceBaseline
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-git-error",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-deadbeef",
+            workspace_root=str(workspace),
+            workspace_baseline=WorkspaceBaseline(
+                repo_url="https://example.com/x.git",
+                branch="main",
+                base_sha="cafebabecafebabecafebabecafebabecafebabe",
+            ),
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=AppConfig.load(),
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        assert complete.diff == ""
+
+    @pytest.mark.asyncio
+    async def test_no_baseline_means_empty_diff(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``workspace_baseline=None`` → ``diff`` is empty (non-diff task)."""
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="summarize this repo",
+            workflow_id="wf-4",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-99887766",
+            workspace_root=str(workspace),
+            # Deliberately no baseline.
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        complete = await agent_main._run_assigned_task(
+            task,
+            config=config,
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+        )
+        assert complete.diff == ""
+        assert complete.workspace_baseline is None
+
+    @pytest.mark.asyncio
+    async def test_hit_safety_limit_raises_max_turns_exceeded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``hit_safety_limit=True`` must surface as ``MaxTurnsExceededError``.
+
+        Regression for the design §6.4 violation: previously the
+        helper built a ``TaskCompletePayload`` even when the loop
+        capped out, which would have looked like a successful
+        delegation to the orchestrator's finalisation step.  Now it
+        raises so the caller's ``task.error`` path emits
+        ``error_kind="max_turns_exceeded"`` with ``recoverable=True``.
+        """
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.protocol import TaskAssignPayload
+
+        # Override the fake loop's run() to flag the safety-limit hit.
+        class _SafetyLimitLoop(_FakeAgentLoopForNmb):
+            async def run(self, *, messages: list[Any], request_id: str) -> Any:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": "got partway through",
+                        "rounds": 5,
+                        "tool_calls_made": 7,
+                        "hit_safety_limit": True,
+                        "working_messages": list(messages),
+                    },
+                )()
+
+        monkeypatch.setattr(agent_main, "AgentLoop", _SafetyLimitLoop)
+
+        config = AppConfig.load()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task = TaskAssignPayload(
+            prompt="something hard",
+            workflow_id="wf-5",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-cafebabe",
+            workspace_root=str(workspace),
+            max_turns=5,
+        )
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        with pytest.raises(agent_main.MaxTurnsExceededError) as excinfo:
+            await agent_main._run_assigned_task(
+                task,
+                config=config,
+                backend=_FakeBackend(),
+                logger=logging.getLogger("test"),
+            )
+
+        # Counters carried on the exception so the ``task.error``
+        # payload tells the orchestrator how much budget was burned.
+        assert excinfo.value.max_tool_rounds == 5
+        assert excinfo.value.rounds_used == 5
+        assert excinfo.value.tool_calls_made == 7
+        assert excinfo.value.partial_summary == "got partway through"
+
+
+class TestClassifyError:
+    """``_classify_error`` maps Python exception types to wire literals."""
+
+    def test_max_turns_exceeded_is_max_turns_exceeded(self) -> None:
+        # Regression for design §6.4 — the literal value was defined
+        # but unreachable until ``_run_assigned_task`` started raising.
+        exc = agent_main.MaxTurnsExceededError(
+            max_tool_rounds=5,
+            rounds_used=5,
+            tool_calls_made=3,
+            partial_summary="x",
+        )
+        assert agent_main._classify_error(exc) is agent_main.TaskErrorKind.MAX_TURNS_EXCEEDED
+
+    def test_timeout_is_tool_failure(self) -> None:
+        assert (
+            agent_main._classify_error(TimeoutError("timed out"))
+            is agent_main.TaskErrorKind.TOOL_FAILURE
+        )
+
+    def test_inference_error_class_name_is_inference_error(self) -> None:
+        class InferenceFooError(Exception):
+            pass
+
+        assert (
+            agent_main._classify_error(InferenceFooError("x"))
+            is agent_main.TaskErrorKind.INFERENCE_ERROR
+        )
+
+    def test_approval_error_class_name_is_policy_denied(self) -> None:
+        class ApprovalRejectedError(Exception):
+            pass
+
+        assert (
+            agent_main._classify_error(ApprovalRejectedError("x"))
+            is agent_main.TaskErrorKind.POLICY_DENIED
+        )
+
+    def test_default_is_other(self) -> None:
+        assert agent_main._classify_error(ValueError("x")) is agent_main.TaskErrorKind.OTHER
+
+
+class TestIsRecoverable:
+    """Only ``MaxTurnsExceededError`` is recoverable today (design §6.4)."""
+
+    def test_max_turns_exceeded_is_recoverable(self) -> None:
+        exc = agent_main.MaxTurnsExceededError(
+            max_tool_rounds=5,
+            rounds_used=5,
+            tool_calls_made=3,
+            partial_summary="x",
+        )
+        assert agent_main._is_recoverable(exc) is True
+
+    def test_other_errors_are_not_recoverable(self) -> None:
+        # Tool failures, policy denials, inference errors, generic
+        # bugs — all need a different prompt or a code change, not
+        # just another turn.
+        for exc in [TimeoutError("x"), ValueError("x"), RuntimeError("x")]:
+            assert agent_main._is_recoverable(exc) is False

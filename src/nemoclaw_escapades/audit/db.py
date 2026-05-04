@@ -66,7 +66,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from nemoclaw_escapades.audit.models import ConnectionRow, MessageRow, ToolCallRow
+from nemoclaw_escapades.audit.models import (
+    ConnectionRow,
+    DelegationRow,
+    MessageRow,
+    ToolCallRow,
+)
 from nemoclaw_escapades.config import (
     DEFAULT_AUDIT_BATCH_SIZE,
     DEFAULT_AUDIT_CHECKPOINT_INTERVAL,
@@ -629,6 +634,143 @@ class AuditDB:
         await self._maybe_checkpoint()
 
         return row_id
+
+    # ------------------------------------------------------------------
+    # Delegation logging (Phase 3a)
+    # ------------------------------------------------------------------
+
+    async def log_delegation_started(
+        self,
+        *,
+        workflow_id: str,
+        parent_sandbox_id: str,
+        agent_id: str,
+        workspace_root: str,
+        prompt: str,
+        requested_model: str | None = None,
+        requested_max_turns: int | None = None,
+        base_sha: str | None = None,
+        base_repo_url: str | None = None,
+        base_branch: str | None = None,
+    ) -> None:
+        """Insert the initial ``status="started"`` delegation row.
+
+        Called by the orchestrator's ``delegate_task`` tool just
+        before it sends ``task.assign``.  ``requested_model`` /
+        ``requested_max_turns`` capture the *intended* per-task
+        overrides so the audit trail records what the orchestrator
+        asked for — even when the L7 proxy or the sub-agent's
+        global config swaps in something else (the `model_used`
+        echoed on ``task.complete`` records the realised model, see
+        :meth:`log_delegation_complete`).
+
+        The row is later updated in place by
+        :meth:`log_delegation_complete` or
+        :meth:`log_delegation_error`.
+        """
+        async with self._session() as session:
+            session.add(
+                DelegationRow(
+                    workflow_id=workflow_id,
+                    started_at=time.time(),
+                    completed_at=None,
+                    parent_sandbox_id=parent_sandbox_id,
+                    agent_id=agent_id,
+                    workspace_root=workspace_root,
+                    prompt=prompt,
+                    requested_model=requested_model,
+                    requested_max_turns=requested_max_turns,
+                    base_sha=base_sha,
+                    base_repo_url=base_repo_url,
+                    base_branch=base_branch,
+                    status="started",
+                ),
+            )
+            await session.commit()
+        await self._maybe_checkpoint()
+
+    async def log_delegation_complete(
+        self,
+        *,
+        workflow_id: str,
+        rounds_used: int,
+        tool_calls_made: int,
+        model_used: str | None,
+        summary: str,
+        diff_size: int,
+    ) -> None:
+        """Update an in-flight delegation row with the success outcome.
+
+        Called when the sub-agent replies with ``task.complete``.
+        Sets ``status="complete"``, fills in the result fields, and
+        stamps ``completed_at``.  Idempotent — a duplicate
+        ``task.complete`` (e.g. NMB replay in Phase 4) is a no-op.
+
+        Args:
+            workflow_id: Workflow identifier — primary key on
+                ``DelegationRow``.
+            rounds_used: ``TaskCompletePayload.rounds_used``.
+            tool_calls_made: ``TaskCompletePayload.tool_calls_made``.
+            model_used: ``TaskCompletePayload.model_used``.
+            summary: ``TaskCompletePayload.summary``.
+            diff_size: Bytes of ``TaskCompletePayload.diff``.
+        """
+        async with self._session() as session:
+            await session.execute(
+                update(DelegationRow)
+                .where(DelegationRow.workflow_id == workflow_id)
+                .values(
+                    completed_at=time.time(),
+                    status="complete",
+                    rounds_used=rounds_used,
+                    tool_calls_made=tool_calls_made,
+                    model_used=model_used,
+                    summary=summary,
+                    diff_size=diff_size,
+                ),
+            )
+            await session.commit()
+        await self._maybe_checkpoint()
+
+    async def log_delegation_error(
+        self,
+        *,
+        workflow_id: str,
+        error_kind: str,
+        error_message: str,
+        recoverable: bool,
+    ) -> None:
+        """Update an in-flight delegation row with the failure outcome.
+
+        Called when the sub-agent replies with ``task.error`` (or
+        when the orchestrator's :class:`DelegationManager` wraps a
+        transport failure into the same shape).  Sets
+        ``status="error"``, captures the typed payload's
+        ``error_kind`` / ``error_message`` / ``recoverable``, and
+        stamps ``completed_at``.
+
+        Args:
+            workflow_id: Workflow identifier.
+            error_kind: One of the
+                :data:`TaskErrorPayload.error_kind` literals.
+            error_message: Human-readable description.
+            recoverable: Whether the finalisation model may
+                ``re_delegate``.
+        """
+        async with self._session() as session:
+            await session.execute(
+                update(DelegationRow)
+                .where(DelegationRow.workflow_id == workflow_id)
+                .values(
+                    completed_at=time.time(),
+                    status="error",
+                    error_kind=error_kind,
+                    error_message=error_message,
+                    recoverable=1 if recoverable else 0,
+                ),
+            )
+            await session.commit()
+        await self._maybe_checkpoint()
 
     # ------------------------------------------------------------------
     # Queries

@@ -1,0 +1,58 @@
+# Prototype NMB client sandbox policy.
+#
+# Intentionally grants only the NMB WebSocket path. The client sandbox has no
+# provider credentials and no service API egress beyond messages.local:9876.
+version: 1
+
+filesystem_policy:
+  read_only:
+    - /usr
+    - /lib
+    - /etc
+    - /proc
+    - /dev/urandom
+    - /app
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  nmb:
+    name: nemoclaw-message-bus
+    endpoints:
+      # Target dashboard design hostname. The spike keeps this entry to catch
+      # whether a future gateway binds messages.local to the broker sandbox.
+      - host: messages.local
+        port: 9876
+        access: full
+      # Observed OpenShell v0.0.26 binding: every sandbox gets a headless
+      # service in the gateway namespace. This is the route used by the smoke
+      # target until messages.local is explicitly bound to that service.
+      - host: nmb-broker-smoke.openshell.svc.cluster.local
+        port: 9876
+        access: full
+        allowed_ips:
+          - 10.42.0.0/16
+      # Forward-rendezvous route, mirroring the browser_sandbox_http lesson:
+      # the operator creates an inbound forward to the broker sandbox, and the
+      # client sandbox reaches that forwarded listener as explicit egress.
+      - host: host.docker.internal
+        port: 9876
+        access: full
+        allowed_ips:
+          # Docker Desktop / kind host-gateway ranges vary across restarts.
+          # The client debug probe observed 172.29.0.254 locally; keep this
+          # constrained to RFC1918's 172.16/12 block rather than all private IPs.
+          - 172.16.0.0/12
+          - fdc4:f303:9324::/64
+    binaries:
+      - path: /usr/local/bin/python*
+

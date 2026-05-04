@@ -70,10 +70,12 @@ class MessageBus:
     Internally creates a daemon thread running an ``asyncio`` event
     loop and an ``AsyncMessageBus`` connected within it.
 
-    The ``sandbox_id`` passed to the constructor is a human-readable
-    name (e.g. ``"orchestrator"``).  The underlying async client
-    appends a random 8-hex-char suffix to make it globally unique
-    per launch — see :class:`~nemoclaw_escapades.nmb.client.MessageBus`.
+    By default, the ``sandbox_id`` passed to the constructor is a
+    human-readable name (e.g. ``"orchestrator"``), and the underlying
+    async client appends a random 8-hex-char suffix to make it globally
+    unique per launch.  Set ``append_random_suffix=False`` when the id
+    is already an exact routing identity — see
+    :class:`~nemoclaw_escapades.nmb.client.MessageBus`.
 
     Public attributes:
         sandbox_id: Human-readable name passed at construction.  The
@@ -94,17 +96,23 @@ class MessageBus:
         self,
         sandbox_id: str,
         broker_url: str = DEFAULT_NMB_URL,
+        *,
+        append_random_suffix: bool = True,
     ) -> None:
         """Initialise the sync client (does not connect).
 
         Args:
             sandbox_id: Human-readable name for this sandbox
                 (e.g. ``"orchestrator"``).  Passed to the async client
-                which appends a random suffix for global uniqueness.
+                which appends a random suffix for global uniqueness by
+                default.
             broker_url: WebSocket URL of the NMB broker.
+            append_random_suffix: Whether the async client should add a
+                random suffix to ``sandbox_id``.
         """
         self.sandbox_id: str = sandbox_id
         self.broker_url: str = broker_url
+        self.append_random_suffix = append_random_suffix
         self._async_bus: AsyncMessageBus | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -135,7 +143,11 @@ class MessageBus:
 
         # Create the async client and connect it inside the background
         # loop.  _run() blocks until the coroutine completes.
-        self._async_bus = AsyncMessageBus(sandbox_id=self.sandbox_id, broker_url=self.broker_url)
+        self._async_bus = AsyncMessageBus(
+            sandbox_id=self.sandbox_id,
+            broker_url=self.broker_url,
+            append_random_suffix=self.append_random_suffix,
+        )
         self._run(self._async_bus.connect())
 
     def close(self) -> None:

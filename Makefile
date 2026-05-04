@@ -260,7 +260,7 @@ build: ## Build the orchestrator container image
 
 .PHONY: test
 test: ## Run unit tests (excludes integration)
-	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v --ignore=tests/integration
+	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v --ignore=tests/integration -m "not live"
 
 .PHONY: test-integration
 test-integration: ## Run multi-sandbox NMB integration tests
@@ -268,7 +268,7 @@ test-integration: ## Run multi-sandbox NMB integration tests
 
 .PHONY: test-all
 test-all: ## Run all tests (unit + integration)
-	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v
+	PYTHONPATH=src $(CONDA_RUN) pytest tests/ -v -m "not live"
 
 .PHONY: test-auth
 test-auth: ## Verify .env credentials against their APIs (no sandbox needed)
