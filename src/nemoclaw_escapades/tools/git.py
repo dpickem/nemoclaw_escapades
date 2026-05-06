@@ -48,6 +48,17 @@ _GIT_CLONE_TIMEOUT_S: int = 300
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
+def is_git_error(output: str) -> bool:
+    """Return ``True`` when *output* is the structured error text from :func:`run_git`.
+
+    :func:`run_git` formats failures as ``Exit code: <n>\\n…`` (non-zero
+    exit) or ``Error: …`` (timeout / missing binary).  Both prefixes
+    are stable across versions so callers can detect them with this
+    helper instead of duplicating the substring check.
+    """
+    return output.startswith(("Exit code:", "Error:"))
+
+
 def _build_git_env() -> dict[str, str]:
     """Build the env dict git inherits, with a ``GIT_SSL_CAINFO`` backfill.
 
@@ -86,8 +97,15 @@ def _build_git_env() -> dict[str, str]:
     return env
 
 
-async def _run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_S) -> str:
-    """Run a git command and return its output.
+async def run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_S) -> str:
+    """Run a git command in *workspace_root* and return its combined output.
+
+    Public helper shared by the model-callable ``git_*`` tools, the
+    sub-agent's lifecycle helpers in ``agent/git_helpers.py``, and the
+    orchestrator's finalisation tools.  Centralises the
+    ``GIT_SSL_CAINFO`` backfill, the per-call timeout, and the
+    structured error format so every git invocation in the codebase
+    behaves identically.
 
     Args:
         workspace_root: Working directory for the git command.
@@ -96,7 +114,10 @@ async def _run_git(workspace_root: str, *args: str, timeout: int = _GIT_TIMEOUT_
             ``_GIT_TIMEOUT_S``.
 
     Returns:
-        Combined stdout + stderr with exit code prefix on failure.
+        Combined stdout + stderr.  On non-zero exit, prefixed with
+        ``Exit code: <n>\\n``.  On timeout / missing binary, prefixed
+        with ``Error:``.  Callers can detect both with
+        :func:`is_git_error`.
     """
     cmd = ["git", *args]
     try:
@@ -159,7 +180,7 @@ def _make_git_diff(workspace_root: str) -> ToolSpec:
         args = ["diff"]
         if staged:
             args.append("--cached")
-        result = await _run_git(workspace_root, *args)
+        result = await run_git(workspace_root, *args)
         return result if result.strip() else "No uncommitted changes."
 
     return git_diff
@@ -199,10 +220,10 @@ def _make_git_commit(workspace_root: str) -> ToolSpec:
             Git output on success, or an error string from staging or commit.
         """
         if add_all:
-            add_result = await _run_git(workspace_root, "add", "-A")
+            add_result = await run_git(workspace_root, "add", "-A")
             if add_result.startswith("Error:") or add_result.startswith("Exit code:"):
                 return f"Failed to stage: {add_result}"
-        return await _run_git(workspace_root, "commit", "-m", message)
+        return await run_git(workspace_root, "commit", "-m", message)
 
     return git_commit
 
@@ -235,7 +256,7 @@ def _make_git_log(workspace_root: str) -> ToolSpec:
         Returns:
             Output of ``git log --oneline`` (possibly truncated by helpers).
         """
-        return await _run_git(
+        return await run_git(
             workspace_root, "log", f"--max-count={limit}", "--oneline", "--no-decorate"
         )
 
@@ -276,7 +297,7 @@ def _make_git_checkout(workspace_root: str) -> ToolSpec:
         Returns:
             Git output on success, or an error string.
         """
-        return await _run_git(workspace_root, "checkout", ref)
+        return await run_git(workspace_root, "checkout", ref)
 
     return git_checkout
 
@@ -389,7 +410,7 @@ def _make_git_clone(workspace_root: str, allowed_hosts: frozenset[str]) -> ToolS
         if dest_abs.exists():
             return f"Error: destination {dest!r} already exists"
 
-        return await _run_git(
+        return await run_git(
             workspace_root,
             "clone",
             repo_url,

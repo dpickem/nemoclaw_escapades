@@ -1,27 +1,40 @@
-"""Git helpers for the sub-agent's lifecycle code.
+"""Git helpers for sub-agent and orchestrator lifecycle code.
 
 Distinct from ``tools/git.py`` (which exposes ``git_*`` *model-callable*
-tools): these helpers are called by the sub-agent's NMB receive loop
-and the orchestrator's delegation manager, never by the model.
+tools): these helpers are called by the sub-agent's NMB receive loop,
+the orchestrator's delegation manager, and the orchestrator's
+finalisation flow — never by the model.
 
-Two responsibilities:
+Three responsibilities:
 
 - **Baseline resolution** — given a freshly seeded workspace, return
-  the ``WorkspaceBaseline`` the orchestrator pinned the workflow to
-  (``git rev-parse origin/<branch>`` + ``git config --get remote.origin.url``).
+  the ``WorkspaceBaseline`` the orchestrator pinned the workflow to.
 - **Baseline-anchored diff** — ``git diff <base_sha>`` for
-  ``TaskCompletePayload.diff``.
+  ``TaskCompletePayload.diff`` and the orchestrator's §6.6.3
+  cross-check.
+- **Finalisation git ops** — commit / branch / push primitives the
+  orchestrator's finalisation tools call after the sub-agent reports
+  ``task.complete``.
 
-Both reuse ``tools.git._run_git`` so timeout / TLS-bundle / output-cap
-behaviour stays consistent with the model-callable tools.
+All helpers reuse :func:`tools.git.run_git` so timeout, TLS-bundle,
+and output-cap behaviour stay consistent with the model-callable
+tools.
 
-See ``docs/design_m2b.md`` §6.6 (Workspace Baseline Semantics).
+See ``docs/design_m2b.md`` §6.6 (Workspace Baseline Semantics) and
+§7 (Work Collection and Finalization).
 """
 
 from __future__ import annotations
 
 from nemoclaw_escapades.nmb.protocol import WorkspaceBaseline
-from nemoclaw_escapades.tools.git import _run_git
+from nemoclaw_escapades.tools.git import is_git_error, run_git
+
+# ── Constants ──────────────────────────────────────────────────────
+
+# Network operations (push) get a longer timeout than local-only
+# operations (commit, checkout) because remote handshake + transfer
+# dominates the wall-clock cost.
+_PUSH_TIMEOUT_S: int = 120
 
 
 class WorkspaceNotAGitRepoError(Exception):
@@ -40,7 +53,7 @@ class GitDiffError(Exception):
     Attributes:
         workspace_root: Workspace path that failed.
         base_sha: Baseline SHA passed to ``git diff``.
-        output: Structured git-tool error text returned by ``_run_git``.
+        output: Structured git-tool error text returned by :func:`run_git`.
     """
 
     def __init__(self, workspace_root: str, base_sha: str, output: str) -> None:
@@ -48,6 +61,23 @@ class GitDiffError(Exception):
         self.workspace_root = workspace_root
         self.base_sha = base_sha
         self.output = output
+
+
+class GitCommandError(Exception):
+    """Raised when a finalisation git op fails.
+
+    Attributes:
+        command: Git subcommand that failed (e.g. ``"commit"``).
+        output: Structured git-tool error text returned by :func:`run_git`.
+    """
+
+    def __init__(self, command: str, output: str) -> None:
+        super().__init__(f"git {command} failed: {output}")
+        self.command = command
+        self.output = output
+
+
+# ── Baseline resolution ────────────────────────────────────────────
 
 
 async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaseline:
@@ -76,15 +106,15 @@ async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaselin
         RuntimeError: If git is installed but the rev-parse fails for
             an unexpected reason — surfaces the git error verbatim.
     """
-    head_sha = (await _run_git(workspace_root, "rev-parse", "HEAD")).strip()
-    if head_sha.startswith(("Exit code:", "Error:")):
+    head_sha = (await run_git(workspace_root, "rev-parse", "HEAD")).strip()
+    if is_git_error(head_sha):
         # Both "not a git repo" and "git not installed" land here;
         # callers branch on the message in the rare cases that matters.
         if "not a git repository" in head_sha or "Not a git repository" in head_sha:
             raise WorkspaceNotAGitRepoError(workspace_root)
         raise RuntimeError(f"git rev-parse HEAD failed: {head_sha}")
-    repo_url = (await _run_git(workspace_root, "config", "--get", "remote.origin.url")).strip()
-    if repo_url.startswith(("Exit code:", "Error:")):
+    repo_url = (await run_git(workspace_root, "config", "--get", "remote.origin.url")).strip()
+    if is_git_error(repo_url):
         # No origin configured (operator added a local-only branch
         # for testing).  Empty string is a valid sentinel for
         # "unknown" — the orchestrator's finalisation echo-match
@@ -103,8 +133,9 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
     """Compute the unified diff between *base_sha* and the working tree.
 
     Used by the sub-agent's NMB receive loop to populate
-    ``TaskCompletePayload.diff``.  The orchestrator can re-derive
-    the same diff at finalisation time as a cross-check (§6.6.3).
+    ``TaskCompletePayload.diff`` and by the orchestrator at
+    finalisation time to re-derive the same diff as a §6.6.3
+    cross-check.
 
     Working tree, not ``HEAD``.  The sub-agent's tool surface
     deliberately omits ``git_commit`` (orchestrator-only per §7.1),
@@ -117,14 +148,7 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
 
     To also include **untracked** files (the common case for
     sub-agent-created files like new modules), we first mark every
-    untracked path with ``git add --intent-to-add --all``.  That
-    registers the paths in the index without staging their content,
-    so the subsequent ``git diff`` reports them as additions
-    starting from an empty state.  The index mutation is harmless
-    here: the sub-agent process is single-shot and the workspace is
-    either thrown away on completion (Phase 3b) or re-cloned by
-    finalisation, so we never need a pristine ``.git/index`` past
-    this point.
+    untracked path with ``git add --intent-to-add --all``.
 
     Args:
         workspace_root: Absolute path to the workspace.
@@ -140,17 +164,96 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
     # Best-effort: ``--intent-to-add`` failures (read-only repo,
     # weird permissions) shouldn't sink the diff entirely — we still
     # get the tracked-file diff below.  The error string surfaces in
-    # the sub-agent's structured log via ``_run_git``.
-    await _run_git(workspace_root, "add", "--intent-to-add", "--all")
-    diff = await _run_git(workspace_root, "diff", base_sha)
-    if _is_git_error(diff):
+    # the sub-agent's structured log via :func:`run_git`.
+    await run_git(workspace_root, "add", "--intent-to-add", "--all")
+    diff = await run_git(workspace_root, "diff", base_sha)
+    if is_git_error(diff):
         raise GitDiffError(workspace_root, base_sha, diff)
     return diff
 
 
-def _is_git_error(output: str) -> bool:
-    """Return whether ``_run_git`` produced its structured error text."""
-    return output.startswith(("Exit code:", "Error:"))
+# ── Finalisation git ops ───────────────────────────────────────────
+
+
+async def commit_workspace(workspace_root: str, message: str) -> str:
+    """Stage all changes and create a commit with *message*.
+
+    Returns the commit's stdout/stderr text on success.  Treats
+    "nothing to commit" as success (returns the message verbatim) —
+    finalisation may legitimately run on a workspace whose only
+    edits were already staged-and-committed by an iteration of the
+    sub-agent.
+
+    Args:
+        workspace_root: Absolute path to the workspace.
+        message: Commit message (passed to ``git commit -m``).
+
+    Returns:
+        Combined git output.  Empty changes return the
+        ``"nothing to commit"`` line verbatim.
+
+    Raises:
+        GitCommandError: If ``git add`` or ``git commit`` itself
+            fails for any reason other than empty changes.
+    """
+    add_result = await run_git(workspace_root, "add", "-A")
+    if is_git_error(add_result):
+        raise GitCommandError("add", add_result)
+    commit_result = await run_git(workspace_root, "commit", "-m", message)
+    if is_git_error(commit_result) and "nothing to commit" not in commit_result:
+        raise GitCommandError("commit", commit_result)
+    return commit_result
+
+
+async def checkout_branch(workspace_root: str, branch: str, *, create: bool = True) -> str:
+    """Switch to *branch*, creating it if needed.
+
+    Args:
+        workspace_root: Absolute path to the workspace.
+        branch: Branch name to switch to.
+        create: When True (default), pass ``-B`` so an existing branch
+            is reset to HEAD and a missing branch is created.  Pass
+            False to fail if *branch* doesn't already exist.
+
+    Returns:
+        Git output on success.
+
+    Raises:
+        GitCommandError: If the checkout fails.
+    """
+    args: tuple[str, ...] = ("checkout", "-B", branch) if create else ("checkout", branch)
+    result = await run_git(workspace_root, *args)
+    if is_git_error(result):
+        raise GitCommandError("checkout", result)
+    return result
+
+
+async def push_branch(workspace_root: str, branch: str, *, remote: str = "origin") -> str:
+    """Push *branch* to *remote* with upstream tracking.
+
+    Uses :data:`_PUSH_TIMEOUT_S` since network handshake + transfer
+    dominates wall-clock cost.
+
+    Args:
+        workspace_root: Absolute path to the workspace.
+        branch: Local branch name to push.
+        remote: Remote name (default ``origin``).
+
+    Returns:
+        Git output on success.
+
+    Raises:
+        GitCommandError: If the push fails (auth, divergence, etc.).
+    """
+    result = await run_git(
+        workspace_root, "push", "-u", remote, branch, timeout=_PUSH_TIMEOUT_S
+    )
+    if is_git_error(result):
+        raise GitCommandError("push", result)
+    return result
+
+
+# ── Internal ───────────────────────────────────────────────────────
 
 
 async def _is_shallow(workspace_root: str) -> bool:
@@ -166,10 +269,7 @@ async def _is_shallow(workspace_root: str) -> bool:
     ``git fetch --unshallow`` defensively and proceed.  The opposite
     default (``out == "true"``) would skip the deepen step on git
     failure and crash at rebase time when the missing history
-    finally caught up with us.  The Pydantic model
-    (:class:`WorkspaceBaseline.is_shallow`) and the ``delegate_task``
-    JSON schema both default to ``True`` for the same reason — this
-    helper now matches them.
+    finally caught up with us.
     """
-    out = (await _run_git(workspace_root, "rev-parse", "--is-shallow-repository")).strip()
+    out = (await run_git(workspace_root, "rev-parse", "--is-shallow-repository")).strip()
     return out != "false"

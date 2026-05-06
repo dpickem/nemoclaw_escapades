@@ -328,11 +328,11 @@ class TestGitEnvBackfill:
 
 
 class TestGitSubprocessEnvWiring:
-    """``_run_git`` actually passes the backfilled env to the subprocess.
+    """``run_git`` actually passes the backfilled env to the subprocess.
 
     ``_build_git_env`` is unit-tested above; this pair of tests covers
     the wiring at the ``create_subprocess_exec`` call site — easy to
-    regress if someone refactors ``_run_git``.
+    regress if someone refactors ``run_git``.
     """
 
     async def test_git_subprocess_receives_backfilled_env(
@@ -360,7 +360,7 @@ class TestGitSubprocessEnvWiring:
 
         monkeypatch.setattr(git_mod.asyncio, "create_subprocess_exec", _fake_exec)
         # Any git invocation exercises the same path; use the cheapest.
-        await git_mod._run_git(str(workspace), "log", "--oneline", "-1")
+        await git_mod.run_git(str(workspace), "log", "--oneline", "-1")
         assert captured_env.get("GIT_SSL_CAINFO") == "/etc/ssl/openshell-ca.pem"
 
     async def test_git_subprocess_env_unchanged_in_local_dev(
@@ -387,5 +387,5 @@ class TestGitSubprocessEnvWiring:
         import nemoclaw_escapades.tools.git as git_mod
 
         monkeypatch.setattr(git_mod.asyncio, "create_subprocess_exec", _fake_exec)
-        await git_mod._run_git(str(workspace), "log", "--oneline", "-1")
+        await git_mod.run_git(str(workspace), "log", "--oneline", "-1")
         assert "GIT_SSL_CAINFO" not in captured_env
