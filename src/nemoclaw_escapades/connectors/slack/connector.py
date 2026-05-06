@@ -354,6 +354,28 @@ class SlackConnector(ConnectorBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def client(self) -> Any:
+        """Bolt's ``AsyncWebClient`` for this connector's bot identity.
+
+        Exposed so the finalisation renderer (constructed by ``main.py``)
+        can post messages to Slack on the orchestrator's behalf
+        without standing up a second authenticated client.  See
+        ``connectors/slack/finalization.py::SlackFinalizationRenderer``.
+        """
+        return self._app.client
+
+    def set_handler(self, handler: MessageHandler) -> None:
+        """Re-bind the connector's inbound message handler.
+
+        Used by ``main.py`` so the connector can be constructed
+        before the orchestrator (the renderer wants the connector's
+        client) and then have its handler wired afterwards.  Calling
+        this after :meth:`start` is harmless — Bolt routes events
+        through ``self._handler`` lazily on each delivery.
+        """
+        self._handler = handler
+
     async def start(self) -> None:
         """Authenticate with Slack and open the socket-mode WebSocket.
 

@@ -31,6 +31,9 @@ class ErrorCategory(StrEnum):
 # (``orchestrator`` → ``models``, ``connectors`` → ``models``).
 APPROVAL_ACTION_APPROVE: str = "approve_write"
 APPROVAL_ACTION_DENY: str = "deny_write"
+FINALIZATION_ACTION_PUSH_PR: str = "finalization_push_pr"
+FINALIZATION_ACTION_ITERATE: str = "finalization_iterate"
+FINALIZATION_ACTION_DISCARD: str = "finalization_discard"
 
 
 # ---------------------------------------------------------------------------

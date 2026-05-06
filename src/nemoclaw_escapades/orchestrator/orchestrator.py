@@ -79,6 +79,14 @@ from nemoclaw_escapades.models.types import (
 )
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.observability.timer import Timer
+from nemoclaw_escapades.orchestrator.finalization_actions import (
+    FinalizationActionHandler,
+    is_finalization_action,
+)
+from nemoclaw_escapades.orchestrator.request_context import (
+    RequestContext,
+    set_request_context,
+)
 from nemoclaw_escapades.orchestrator.transcript_repair import (
     CONTINUATION_PROMPT,
     MAX_CONTINUATION_RETRIES,
@@ -124,6 +132,7 @@ class Orchestrator:
         tools: ToolRegistry | None = None,
         audit: AuditDB | None = None,
         agent_id: str = "",
+        finalization_action_handler: FinalizationActionHandler | None = None,
     ) -> None:
         """Initialise the orchestrator.
 
@@ -149,6 +158,13 @@ class Orchestrator:
             agent_id: Identifier surfaced in the runtime-metadata prompt
                 layer (useful for multi-agent traceability once M2b
                 lands).  Empty string omits the line.
+            finalization_action_handler: Optional handler that routes
+                ``FINALIZATION_ACTION_*`` button clicks to the
+                matching :class:`FinalizationSession` method.  When
+                ``None`` (e.g. delegation disabled), button clicks
+                fall through and are handled by the regular agent
+                loop, which is the right behaviour for a connector
+                that has no live workflows to act on.
         """
         self._backend = backend
         self._config = config
@@ -159,6 +175,7 @@ class Orchestrator:
         self._tools = tools
         self._audit = audit
         self._agent_id = agent_id
+        self._finalization_actions = finalization_action_handler
         # LayeredPromptBuilder owns per-thread conversation histories,
         # the 5-layer system prompt (identity, task context, cache
         # boundary, runtime metadata, channel hint), and the message
@@ -247,15 +264,45 @@ class Orchestrator:
         # the request_id so every message still gets a unique key.
         thread_key = request.thread_ts or request.request_id
 
+        # Plumb the request context to tools that need it (delegate_task
+        # needs channel/thread to register the workflow with the
+        # dispatcher; the renderer reads it back when rendering
+        # finalisation results).
+        set_request_context(
+            RequestContext(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                thread_ts=request.thread_ts,
+                source=request.source,
+            )
+        )
+
         # ── 1. Button-click dispatch ──────────────────────────────────
-        # If the request carries an action payload, it's a button click
-        # from a previous approval prompt — route it directly to the
-        # approval/denial handler instead of running inference.
+        # If the request carries an action payload, route it directly
+        # to the matching handler instead of running inference.
         if request.action:
             if request.action.action_id == APPROVAL_ACTION_APPROVE:
                 return await self._handle_write_approval(request, thread_key, on_status)
             if request.action.action_id == APPROVAL_ACTION_DENY:
                 return self._handle_write_denial(request, thread_key)
+            if (
+                self._finalization_actions is not None
+                and is_finalization_action(request)
+            ):
+                return await self._finalization_actions.handle(request)
+
+        # ── 1b. Pending iteration text ──────────────────────────────────
+        # When the user previously clicked Iterate, the next text
+        # message in that thread is the iteration prompt.  Routed to
+        # ``re_delegate`` here without running the planner — the user's
+        # intent is unambiguous.
+        if (
+            self._finalization_actions is not None
+            and self._finalization_actions.is_pending_iteration(thread_key)
+        ):
+            return await self._finalization_actions.consume_iteration_feedback(
+                request, thread_key
+            )
 
         # ── 2. Stale approval cleanup ─────────────────────────────────
         # If the user sends a new text message in a thread that has a
