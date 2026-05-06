@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -557,6 +558,7 @@ class AuditDB:
     async def log_tool_call(
         self,
         *,
+        row_id: str | None = None,
         session_id: str | None = None,
         thread_ts: str | None = None,
         service: str,
@@ -572,6 +574,10 @@ class AuditDB:
         error_code: str | None = None,
         error_message: str | None = None,
         response_payload: str = "",
+        workflow_id: str | None = None,
+        parent_sandbox_id: str | None = None,
+        agent_id: str | None = None,
+        agent_role: str | None = None,
     ) -> str:
         """Log a single tool invocation.
 
@@ -603,37 +609,82 @@ class AuditDB:
         Raises:
             RuntimeError: If the DB is not open.
         """
-        row_id = uuid.uuid4().hex[:16]
+        row_id = row_id or uuid.uuid4().hex[:16]
         payload_size = len(response_payload.encode()) if response_payload else 0
         stored_payload = response_payload if self.persist_payloads else ""
 
         async with self._session() as session:
-            session.add(
-                ToolCallRow(
-                    id=row_id,
-                    timestamp=time.time(),
-                    session_id=session_id,
-                    thread_ts=thread_ts,
-                    service=service,
-                    command=command,
-                    args=args,
-                    operation_type=operation_type,
-                    approval_status=approval_status,
-                    approved_by=approved_by,
-                    approval_time_ms=approval_time_ms,
-                    exit_code=exit_code,
-                    duration_ms=duration_ms,
-                    success=1 if success else 0,
-                    error_code=error_code,
-                    error_message=error_message,
-                    response_payload=stored_payload,
-                    payload_size=payload_size,
+            try:
+                session.add(
+                    ToolCallRow(
+                        id=row_id,
+                        timestamp=time.time(),
+                        session_id=session_id,
+                        thread_ts=thread_ts,
+                        service=service,
+                        command=command,
+                        args=args,
+                        operation_type=operation_type,
+                        approval_status=approval_status,
+                        approved_by=approved_by,
+                        approval_time_ms=approval_time_ms,
+                        exit_code=exit_code,
+                        duration_ms=duration_ms,
+                        success=1 if success else 0,
+                        error_code=error_code,
+                        error_message=error_message,
+                        response_payload=stored_payload,
+                        payload_size=payload_size,
+                        workflow_id=workflow_id,
+                        parent_sandbox_id=parent_sandbox_id,
+                        agent_id=agent_id,
+                        agent_role=agent_role,
+                    )
                 )
-            )
-            await session.commit()
+                await session.commit()
+            except IntegrityError:
+                # Idempotent insert path for ``ingest_audit_flush``:
+                # the sub-agent's ``AuditBuffer`` assigns stable row
+                # IDs so a replayed ``audit.flush`` (Phase 4 NMB
+                # at-least-once delivery, or the JSONL-fallback
+                # belt-and-suspenders path) lands on a primary-key
+                # collision rather than a duplicate insert.  We
+                # swallow the collision and return the existing
+                # row_id so callers can't tell whether they wrote
+                # the row or it was already there.
+                await session.rollback()
+                return row_id
         await self._maybe_checkpoint()
 
         return row_id
+
+    async def ingest_audit_flush(self, payload: Any) -> int:
+        """Insert rows from an ``AuditFlushPayload`` idempotently."""
+        count = 0
+        for item in payload.tool_calls:
+            await self.log_tool_call(
+                row_id=item.id,
+                session_id=payload.workflow_id,
+                service=item.service,
+                command=item.command,
+                args=item.args,
+                operation_type=item.operation_type,
+                approval_status=item.approval_status,
+                approved_by=item.approved_by,
+                approval_time_ms=item.approval_time_ms,
+                exit_code=item.exit_code,
+                duration_ms=item.duration_ms,
+                success=item.success,
+                error_code=item.error_code,
+                error_message=item.error_message,
+                response_payload=item.response_payload,
+                workflow_id=payload.workflow_id,
+                parent_sandbox_id=payload.parent_sandbox_id,
+                agent_id=payload.agent_id,
+                agent_role=payload.agent_role,
+            )
+            count += 1
+        return count
 
     # ------------------------------------------------------------------
     # Delegation logging (Phase 3a)
