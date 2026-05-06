@@ -9,10 +9,13 @@ from nemoclaw_escapades.nmb.models import (
     PendingRequest,
 )
 from nemoclaw_escapades.nmb.protocol import (
+    AUDIT_FLUSH,
     TASK_ASSIGN,
     TASK_COMPLETE,
     TASK_ERROR,
     TASK_PROGRESS,
+    AuditFlushPayload,
+    AuditToolCallPayload,
     ContextFile,
     MessageType,
     PayloadValidationError,
@@ -26,10 +29,13 @@ from nemoclaw_escapades.nmb.protocol import (
 )
 
 __all__ = [
+    "AUDIT_FLUSH",
     "TASK_ASSIGN",
     "TASK_COMPLETE",
     "TASK_ERROR",
     "TASK_PROGRESS",
+    "AuditFlushPayload",
+    "AuditToolCallPayload",
     "ContextFile",
     "DeliveryStatus",
     "ErrorCode",
