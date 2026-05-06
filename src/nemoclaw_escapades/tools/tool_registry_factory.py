@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from nemoclaw_escapades.audit.db import AuditDB
     from nemoclaw_escapades.config import AppConfig
     from nemoclaw_escapades.orchestrator.delegation import DelegationManager
+    from nemoclaw_escapades.orchestrator.dispatcher import WorkflowDispatcher
 
 
 def create_coding_tool_registry(
@@ -111,6 +112,7 @@ def build_full_tool_registry(
     skill_loader: SkillLoader | None = None,
     *,
     delegation_manager: DelegationManager | None = None,
+    dispatcher: WorkflowDispatcher | None = None,
     audit: AuditDB | None = None,
 ) -> ToolRegistry:
     """Top-level factory — assemble the full process-wide tool registry.
@@ -185,6 +187,7 @@ def build_full_tool_registry(
             manager=delegation_manager,
             parent_sandbox_id=config.nmb.sandbox_id or "orchestrator",
             workspace_root=workspace_root,
+            dispatcher=dispatcher,
             audit=audit,
         )
 

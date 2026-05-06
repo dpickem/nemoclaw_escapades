@@ -1,19 +1,23 @@
-"""``delegate_task`` — orchestrator-side tool for spawning a sub-agent.
+"""``delegate_task`` — orchestrator-side fire-and-forget tool.
 
 The orchestrator's planning model calls this tool when the user asks
-for coding work that benefits from a focused sub-agent (file edits,
-test runs, multi-step refactors).  The tool is a thin wrapper around
-:class:`DelegationManager`: it builds a ``TaskAssignPayload`` from
-the model's arguments, runs the manager's
-:meth:`DelegationManager.delegate`, and returns the sub-agent's
-``summary`` (or a structured error) for the model to present.
+for coding work that benefits from a focused sub-agent.  The tool
+spawns the sub-agent, sends ``task.assign``, registers the workflow
+with the :class:`WorkflowDispatcher`, and **returns immediately**.
 
-In Phase 3a the tool's return value is a plain string — Phase 3b's
-finalisation flow will wrap it in a structured result so the
-finalisation model can branch on success vs ``recoverable`` failure.
+The sub-agent's eventual ``task.complete`` / ``task.error`` /
+``audit.flush`` arrive on the dispatcher's event loop and are routed
+to the per-workflow handler — the model's chat thread does **not**
+block on sub-agent latency (design §7.1, §8.2).  The user sees:
 
-The tool is deliberately **orchestrator-only** in M2b: a coding sub-
-agent shouldn't be able to delegate further (the depth-1 cap in
+1. An immediate "I've delegated this; results will appear in this
+   thread" reply (composed by the orchestrator's main agent loop
+   from this tool's return string).
+2. A separate Slack message later, posted by the finalisation
+   renderer, carrying the synthesised result and action buttons.
+
+The tool is deliberately **orchestrator-only** in M2b: a coding
+sub-agent shouldn't be able to delegate further (the depth-1 cap in
 :class:`DelegationConfig` enforces this).  Don't register
 ``delegate_task`` in ``create_coding_tool_registry``.
 """
@@ -29,13 +33,17 @@ from nemoclaw_escapades.nmb.protocol import (
 )
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.orchestrator.delegation import DelegationError, DelegationManager
+from nemoclaw_escapades.orchestrator.request_context import current_request_context
+from nemoclaw_escapades.orchestrator.workflow import WorkflowContext
 from nemoclaw_escapades.tools.registry import ToolRegistry, ToolSpec, tool
 
 if TYPE_CHECKING:
     from nemoclaw_escapades.audit.db import AuditDB
+    from nemoclaw_escapades.orchestrator.dispatcher import WorkflowDispatcher
 
 logger = get_logger("tools.delegation")
 
+# Logical toolset name used by the registry for grouping
 _TOOLSET: str = "delegation"
 
 
@@ -44,6 +52,7 @@ def _make_delegate_task(
     *,
     parent_sandbox_id: str,
     workspace_root: str,
+    dispatcher: WorkflowDispatcher | None = None,
     default_max_turns: int | None = None,
     default_model: str | None = None,
     audit: AuditDB | None = None,
@@ -51,26 +60,18 @@ def _make_delegate_task(
     """Bind a ``delegate_task`` tool spec to a manager + workspace.
 
     Args:
-        manager: The orchestrator's :class:`DelegationManager`
-            instance.  Tests can pass a stub manager that records
-            invocations without spawning real processes.
+        manager: The orchestrator's :class:`DelegationManager`.
         parent_sandbox_id: Orchestrator's NMB sandbox identity.
-            Stamped onto every spawned ``TaskAssignPayload`` so
-            audit records can trace the delegation tree (and so
-            future depth checks have something to inspect).
-        workspace_root: Absolute path the sub-agent's workspace
-            subdirectories will land under.  Each delegation gets
-            its own ``<workspace_root>/agent-<id>`` subdir
-            (matching the §4.2.1 isolation invariant).  This is
-            registration-time runtime context, not a model argument;
-            a future nested agent would register its own tool with
-            its own parent identity and workspace root.
-        default_max_turns: Per-shape default for ``max_turns`` (the
-            §17 Q4 lookup table).  ``None`` means "inherit the
-            sub-agent's config default."
-        default_model: Per-shape default for ``model``.  Operationally
-            a no-op in M2b's same-sandbox topology (§6.5.1) but
-            recorded in the audit trail for M3 to pick up.
+        workspace_root: Absolute path the sub-agent's per-task
+            subdirectories will land under.
+        dispatcher: Workflow dispatcher to register the new workflow
+            with.  Required for the dispatcher-driven finalisation
+            path; ``None`` runs in legacy "no finalisation" mode
+            (used by tests that exercise the manager directly).
+        default_max_turns: Per-shape default for ``max_turns``.
+        default_model: Per-shape default for ``model``.
+        audit: Optional :class:`AuditDB` for ``log_delegation_*``
+            writes.
 
     Returns:
         A :class:`ToolSpec` ready to register.
@@ -80,7 +81,8 @@ def _make_delegate_task(
         "delegate_task",
         "Delegate a coding task to a sub-agent. Use for multi-step coding "
         "work, file edits, or test runs that benefit from a focused "
-        "sandbox. Returns the sub-agent's summary on completion.",
+        "sandbox. Returns immediately; the sub-agent's work appears as a "
+        "separate message in the thread when ready.",
         {
             "type": "object",
             "properties": {
@@ -152,6 +154,20 @@ def _make_delegate_task(
             model=model or default_model,
             workspace_baseline=baseline,
         )
+        request_ctx = current_request_context()
+        workflow_ctx = WorkflowContext(
+            workflow_id=task.workflow_id,
+            task=task,
+            channel_id=request_ctx.channel_id if request_ctx else None,
+            thread_ts=request_ctx.thread_ts if request_ctx else None,
+            request_id=request_ctx.request_id if request_ctx else "",
+        )
+        # Register with the dispatcher BEFORE sending task.assign so a
+        # fast sub-agent can't race the registration: the dispatcher
+        # would then drop the resulting task.complete as "unknown
+        # workflow" (see WorkflowDispatcher._handle_task_complete).
+        if dispatcher is not None:
+            dispatcher.register_workflow(workflow_ctx)
         logger.info(
             "Delegating task",
             extra={
@@ -175,8 +191,10 @@ def _make_delegate_task(
                 base_branch=baseline.branch if baseline else None,
             )
         try:
-            result = await manager.delegate(task)
+            result = await manager.delegate(task, context=workflow_ctx)
         except DelegationError as exc:
+            if dispatcher is not None:
+                dispatcher.deregister_workflow(task.workflow_id)
             logger.error(
                 "Delegation failed",
                 extra={"workflow_id": task.workflow_id, "error": str(exc)},
@@ -190,16 +208,12 @@ def _make_delegate_task(
                     recoverable=payload.recoverable if payload else False,
                 )
             return f"Delegation failed: {exc}"
-        if audit is not None:
-            await audit.log_delegation_complete(
-                workflow_id=task.workflow_id,
-                rounds_used=result.complete.rounds_used,
-                tool_calls_made=result.complete.tool_calls_made,
-                model_used=result.complete.model_used,
-                summary=result.complete.summary,
-                diff_size=len(result.complete.diff.encode()),
-            )
-        return result.complete.summary
+
+        return (
+            f"Delegated. Workflow {result.workflow_id} is running in sub-agent "
+            f"{result.sub_agent_sandbox_id}; I'll post the results in this thread "
+            "when it finishes."
+        )
 
     return delegate_task
 
@@ -210,6 +224,7 @@ def register_delegation_tool(
     manager: DelegationManager,
     parent_sandbox_id: str,
     workspace_root: str,
+    dispatcher: WorkflowDispatcher | None = None,
     default_max_turns: int | None = None,
     default_model: str | None = None,
     audit: AuditDB | None = None,
@@ -218,25 +233,26 @@ def register_delegation_tool(
 
     Call this from ``build_full_tool_registry`` (or directly from
     the orchestrator's startup code in ``main.py``) once the
-    :class:`DelegationManager` is constructed.
+    :class:`DelegationManager`, :class:`WorkflowDispatcher`, and
+    audit DB are constructed.
 
     Args:
         registry: Tool registry to mutate.
         manager: Constructed :class:`DelegationManager`.
         parent_sandbox_id: Orchestrator's NMB sandbox identity.
         workspace_root: Base path for sub-agent workspaces.
+        dispatcher: Workflow dispatcher; required for the
+            dispatcher-driven finalisation flow.
         default_max_turns: Optional per-shape default.
         default_model: Optional per-shape default.
-        audit: Optional :class:`AuditDB`.  When supplied, every
-            delegation goes through ``log_delegation_started`` /
-            ``log_delegation_complete`` / ``log_delegation_error``
-            so the workflow trail is queryable post-hoc.
+        audit: Optional :class:`AuditDB` for ``log_delegation_*``.
     """
     registry.register(
         _make_delegate_task(
             manager,
             parent_sandbox_id=parent_sandbox_id,
             workspace_root=workspace_root,
+            dispatcher=dispatcher,
             default_max_turns=default_max_turns,
             default_model=default_model,
             audit=audit,
