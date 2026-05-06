@@ -278,10 +278,13 @@ logs: ## Show broker and client smoke logs
 	@test ! -f "$(CLIENT_LOG)" || sed -n '1,220p' "$(CLIENT_LOG)"
 
 .PHONY: stop
-stop: ## Delete smoke-test sandboxes and stop port forwarding
+stop: ## Delete smoke-test sandboxes, stop port forwarding, and kill broker launcher
 	@openshell forward stop "$(NMB_PORT)" >/dev/null 2>&1 || true
 	@openshell sandbox delete "$(CLIENT_SANDBOX)" >/dev/null 2>&1 || true
 	@openshell sandbox delete "$(BROKER_SANDBOX)" >/dev/null 2>&1 || true
+	@if [ -f "$(BROKER_PID)" ]; then \
+		kill "$$(cat "$(BROKER_PID)")" >/dev/null 2>&1 || true; \
+	fi
 	@if [ -L "$(TEMP_DOCKERFILE)" ] && [ "$$(readlink "$(TEMP_DOCKERFILE)")" = "$(DOCKERFILE_REL)" ]; then \
 		rm -f "$(TEMP_DOCKERFILE)"; \
 	fi
