@@ -2,7 +2,7 @@
 
 > **Status:** Proposed
 >
-> **Last updated:** 2026-04-10
+> **Last updated:** 2026-05-04
 >
 > **Related:**
 > [NMB Design](nmb_design.md) |
@@ -36,17 +36,43 @@ flowchart LR
   orchestratorSandbox["OrchestratorSandbox"]
   openShellGateway["OpenShellGateway"]
   childSandbox["ChildSandbox"]
-  nmbBroker["NMBBroker(messages.local)"]
+  rendezvous["Host/Gateway Forward or Tunnel"]
+  nmbBroker["NMBBroker inside orchestrator sandbox"]
 
   orchestratorSandbox -->|"openshell sandbox create/delete"| openShellGateway
   openShellGateway -->|"provision + lifecycle"| childSandbox
-  orchestratorSandbox <-->|"control + result messages"| nmbBroker
-  childSandbox <-->|"task + status messages"| nmbBroker
+  nmbBroker <-->|"operator-created port forward / tunnel"| rendezvous
+  childSandbox -->|"NMB WebSocket egress"| rendezvous
+  orchestratorSandbox <-->|"loopback NMB"| nmbBroker
 ```
 
 Key point: the orchestrator sandbox and child sandboxes are sibling containers
 managed by the gateway. "Parent/child" is a logical relationship tracked in NMB
 messages and task state.
+
+Current OpenShell constraint: direct sandbox-to-sandbox service discovery for a
+process listening inside another sandbox is not yet a proven primitive.  For the
+working prototype, something outside the pair of sandboxes facilitated the
+connection: the broker sandbox exposed `0.0.0.0:9876` through an operator-created
+OpenShell forward, and the client sandbox connected to that forwarded listener
+with normal policy-governed egress.
+
+The same traffic pattern can be initiated by another sandbox, not only by a
+host/browser: the source sandbox opens an outbound connection, and the target
+sandbox receives it on a server bound to `0.0.0.0:<port>`.  The important
+requirement is routing plus policy.  The source sandbox must have
+`network_policies` egress for the target endpoint, whether that endpoint is
+today's external forward/tunnel or a future first-class sandbox service name
+such as `<sandbox-name>.openshell.svc.cluster.local:<port>` or
+`messages.local:9876`.
+
+This means SSH tunneling or an OpenShell port forward is the correct **current
+workaround** for connecting sandbox-resident services together.  It should be
+understood as an external rendezvous path, not as one sandbox SSHing into another
+and not as the final target architecture.  When OpenShell provides native
+sandbox-to-sandbox service routing, the NMB broker route should move to that
+first-class mechanism (for example a future `messages.local:9876` binding) and
+the tunnel/forward workaround should be removed.
 
 ---
 
@@ -124,6 +150,27 @@ Target file: [`policies/orchestrator.yaml`](../policies/orchestrator.yaml)
 - Include `/usr/local/bin/openshell` in allowed binaries for that endpoint.
 - Keep the scope narrow to the configured gateway host/port only.
 
+For message-plane connectivity between sibling sandboxes, do not assume that the
+child can connect directly to another sandbox's Kubernetes service name or to
+`messages.local`.  Until OpenShell ships native sandbox-to-sandbox service
+routing, the child policy must explicitly allow the externally facilitated NMB
+endpoint chosen by the deployment.  In the prototype, that endpoint is the
+forwarded broker listener at `host.docker.internal:9876`; see
+[`prototypes/nmb_sandbox_communication`](../prototypes/nmb_sandbox_communication).
+
+If native sandbox service routing becomes available, the model is still
+source-side egress control: a child sandbox that initiates HTTP or WebSocket
+traffic to a sibling sandbox must explicitly allow that sibling service host and
+port in its own `network_policies`, and the sibling service must listen on
+`0.0.0.0:<port>` inside its sandbox.  Do not rely on the host/browser
+`--forward` path as the long-term mechanism for sandbox-initiated traffic.
+
+If the deployment uses an SSH tunnel instead of `openshell --forward`, model it
+the same way: the tunnel endpoint is the temporary external rendezvous, and the
+child sandbox receives only the minimum egress needed to reach that endpoint.
+Do not grant broad private-network egress just to make sandbox-to-sandbox
+connectivity work.
+
 ### 6.2  Runtime Configuration
 
 Targets:
@@ -166,7 +213,9 @@ Add optional settings such as:
 
 - **Integration tests**
   - Orchestrator sandbox launches child sandbox successfully.
-  - Child connects to NMB and exchanges one request/reply cycle.
+  - Child connects to NMB through the configured external rendezvous
+    (forward/tunnel today, native OpenShell service route later) and exchanges
+    one request/reply cycle.
   - Failure path emits `spawn.failed` and does not leak resources.
   - Cleanup path always issues delete (normal and timeout cases).
 
@@ -181,6 +230,9 @@ Add optional settings such as:
   and support immediate rollback by setting `OPENSHELL_VERSION` explicitly.
 - **Privilege creep:** no Docker socket mount; OpenShell gateway remains the
   only control-plane surface.
+- **Temporary tunnel dependency:** sandbox-to-sandbox service routing currently
+  needs an external forward/tunnel.  Treat that as an MVP workaround with narrow
+  policy, explicit cleanup, and a migration path to native OpenShell routing.
 
 ---
 
