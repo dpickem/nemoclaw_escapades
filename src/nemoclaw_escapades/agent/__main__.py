@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nemoclaw_escapades.agent.approval import AutoApproval
+from nemoclaw_escapades.agent.audit_buffer import AuditBuffer
 from nemoclaw_escapades.agent.git_helpers import (
     GitDiffError,
     WorkspaceNotAGitRepoError,
@@ -61,6 +62,7 @@ from nemoclaw_escapades.config import (
     load_system_prompt,
 )
 from nemoclaw_escapades.nmb.protocol import (
+    AUDIT_FLUSH,
     TASK_ASSIGN,
     TASK_COMPLETE,
     TASK_ERROR,
@@ -86,6 +88,7 @@ from nemoclaw_escapades.tools.registry import ToolRegistry
 from nemoclaw_escapades.tools.tool_registry_factory import create_coding_tool_registry
 
 if TYPE_CHECKING:
+    from nemoclaw_escapades.audit.sink import AuditSink
     from nemoclaw_escapades.nmb.client import MessageBus
     from nemoclaw_escapades.nmb.models import NMBMessage
 
@@ -177,6 +180,7 @@ async def _run_task(
     logger: logging.Logger | _MergingAdapter,
     *,
     loop_config: AgentLoopConfig | None = None,
+    audit: AuditSink | None = None,
 ) -> AgentLoopResult:
     """Run one task end-to-end and return the loop result.
 
@@ -223,17 +227,7 @@ async def _run_task(
         # ``TaskAssignPayload.{max_turns,model}`` and arrive here as
         # a ``dataclasses.replace`` of that default.
         config=loop_config or config.agent_loop,
-        # Phase 1 ships the sub-agent without its own ``AuditDB``: the
-        # design (``docs/design_m2b.md`` §13) is that sub-agent tool
-        # calls accumulate in an in-memory ``AuditBuffer`` and flush
-        # to the orchestrator over NMB, which writes them to the
-        # single authoritative audit DB.  Opening a second DB here
-        # would fight the orchestrator for the ``/sandbox/audit.db``
-        # write lock and lose the agent-id attribution.
-        # ``AuditBuffer`` lands in Phase 3b alongside the NMB receive
-        # loop; until then the sub-agent runs without audit.  Tool
-        # invocations still surface in the structured log.
-        audit=None,
+        audit=audit,
         # Sub-agents run inside their own sandbox / workspace, so auto-
         # approve writes — any external containment is provided by the
         # sandbox policy, not the approval gate.  The orchestrator's
@@ -426,9 +420,15 @@ async def _await_and_handle_one_task(
             "is_iteration": task.is_iteration,
         },
     )
+    audit_buffer = AuditBuffer(
+        workflow_id=task.workflow_id,
+        parent_sandbox_id=task.parent_sandbox_id,
+        agent_id=task.agent_id,
+        agent_role="coding",
+    )
 
     try:
-        complete = await _run_assigned_task(task, config, backend, logger)
+        complete = await _run_assigned_task(task, config, backend, logger, audit=audit_buffer)
     except Exception as exc:
         # Don't crash the process — emit a structured task.error so
         # the orchestrator's finalisation flow can surface the failure
@@ -440,6 +440,7 @@ async def _await_and_handle_one_task(
             recoverable=_is_recoverable(exc),
             traceback=traceback.format_exc(),
         )
+        await _flush_audit_buffer(bus, task, audit_buffer, logger)
         await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error_payload))
         logger.error(
             "Sent task.error",
@@ -452,6 +453,7 @@ async def _await_and_handle_one_task(
         return 0
 
     try:
+        await _flush_audit_buffer(bus, task, audit_buffer, logger)
         await bus.reply(assign_msg, type=TASK_COMPLETE, payload=dump(complete))
     except Exception:
         # The task succeeded; only delivery of the success payload failed.
@@ -551,6 +553,8 @@ async def _run_assigned_task(
     config: AppConfig,
     backend: BackendBase,
     logger: logging.Logger | _MergingAdapter,
+    *,
+    audit: AuditSink | None = None,
 ) -> TaskCompletePayload:
     """Run one validated task and return the success payload.
 
@@ -626,6 +630,7 @@ async def _run_assigned_task(
         config,
         logger,
         loop_config=loop_config,
+        audit=audit,
     )
 
     if result.hit_safety_limit:
@@ -705,6 +710,53 @@ async def _reply_validation_error(
         recoverable=False,
     )
     await bus.reply(assign_msg, type=TASK_ERROR, payload=dump(error))
+
+
+async def _flush_audit_buffer(
+    bus: MessageBus,
+    task: TaskAssignPayload,
+    audit_buffer: AuditBuffer,
+    logger: logging.Logger | _MergingAdapter,
+) -> None:
+    """Send buffered sub-agent audit rows to the orchestrator.
+
+    Best-effort: this routine MUST NOT raise.  Both branches
+    (JSONL fallback and NMB send) are guarded so the caller's
+    invariants — chiefly the ``task.error`` reply on the failure
+    path of :func:`_await_and_handle_one_task` — hold even when
+    the workspace filesystem or the bus is unhealthy.  Letting an
+    audit-side exception escape here would silently break the
+    "don't crash; emit task.error" contract.
+    """
+    if audit_buffer.is_empty:
+        return
+    fallback_path = Path(task.workspace_root) / ".nemoclaw" / f"audit-{task.workflow_id}.jsonl"
+    fallback_written = False
+    try:
+        audit_buffer.write_jsonl_fallback(fallback_path)
+        fallback_written = True
+    except Exception:
+        logger.warning(
+            "Failed to write audit JSONL fallback",
+            extra={"workflow_id": task.workflow_id, "path": str(fallback_path)},
+            exc_info=True,
+        )
+    try:
+        await bus.send(
+            to=task.parent_sandbox_id,
+            type=AUDIT_FLUSH,
+            payload=dump(audit_buffer.to_payload()),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to send audit.flush",
+            extra={
+                "workflow_id": task.workflow_id,
+                "path": str(fallback_path),
+                "fallback_written": fallback_written,
+            },
+            exc_info=True,
+        )
 
 
 class MaxTurnsExceededError(Exception):
