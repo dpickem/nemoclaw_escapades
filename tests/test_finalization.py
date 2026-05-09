@@ -388,6 +388,7 @@ class TestPushBranch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A no-op commit helper result is fine as long as push succeeds."""
+
         async def _checkout(*_args: Any, **_kwargs: Any) -> str:
             return "checked out"
 
@@ -542,6 +543,7 @@ class TestTerminalFlagOnFailure:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Conversely, a successful helper result sets the terminal flag."""
+
         async def _checkout(*_args: Any, **_kwargs: Any) -> str:
             return "checked out"
 
@@ -607,10 +609,12 @@ class TestJsonlFallbackIngest:
             },
         }
         fallback.write_text(
-            json.dumps(valid) + "\n"
+            json.dumps(valid)
+            + "\n"
             + '{"workflow_id":"wf-1","truncated\n'  # JSON parse error
             + '{"workflow_id":"wf-1"}\n'  # missing tool_call key
-            + json.dumps(valid).replace("row-good", "row-good-2") + "\n"
+            + json.dumps(valid).replace("row-good", "row-good-2")
+            + "\n"
         )
         db_path = tmp_path / "audit.db"
         db = AuditDB(str(db_path))
@@ -834,8 +838,7 @@ class TestSlackRendererSectionLimit:
         assert section_texts, "expected at least one section block"
         for text in section_texts:
             assert len(text) <= _SLACK_SECTION_TEXT_LIMIT, (
-                f"section text {len(text)} chars exceeds Slack cap "
-                f"{_SLACK_SECTION_TEXT_LIMIT}"
+                f"section text {len(text)} chars exceeds Slack cap {_SLACK_SECTION_TEXT_LIMIT}"
             )
         # Every diff section is independently fenced — splitting a
         # single fence across blocks would render as raw text in

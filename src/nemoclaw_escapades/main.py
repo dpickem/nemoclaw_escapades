@@ -181,6 +181,7 @@ async def main() -> None:
             audit=audit,
             finalizer=finalizer,
             renderer=renderer,
+            delegation_manager=delegation_manager,
         )
         await dispatcher.start()
         finalization_actions = FinalizationActionHandler(

@@ -224,9 +224,11 @@ class FinalizationActionHandler:
         # (push + ``gh pr create`` both succeeded).  A recoverable
         # error leaves the workflow registered so the user can retry
         # the click, switch to Iterate / Discard, or wait out a
-        # transient broker / git hiccup.
+        # transient broker / git hiccup.  ``deregister_workflow``
+        # also terminates the spawned sub-agent process when a
+        # delegation manager is wired into the dispatcher.
         if session.state.is_terminal:
-            self._dispatcher.deregister_workflow(ctx.workflow_id)
+            await self._dispatcher.deregister_workflow(ctx.workflow_id)
         return _text_reply(request, result)
 
     async def _handle_discard(
@@ -251,8 +253,10 @@ class FinalizationActionHandler:
         # ``is_terminal`` when it actually deleted the workspace.
         # The safety-check refusal path (non-agent path) leaves the
         # workflow alive so the user can investigate or retry.
+        # ``deregister_workflow`` also terminates the spawned
+        # sub-agent process when a delegation manager is wired.
         if session.state.is_terminal:
-            self._dispatcher.deregister_workflow(ctx.workflow_id)
+            await self._dispatcher.deregister_workflow(ctx.workflow_id)
         return _text_reply(request, result)
 
     def _handle_iterate(

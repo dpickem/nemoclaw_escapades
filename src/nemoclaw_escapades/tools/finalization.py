@@ -153,9 +153,7 @@ class FinalizationSession:
         """
         rendered = summary or self.complete.summary
         diff_preview = (
-            self.complete.diff[:_DIFF_PREVIEW_LIMIT]
-            if include_diff and self.complete.diff
-            else ""
+            self.complete.diff[:_DIFF_PREVIEW_LIMIT] if include_diff and self.complete.diff else ""
         )
         if self.renderer is not None and self.context is not None:
             await self.renderer.render_present_work(
@@ -281,9 +279,7 @@ class FinalizationSession:
             )
             stdout, stderr = await proc.communicate()
             out = (stdout or stderr).decode(errors="replace").strip()
-            message = (
-                out if proc.returncode == 0 else f"Error: gh pr create failed: {out}"
-            )
+            message = out if proc.returncode == 0 else f"Error: gh pr create failed: {out}"
         await self._render_action_result("push_and_create_pr", message)
         self.state.action = "push_and_create_pr"
         self.state.message = message
@@ -390,8 +386,7 @@ class FinalizationSession:
         self.task = followup
         await self.delegation_manager.delegate(followup, context=self.context)
         message = (
-            f"Re-delegated workflow {followup.workflow_id} "
-            f"(iteration {followup.iteration_number})."
+            f"Re-delegated workflow {followup.workflow_id} (iteration {followup.iteration_number})."
         )
         await self._render_action_result("re_delegate", message)
         self.state.action = "re_delegate"

@@ -231,12 +231,15 @@ class TestAuditFlushIngest:
         try:
             await dispatcher.start()
             await _wait_until(
-                lambda: len(  # noqa: PLR2004
-                    asyncio.run_coroutine_threadsafe.__name__,
-                )
-                or True,
+                lambda: (
+                    len(  # noqa: PLR2004
+                        asyncio.run_coroutine_threadsafe.__name__,
+                    )
+                    or True
+                ),
                 timeout=0.0,
             )
+
             # Poll the DB until both rows arrive.
             async def _have_two() -> bool:
                 rows = await audit_db.query("SELECT id FROM tool_calls")
@@ -458,6 +461,98 @@ class TestErrorAndProgressRouting:
             await _wait_until(lambda: len(renderer.errors) >= 1)
             assert renderer.errors[0][0] == "wf-z"
             assert dispatcher.get_workflow("wf-z") is None
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_task_error_writes_log_delegation_error(
+        self,
+        audit_db: AuditDB,
+    ) -> None:
+        """``task.error`` arrivals must stamp the ``delegations`` audit row.
+
+        Regression for the asymmetry between the success and error
+        paths: ``_record_completion`` calls ``log_delegation_complete``
+        on ``task.complete``, but the corresponding
+        ``log_delegation_error`` write was missing for ``task.error``,
+        leaving the row pinned at ``status="started"`` with a NULL
+        ``completed_at`` for every failed sub-agent.
+        """
+        await audit_db.log_delegation_started(
+            workflow_id="wf-err",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-err0",
+            workspace_root="/tmp/wf",
+            prompt="will fail",
+        )
+        bus = _ScriptedBus([_task_error("wf-err")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            audit=audit_db,
+            renderer=_RecordingRenderer(),  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-err"))
+        try:
+            await dispatcher.start()
+            await _wait_until(
+                lambda: dispatcher.get_workflow("wf-err") is None,
+                timeout=2.0,
+            )
+            rows = await audit_db.query(
+                "SELECT workflow_id, status, error_kind, error_message, "
+                "recoverable, completed_at FROM delegations WHERE workflow_id = "
+                "'wf-err'",
+            )
+            assert len(rows) == 1, f"expected 1 delegations row, got {rows!r}"
+            row = rows[0]
+            assert row["status"] == "error", (
+                "task.error arrival must transition the audit row to "
+                f"status='error'; got status={row['status']!r}"
+            )
+            assert row["error_kind"] == "other"
+            assert row["error_message"] == "kaboom"
+            assert row["recoverable"] == 0
+            assert row["completed_at"] is not None
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_task_error_audit_failure_does_not_skip_deregister(
+        self,
+    ) -> None:
+        """A DB hiccup must not abort rendering or workflow cleanup.
+
+        ``_handle_task_error`` runs three best-effort steps in
+        order: render → audit → deregister.  An audit raise must
+        not skip the deregister below it, otherwise the workflow
+        registration would leak and the spawned sub-agent would
+        never get terminated through :meth:`deregister_workflow`'s
+        wire-through to :meth:`DelegationManager.terminate`.
+        """
+
+        class _BrokenAudit:
+            async def log_delegation_error(self, **_: Any) -> None:
+                raise RuntimeError("DB on fire")
+
+        renderer = _RecordingRenderer()
+        bus = _ScriptedBus([_task_error("wf-err2")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            audit=_BrokenAudit(),  # type: ignore[arg-type]
+            renderer=renderer,  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-err2"))
+        try:
+            await dispatcher.start()
+            await _wait_until(
+                lambda: dispatcher.get_workflow("wf-err2") is None,
+                timeout=2.0,
+            )
+            assert len(renderer.errors) == 1
+            assert renderer.errors[0][0] == "wf-err2"
+            assert dispatcher.get_workflow("wf-err2") is None
         finally:
             bus.close()
             await dispatcher.close()
@@ -705,3 +800,194 @@ class TestDispatcherClose:
         await dispatcher.close()
         await dispatcher.close()  # must not raise
         bus.close()
+
+
+# ── Sub-agent termination on workflow end ──────────────────────────
+
+
+class _RecordingDelegationManager:
+    """Stub :class:`DelegationManager` that records ``terminate`` calls.
+
+    The real manager exposes ``terminate(workflow_id)`` to clean up
+    the spawned sub-agent when its workflow ends.  These tests assert
+    every dispatcher path that finishes a workflow goes through that
+    method — without it, ``DelegationManager._spawned`` would grow
+    without bound (one stale ``SpawnedAgent`` handle per delegation).
+    """
+
+    def __init__(self) -> None:
+        self.terminated: list[str] = []
+
+    async def terminate(self, workflow_id: str) -> None:
+        self.terminated.append(workflow_id)
+
+
+class TestDeregisterTerminatesSubAgent:
+    """``deregister_workflow`` must terminate the spawned sub-agent.
+
+    Regression for the missing-terminate leak: the dispatcher
+    historically deregistered workflows but never called
+    :meth:`DelegationManager.terminate`, so
+    :data:`DelegationManager._spawned` grew without bound for the
+    orchestrator's entire lifetime.  Each scenario below pairs a
+    terminal dispatcher path with the matching ``terminate`` call.
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_finalisation_terminates(self) -> None:
+        from nemoclaw_escapades.orchestrator.finalization import FinalizationResult
+
+        manager = _RecordingDelegationManager()
+
+        class _PushFinalizer:
+            async def finalize(
+                self,
+                ctx: WorkflowContext,
+                complete: TaskCompletePayload,
+            ) -> FinalizationResult:
+                return FinalizationResult(
+                    workflow_id=ctx.workflow_id,
+                    action="push_and_create_pr",
+                    message="https://github.com/.../pull/1",
+                    is_terminal=True,
+                )
+
+        bus = _ScriptedBus([_task_complete("wf-term")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            finalizer=_PushFinalizer(),  # type: ignore[arg-type]
+            delegation_manager=manager,  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-term"))
+        try:
+            await dispatcher.start()
+            assert await dispatcher.wait_for_finalization("wf-term", timeout=2.0)
+            assert manager.terminated == ["wf-term"], (
+                "Terminal finalisation must call DelegationManager.terminate "
+                "so the sub-agent's SpawnedAgent handle is freed; got: "
+                f"{manager.terminated!r}"
+            )
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_finalisation_failure_terminates(self) -> None:
+        manager = _RecordingDelegationManager()
+
+        class _BrokenFinalizer:
+            async def finalize(
+                self,
+                ctx: WorkflowContext,
+                complete: TaskCompletePayload,
+            ) -> Any:
+                raise RuntimeError("baseline drift")
+
+        bus = _ScriptedBus([_task_complete("wf-fail")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            finalizer=_BrokenFinalizer(),  # type: ignore[arg-type]
+            renderer=_RecordingRenderer(),  # type: ignore[arg-type]
+            delegation_manager=manager,  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-fail"))
+        try:
+            await dispatcher.start()
+            assert await dispatcher.wait_for_finalization("wf-fail", timeout=2.0)
+            assert manager.terminated == ["wf-fail"]
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_task_error_terminates(self) -> None:
+        manager = _RecordingDelegationManager()
+        bus = _ScriptedBus([_task_error("wf-err")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            renderer=_RecordingRenderer(),  # type: ignore[arg-type]
+            delegation_manager=manager,  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-err"))
+        try:
+            await dispatcher.start()
+            await _wait_until(lambda: manager.terminated == ["wf-err"])
+            assert manager.terminated == ["wf-err"]
+            assert dispatcher.get_workflow("wf-err") is None
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_re_delegate_does_not_terminate(self) -> None:
+        """Iteration must keep the sub-agent slot reserved.
+
+        ``re_delegate`` is non-terminal: the dispatcher leaves the
+        workflow registered so iteration N+1's ``task.complete``
+        arrives at a known workflow.  Calling ``terminate`` here
+        would kill the sub-agent the iteration just spawned.
+        """
+        from nemoclaw_escapades.orchestrator.finalization import FinalizationResult
+
+        manager = _RecordingDelegationManager()
+
+        class _ReDelegateFinalizer:
+            async def finalize(
+                self,
+                ctx: WorkflowContext,
+                complete: TaskCompletePayload,
+            ) -> FinalizationResult:
+                return FinalizationResult(
+                    workflow_id=ctx.workflow_id,
+                    action="re_delegate",
+                    message="iter 2",
+                    is_terminal=False,
+                )
+
+        bus = _ScriptedBus([_task_complete("wf-iter")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            finalizer=_ReDelegateFinalizer(),  # type: ignore[arg-type]
+            delegation_manager=manager,  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-iter"))
+        try:
+            await dispatcher.start()
+            assert await dispatcher.wait_for_finalization("wf-iter", timeout=2.0)
+            assert manager.terminated == []
+            assert dispatcher.get_workflow("wf-iter") is not None
+        finally:
+            bus.close()
+            await dispatcher.close()
+
+    @pytest.mark.asyncio
+    async def test_no_delegation_manager_is_safe(self) -> None:
+        """Tests / headless callers with no manager wired must still work."""
+        from nemoclaw_escapades.orchestrator.finalization import FinalizationResult
+
+        class _PushFinalizer:
+            async def finalize(
+                self,
+                ctx: WorkflowContext,
+                complete: TaskCompletePayload,
+            ) -> FinalizationResult:
+                return FinalizationResult(
+                    workflow_id=ctx.workflow_id,
+                    action="push_and_create_pr",
+                    message="ok",
+                    is_terminal=True,
+                )
+
+        bus = _ScriptedBus([_task_complete("wf-headless")])
+        dispatcher = WorkflowDispatcher(
+            bus,  # type: ignore[arg-type]
+            finalizer=_PushFinalizer(),  # type: ignore[arg-type]
+        )
+        dispatcher.register_workflow(_ctx("wf-headless"))
+        try:
+            await dispatcher.start()
+            assert await dispatcher.wait_for_finalization("wf-headless", timeout=2.0)
+            assert dispatcher.get_workflow("wf-headless") is None
+        finally:
+            bus.close()
+            await dispatcher.close()

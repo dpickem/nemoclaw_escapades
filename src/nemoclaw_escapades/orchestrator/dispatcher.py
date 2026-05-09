@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from nemoclaw_escapades.audit.db import AuditDB
     from nemoclaw_escapades.nmb.client import MessageBus
     from nemoclaw_escapades.nmb.models import NMBMessage
+    from nemoclaw_escapades.orchestrator.delegation import DelegationManager
     from nemoclaw_escapades.orchestrator.finalization import FinalizationCoordinator
     from nemoclaw_escapades.orchestrator.workflow import (
         WorkflowContext,
@@ -81,6 +82,7 @@ class WorkflowDispatcher:
         audit: AuditDB | None = None,
         finalizer: FinalizationCoordinator | None = None,
         renderer: WorkflowRenderer | None = None,
+        delegation_manager: DelegationManager | None = None,
     ) -> None:
         """Wire the dispatcher to its collaborators.
 
@@ -98,11 +100,23 @@ class WorkflowDispatcher:
                 ``None``, the dispatcher runs in headless mode —
                 useful for tests; the orchestrator's ``main.py``
                 always wires one in production.
+            delegation_manager: Optional :class:`DelegationManager`.
+                When supplied, :meth:`deregister_workflow` calls
+                :meth:`DelegationManager.terminate` so the spawned
+                sub-agent process and its in-memory ``SpawnedAgent``
+                handle are cleaned up the moment the workflow ends.
+                Without this wire, ``_spawned`` would accumulate
+                stale handles for the orchestrator's entire lifetime
+                — a slow leak proportional to delegation count.  The
+                argument is optional because tests construct the
+                dispatcher in isolation against a stub bus and don't
+                need the manager to assert routing behaviour.
         """
         self._bus = bus
         self._audit = audit
         self._finalizer = finalizer
         self._renderer = renderer
+        self._delegation_manager = delegation_manager
 
         self._workflows: dict[str, WorkflowContext] = {}
         # Background finalisation tasks.  Indexed by workflow_id so
@@ -179,13 +193,39 @@ class WorkflowDispatcher:
         """
         self._workflows[context.workflow_id] = context
 
-    def deregister_workflow(self, workflow_id: str) -> None:
-        """Remove the workflow registration after a terminal outcome.
+    async def deregister_workflow(self, workflow_id: str) -> None:
+        """End-of-life cleanup for a workflow.
 
-        Idempotent: missing workflows are silently ignored so
-        late-arriving duplicate frames don't error.
+        Two effects:
+
+        - Removes the workflow from ``self._workflows`` so any
+          late-arriving NMB frame is dropped as "unknown workflow".
+        - When a :class:`DelegationManager` is wired, asks it to
+          terminate the spawned sub-agent process and pop its
+          in-memory ``SpawnedAgent`` handle from
+          :data:`DelegationManager._spawned`.
+
+        Without that second effect, the manager's per-workflow
+        spawn registry would grow without bound: sub-agent
+        processes are single-shot and exit on their own after
+        sending ``task.complete``, but the ``SpawnedAgent`` handle
+        is only released when ``DelegationManager.close()`` runs at
+        process shutdown.  Wiring the call here ties the
+        :meth:`DelegationManager.terminate` lifecycle to the
+        workflow lifecycle the dispatcher owns.
+
+        Idempotent: missing workflows are silently ignored, and
+        :meth:`DelegationManager.terminate` is itself a no-op for
+        workflow ids whose ``SpawnedAgent`` was already popped (e.g.
+        the send-failure path inside :meth:`DelegationManager.delegate`
+        already cleaned up).  Order — registry first, terminate
+        second — frees the registry slot immediately so any
+        concurrent dispatcher path that races with this call sees
+        the workflow as gone before the slow ``terminate()`` await.
         """
         self._workflows.pop(workflow_id, None)
+        if self._delegation_manager is not None:
+            await self._delegation_manager.terminate(workflow_id)
 
     def get_workflow(self, workflow_id: str) -> WorkflowContext | None:
         """Look up a registered workflow."""
@@ -332,13 +372,28 @@ class WorkflowDispatcher:
                         "Renderer raised on finalisation failure",
                         exc_info=True,
                     )
-            self.deregister_workflow(ctx.workflow_id)
+            await self.deregister_workflow(ctx.workflow_id)
             return
         if result.is_terminal:
-            self.deregister_workflow(ctx.workflow_id)
+            await self.deregister_workflow(ctx.workflow_id)
 
     async def _handle_task_error(self, msg: NMBMessage) -> None:
-        """Validate ``task.error`` and surface it to the user."""
+        """Validate ``task.error`` and surface it to the user.
+
+        Mirrors :meth:`FinalizationCoordinator._record_completion` on
+        the success path: just as ``task.complete`` arrivals stamp
+        the audit row with :meth:`AuditDB.log_delegation_complete`,
+        ``task.error`` arrivals must stamp it with
+        :meth:`AuditDB.log_delegation_error`.  ``log_delegation_started``
+        already ran in the ``delegate_task`` tool before the
+        sub-agent was spawned, so without this write the row would
+        sit in ``status="started"`` with a ``NULL`` ``completed_at``
+        forever.
+
+        The audit write is best-effort: a DB hiccup must not abort
+        rendering or workflow deregistration.  ``deregister_workflow``
+        runs last so it can't be skipped on an audit failure.
+        """
         try:
             payload = load(TaskErrorPayload, TASK_ERROR, msg.payload)
         except PayloadValidationError:
@@ -364,7 +419,21 @@ class WorkflowDispatcher:
                     extra={"workflow_id": payload.workflow_id},
                     exc_info=True,
                 )
-        self.deregister_workflow(payload.workflow_id)
+        if self._audit is not None:
+            try:
+                await self._audit.log_delegation_error(
+                    workflow_id=payload.workflow_id,
+                    error_kind=payload.error_kind,
+                    error_message=payload.error,
+                    recoverable=payload.recoverable,
+                )
+            except Exception:  # noqa: BLE001 — DB surface is broad
+                logger.warning(
+                    "log_delegation_error failed",
+                    extra={"workflow_id": payload.workflow_id},
+                    exc_info=True,
+                )
+        await self.deregister_workflow(payload.workflow_id)
 
     async def _handle_task_progress(self, msg: NMBMessage) -> None:
         """Forward ``task.progress`` to the renderer; best-effort."""

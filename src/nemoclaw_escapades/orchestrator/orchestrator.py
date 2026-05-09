@@ -285,10 +285,7 @@ class Orchestrator:
                 return await self._handle_write_approval(request, thread_key, on_status)
             if request.action.action_id == APPROVAL_ACTION_DENY:
                 return self._handle_write_denial(request, thread_key)
-            if (
-                self._finalization_actions is not None
-                and is_finalization_action(request)
-            ):
+            if self._finalization_actions is not None and is_finalization_action(request):
                 return await self._finalization_actions.handle(request)
 
         # ── 1b. Pending iteration text ──────────────────────────────────
@@ -300,9 +297,7 @@ class Orchestrator:
             self._finalization_actions is not None
             and self._finalization_actions.is_pending_iteration(thread_key)
         ):
-            return await self._finalization_actions.consume_iteration_feedback(
-                request, thread_key
-            )
+            return await self._finalization_actions.consume_iteration_feedback(request, thread_key)
 
         # ── 2. Stale approval cleanup ─────────────────────────────────
         # If the user sends a new text message in a thread that has a

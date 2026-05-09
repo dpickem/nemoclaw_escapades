@@ -150,9 +150,19 @@ class DelegationManager:
         self._config = config
         self._spawn = spawn_callback or self._default_spawn_callback()
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
-        # Per-workflow spawn handles so ``close()`` can terminate
-        # sub-agent processes that were still in flight when the
-        # orchestrator was asked to shut down.
+        # Per-workflow spawn handles.  Two responsibilities:
+        # - Lets :meth:`close` terminate sub-agent processes that
+        #   were still in flight when the orchestrator was asked to
+        #   shut down.
+        # - Each entry holds exactly one slot of :data:`_semaphore`
+        #   for the workflow's lifetime — :meth:`delegate` acquires
+        #   the slot when the entry first appears, :meth:`terminate`
+        #   releases it when the entry leaves.  This ties
+        #   :data:`DelegationConfig.max_concurrent` to live workflows
+        #   rather than to concurrent spawn calls; without it the
+        #   "hard cap" docstring would be a fiction the moment
+        #   ``send`` returned (the slot would free even though the
+        #   sub-agent process was still alive).
         self._spawned: dict[str, SpawnedAgent] = {}
 
     async def delegate(
@@ -190,26 +200,101 @@ class DelegationManager:
         del context  # accepted for API symmetry; caller registers with dispatcher
         self._check_spawn_depth(task)
 
-        async with self._semaphore:
+        # Semaphore lifecycle invariant: ``len(self._spawned)`` slots
+        # are held by :data:`_semaphore` at all times.  We acquire when
+        # the workflow_id is *new* to ``_spawned`` (a fresh delegation)
+        # and release when it leaves (terminate, close, or send-failure
+        # cleanup below).  Re-delegation reuses the workflow_id, so
+        # iteration N+1 keeps holding the slot iteration 1 acquired —
+        # no double-acquire, no leak.
+        #
+        # Without this discipline the cap is fiction: ``async with
+        # self._semaphore`` previously released the slot the moment
+        # ``send`` returned, even though the sub-agent process was
+        # still alive and the dispatcher hadn't even seen the eventual
+        # ``task.complete`` yet.  ``DelegationConfig.max_concurrent``
+        # is documented as "Hard cap on concurrent in-flight
+        # delegations"; the slot must live as long as the workflow
+        # does.
+        acquired_for_new_workflow = task.workflow_id not in self._spawned
+        if acquired_for_new_workflow:
+            await self._semaphore.acquire()
+
+        try:
             try:
                 agent = await self._spawn(task.agent_id, task.workspace_root)
             except Exception as exc:  # noqa: BLE001 — spawn callback is pluggable
                 raise DelegationError(f"failed to spawn sub-agent: {exc}") from exc
 
+            # Swap-and-terminate: ``re_delegate`` reuses the
+            # ``workflow_id`` for iteration N+1, so ``_spawned`` may
+            # already hold iteration N's handle.  An unconditional
+            # overwrite would drop that reference and leak it
+            # permanently from the registry — :meth:`terminate` and
+            # :meth:`close` would then only ever reach the latest
+            # iteration.  Pop first, install the new agent, *then*
+            # terminate the old one so a concurrent
+            # :meth:`terminate` call lands on the new agent rather
+            # than the about-to-die old one.
+            previous = self._spawned.get(task.workflow_id)
             self._spawned[task.workflow_id] = agent
+            if previous is not None:
+                # Single-shot sub-agents typically self-exit at
+                # ``task.complete`` so this is usually a no-op
+                # against a process whose ``returncode`` is already
+                # set; the call is here for the pathological "old
+                # iteration is hung / running long" cases.  Errors
+                # are swallowed so a broken old handle can't block
+                # the new iteration's send below.
+                try:
+                    await previous.terminate()
+                except Exception:  # noqa: BLE001 — defensive around process lifecycle
+                    logger.warning(
+                        "Failed to terminate previous iteration's sub-agent "
+                        "during re-delegation; new agent installed regardless",
+                        extra={
+                            "workflow_id": task.workflow_id,
+                            "old_sandbox_id": previous.sandbox_id,
+                            "new_sandbox_id": agent.sandbox_id,
+                        },
+                        exc_info=True,
+                    )
             try:
                 await self._send_assign_with_readiness_retry(task, agent.sandbox_id)
             except DelegationError:
-                # Send failed for good — terminate the sub-agent and
-                # propagate.  The dispatcher won't see anything for
-                # this workflow_id.
-                self._spawned.pop(task.workflow_id, None)
+                # Send failed for good — terminate this iteration's
+                # sub-agent and propagate.  Compare-and-swap on the
+                # pop so we don't accidentally evict a handle a
+                # later (unlikely but possible) re-delegation
+                # already installed under the same workflow_id.
+                if self._spawned.get(task.workflow_id) is agent:
+                    self._spawned.pop(task.workflow_id, None)
                 await agent.terminate()
                 raise
             except Exception as exc:  # noqa: BLE001 — defensive around transport implementations
-                self._spawned.pop(task.workflow_id, None)
+                if self._spawned.get(task.workflow_id) is agent:
+                    self._spawned.pop(task.workflow_id, None)
                 await agent.terminate()
                 raise DelegationError(f"delegation failed: {exc}") from exc
+        except BaseException:
+            # Slot accounting on any failure path: if the workflow no
+            # longer has an entry in ``_spawned``, free its slot.
+            #
+            # - New workflow + spawn or send failure → entry never
+            #   installed (or popped above) → release the slot we
+            #   just acquired.
+            # - Re-delegation + send failure → entry popped above →
+            #   release the slot the *prior* iteration was holding
+            #   (the workflow is dead, no one else will free it).
+            # - Re-delegation + spawn failure → previous entry
+            #   untouched → workflow still alive → don't release.
+            #
+            # CancelledError from anywhere inside lands here too, so
+            # task cancellation between acquire and install can't
+            # leak a slot.
+            if task.workflow_id not in self._spawned:
+                self._semaphore.release()
+            raise
 
         return DelegationResult(
             workflow_id=task.workflow_id,
@@ -219,13 +304,31 @@ class DelegationManager:
     async def terminate(self, workflow_id: str) -> None:
         """Tear down a sub-agent process by workflow id.
 
-        Called by the dispatcher's finalisation task once the
-        per-workflow flow completes (success, error, or cancelled).
-        Idempotent for unknown workflow ids.
+        Invoked from :meth:`WorkflowDispatcher.deregister_workflow`
+        whenever a workflow ends — terminal finalisation,
+        ``task.error`` arrival, finalisation exception, Push & PR /
+        Discard button click, or the spawn-failure cleanup inside
+        :meth:`delegate`.  Without this caller chain, ``_spawned``
+        would accumulate handles for the orchestrator's entire
+        lifetime; the dispatcher's wire-through in
+        :meth:`WorkflowDispatcher.__init__`'s ``delegation_manager``
+        argument is what makes this method actually run on the
+        per-workflow path (not just at process shutdown via
+        :meth:`close`).
+
+        Idempotent for unknown workflow ids — late or duplicate
+        calls land on the ``pop`` ``None`` default and short-circuit
+        without touching the semaphore.
         """
         agent = self._spawned.pop(workflow_id, None)
         if agent is None:
             return
+        # The slot acquired by :meth:`delegate` for this workflow is
+        # released here, mirroring the
+        # ``len(self._spawned)``-slots-held invariant: removing a
+        # workflow from the registry must give its slot back so the
+        # next ``delegate`` call can proceed.
+        self._semaphore.release()
         try:
             await agent.terminate()
         except Exception:  # noqa: BLE001 — defensive around process lifecycle

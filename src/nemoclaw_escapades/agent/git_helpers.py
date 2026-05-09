@@ -245,9 +245,7 @@ async def push_branch(workspace_root: str, branch: str, *, remote: str = "origin
     Raises:
         GitCommandError: If the push fails (auth, divergence, etc.).
     """
-    result = await run_git(
-        workspace_root, "push", "-u", remote, branch, timeout=_PUSH_TIMEOUT_S
-    )
+    result = await run_git(workspace_root, "push", "-u", remote, branch, timeout=_PUSH_TIMEOUT_S)
     if is_git_error(result):
         raise GitCommandError("push", result)
     return result

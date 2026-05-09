@@ -70,7 +70,7 @@ class _FakeDispatcher:
     def register_workflow(self, ctx: WorkflowContext) -> None:
         self.registered.append(ctx)
 
-    def deregister_workflow(self, workflow_id: str) -> None:
+    async def deregister_workflow(self, workflow_id: str) -> None:
         self.deregistered.append(workflow_id)
 
 

@@ -268,10 +268,7 @@ class SlackFinalizationRenderer:
         if context.channel_id is None:
             return
         header = f":x: *Finalisation failed for workflow {context.workflow_id}*"
-        footer = (
-            "_The sub-agent's diff is on disk; you can inspect "
-            "the workspace manually._"
-        )
+        footer = "_The sub-agent's diff is on disk; you can inspect the workspace manually._"
         blocks = _text_section_blocks(header)
         blocks.extend(_code_fence_section_blocks(error))
         blocks.extend(_text_section_blocks(footer))
@@ -320,10 +317,7 @@ def _text_section_blocks(text: str) -> list[dict[str, Any]]:
     if not text:
         return []
     chunks = _split_text_for_slack(text)[:_SLACK_MAX_TEXTBLOCK_CHUNKS]
-    return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
-        for chunk in chunks
-    ]
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": chunk}} for chunk in chunks]
 
 
 def _code_fence_section_blocks(

@@ -194,7 +194,11 @@ def _make_delegate_task(
             result = await manager.delegate(task, context=workflow_ctx)
         except DelegationError as exc:
             if dispatcher is not None:
-                dispatcher.deregister_workflow(task.workflow_id)
+                # ``manager.delegate`` already terminated the spawned
+                # agent and popped it from ``_spawned`` on its
+                # failure path; this call is a registry-cleanup +
+                # idempotent ``terminate()`` no-op.
+                await dispatcher.deregister_workflow(task.workflow_id)
             logger.error(
                 "Delegation failed",
                 extra={"workflow_id": task.workflow_id, "error": str(exc)},
