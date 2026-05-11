@@ -581,12 +581,23 @@ class AuditDB:
     ) -> str:
         """Log a single tool invocation.
 
+        ``row_id`` is optional for normal in-process writes.  When omitted, this
+        method generates a 16-character hex primary key and returns it.  Replay
+        paths such as ``audit.flush`` pass a precomputed ``row_id`` so a retried
+        batch collides on the existing row instead of creating a duplicate.
+
         When ``persist_payloads`` is ``False`` the response_payload
         column is stored as an empty string, but ``payload_size`` still
         records the original byte count.
 
         Args:
-            session_id: Conversation session / thread identifier.
+            row_id: Stable tool-call row ID to insert.  Leave unset for direct
+                orchestrator tool calls; pass the buffered tool-call ID for
+                sub-agent replay/idempotency paths.
+            session_id: Conversation session or thread identifier.  For
+                sub-agent audit flush ingestion this is set to the workflow ID,
+                because the original connector thread is not part of each
+                buffered tool-call row.
             thread_ts: Slack thread timestamp for message correlation.
             service: Tool service / toolset name (e.g. ``"jira"``).
             command: Tool name or subcommand (e.g. ``"jira_search"``).
@@ -602,9 +613,17 @@ class AuditDB:
             error_code: Error code string if failed.
             error_message: Error message string if failed.
             response_payload: Full JSON response string.
+            workflow_id: Delegation workflow ID associated with the call.
+            parent_sandbox_id: Sandbox that launched or owns the sub-agent
+                workflow.
+            agent_id: Agent ID that executed the tool call.
+            agent_role: Logical role for the executing agent, such as
+                ``"coding"``.
 
         Returns:
-            The generated row ID (16-character hex string).
+            The inserted or pre-existing row ID.  On replay, an existing
+            primary-key collision is treated as success and the same ``row_id``
+            is returned.
 
         Raises:
             RuntimeError: If the DB is not open.
@@ -659,7 +678,21 @@ class AuditDB:
         return row_id
 
     async def ingest_audit_flush(self, payload: Any) -> int:
-        """Insert rows from an ``AuditFlushPayload`` idempotently."""
+        """Insert rows from an ``AuditFlushPayload`` idempotently.
+
+        Each buffered tool-call item already carries a stable ``id`` generated
+        by the sub-agent's ``AuditBuffer``.  This method forwards that value as
+        ``row_id`` to :meth:`log_tool_call`, which makes repeated delivery of
+        the same ``audit.flush`` payload safe.
+
+        Args:
+            payload: Typed ``AuditFlushPayload`` containing workflow-level
+                attribution and buffered tool-call rows.
+
+        Returns:
+            Number of payload items processed.  Duplicate rows count as
+            processed because the database already contains the intended record.
+        """
         count = 0
         for item in payload.tool_calls:
             await self.log_tool_call(
