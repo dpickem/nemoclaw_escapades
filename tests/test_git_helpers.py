@@ -7,9 +7,6 @@ The helpers wrap :func:`tools.git.run_git`:
   ``WorkspaceBaseline`` for the workflow.
 - ``diff_against_baseline`` emits ``git diff <base_sha>`` for
   ``TaskCompletePayload.diff`` and the orchestrator's §6.6.3 cross-check.
-- ``commit_workspace`` / ``checkout_branch`` / ``push_branch`` are the
-  finalisation primitives the orchestrator uses after sub-agent
-  completion.
 
 These tests use real ``git`` invocations against a tmp-path repo —
 the helpers are thin enough that mocking ``run_git`` would test
