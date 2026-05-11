@@ -21,11 +21,12 @@ import json
 import uuid
 from pathlib import Path
 
+from nemoclaw_escapades.audit.sink import AuditSink
 from nemoclaw_escapades.nmb.protocol import AuditFlushPayload, AuditToolCallPayload
 
 
-class AuditBuffer:
-    """In-memory audit sink with the :meth:`AuditDB.log_tool_call` interface."""
+class AuditBuffer(AuditSink):
+    """In-memory :class:`AuditSink` for sub-agent tool-call batches."""
 
     def __init__(
         self,
@@ -91,8 +92,6 @@ class AuditBuffer:
         :meth:`AuditDB.ingest_audit_flush` re-applies it to every
         row at write time.
         """
-        del session_id, thread_ts  # carried separately on the flush envelope
-        del workflow_id, parent_sandbox_id, agent_id, agent_role
         row_id = row_id or uuid.uuid4().hex[:16]
         self._tool_calls.append(
             AuditToolCallPayload(

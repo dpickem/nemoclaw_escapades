@@ -32,17 +32,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nemoclaw_escapades.agent.git_helpers import (
-    GitCommandError,
-    checkout_branch,
-    commit_workspace,
-)
-from nemoclaw_escapades.agent.git_helpers import (
-    push_branch as git_push_branch,
-)
 from nemoclaw_escapades.agent.github_helpers import GitHubCommandError, create_pull_request
 from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, TaskCompletePayload
 from nemoclaw_escapades.observability.logging import get_logger
+from nemoclaw_escapades.tools.git import is_git_error, run_git
 from nemoclaw_escapades.tools.registry import ToolRegistry, tool
 
 if TYPE_CHECKING:
@@ -75,6 +68,9 @@ _MIN_MAX_TURNS: int = 1
 # Prefix used to identify recoverable tool errors.
 _ERROR_PREFIX: str = "Error:"
 
+# Network operations get a longer timeout than local checkout/commit.
+_PUSH_TIMEOUT_S: int = 120
+
 
 class FinalizationAction(StrEnum):
     """Names of model-callable finalization tools."""
@@ -86,6 +82,15 @@ class FinalizationAction(StrEnum):
     RE_DELEGATE = "re_delegate"
     DESTROY_SANDBOX = "destroy_sandbox"
     MODEL_RESPONSE = "model_response"
+
+
+class GitCommandError(Exception):
+    """Raised when a finalization tool's git subcommand fails."""
+
+    def __init__(self, command: str, output: str) -> None:
+        super().__init__(f"git {command} failed: {output}")
+        self.command = command
+        self.output = output
 
 
 @dataclass
@@ -403,6 +408,51 @@ def _looks_like_per_agent_workspace(path: Path, agent_id: str) -> bool:
         return True
 
     return False
+
+
+async def commit_workspace(workspace_root: str, message: str) -> str:
+    """Stage all changes and create a commit for a finalization tool."""
+    await _ensure_git_workspace_root(workspace_root)
+    add_result = await run_git(workspace_root, "add", "-A")
+    if is_git_error(add_result):
+        raise GitCommandError("add", add_result)
+
+    commit_result = await run_git(workspace_root, "commit", "-m", message)
+    if is_git_error(commit_result) and "nothing to commit" not in commit_result:
+        raise GitCommandError("commit", commit_result)
+    return commit_result
+
+
+async def checkout_branch(workspace_root: str, branch: str, *, create: bool = True) -> str:
+    """Switch to a branch as part of finalization, creating it by default."""
+    await _ensure_git_workspace_root(workspace_root)
+    args: tuple[str, ...] = ("checkout", "-B", branch) if create else ("checkout", branch)
+    result = await run_git(workspace_root, *args)
+    if is_git_error(result):
+        raise GitCommandError("checkout", result)
+    return result
+
+
+async def git_push_branch(workspace_root: str, branch: str, *, remote: str = _DEFAULT_REMOTE) -> str:
+    """Push a finalized branch to the configured remote."""
+    await _ensure_git_workspace_root(workspace_root)
+    result = await run_git(workspace_root, "push", "-u", remote, branch, timeout=_PUSH_TIMEOUT_S)
+    if is_git_error(result):
+        raise GitCommandError("push", result)
+    return result
+
+
+async def _ensure_git_workspace_root(workspace_root: str) -> None:
+    """Fail closed if git would resolve to a parent repository."""
+    top_level = (await run_git(workspace_root, "rev-parse", "--show-toplevel")).strip()
+    if is_git_error(top_level):
+        raise GitCommandError("rev-parse", top_level)
+
+    if Path(top_level).resolve() != Path(workspace_root).resolve():
+        raise GitCommandError(
+            "rev-parse",
+            f"workspace {workspace_root} is inside git repo {top_level}, not its root",
+        )
 
 
 def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegistry:
