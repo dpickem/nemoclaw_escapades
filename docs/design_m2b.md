@@ -6,7 +6,7 @@
 >
 > **Successor:** [Milestone 3 — Multi-Sandbox Delegation, Review Agent & Skill Auto-Policy](design_m3.md)
 >
-> **Last updated:** 2026-04-25
+> **Last updated:** 2026-05-08
 
 ---
 
@@ -15,6 +15,7 @@
 1. [Overview](#1--overview)
    - [What was promoted into M2b](#what-was-promoted-into-m2b)
    - [Patterns adopted from the OpenAI Agents SDK](#patterns-adopted-from-the-openai-agents-sdk)
+   - [Implementation status](#implementation-status)
 2. [Goals and Non-Goals](#2--goals-and-non-goals)
    - [2.1 Goals](#21-goals)
    - [2.2 Non-Goals](#22-non-goals)
@@ -51,8 +52,7 @@
     - [12.2 Implementation](#122-implementation)
 12. [Audit and Observability](#12--audit-and-observability)
     - [13.1 Sub-Agent Audit: NMB-Batched Flush](#131-sub-agent-audit-nmb-batched-flush)
-    - [13.2 Fallback: JSONL Ingest on Task Completion](#132-fallback-jsonl-ingest-on-task-completion)
-    - [13.3 Progress Reporting](#133-progress-reporting)
+    - [13.2 Progress Reporting](#132-progress-reporting)
 13. [End-to-End Walkthrough](#13--end-to-end-walkthrough)
 14. [Implementation Plan](#14--implementation-plan)
     - [Phase 1 — Sandbox configuration layer + coding agent process](#phase-1--sandbox-configuration-layer--coding-agent-process)
@@ -94,6 +94,23 @@ no code duplication.
 > images, policies, credential isolation). Multi-sandbox delegation is deferred
 > to M3, where the same NMB-based protocol works unchanged — only the spawn
 > mechanism changes (from `subprocess` to `openshell sandbox create`).
+
+### Implementation status
+
+As of PR #18, the core M2b delegation/finalization path is implemented:
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Typed task protocol | ✅ Complete | `task.assign`, `task.progress`, `task.complete`, `task.error`, and `audit.flush` payloads are Pydantic-validated at the wire. |
+| Sub-agent NMB mode | ✅ Complete | `agent.__main__` connects to NMB, waits for one `task.assign`, runs the coding loop, sends `task.complete` / `task.error`, and flushes audit. |
+| Delegation manager | ✅ Complete | Spawn, workspace seeding, baseline pinning, spawn-depth limits, and live-workflow concurrency slots are implemented. |
+| Workflow dispatcher | ✅ Complete | Central NMB loop dispatches `task.complete`, `task.error`, `task.progress`, and `audit.flush` without blocking unrelated workflows. |
+| Finalization flow | ✅ Complete | `FinalizationCoordinator`, finalization prompt, finalization tool registry, Slack rendering, action buttons, and iteration feedback are wired. |
+| Audit attribution | ✅ Complete | Sub-agent `AuditBuffer` batches tool calls to `audit.flush`; orchestrator ingest is idempotent. |
+| Lifecycle cleanup | ✅ Complete | Dispatcher deregistration terminates spawned agents and releases delegation capacity when terminal workflows finish. |
+| SDK harness follow-up docs | ✅ Complete | Claude/OpenAI SDK harness adoption notes document how external SDK runners should fit behind OpenShell and NMB. |
+| Durable NMB delivery | ⏳ Future | Phase 4 `reliable_send` / replay remains pending; Phase 3b uses plain NMB sends with idempotent audit ingestion. |
+| Operational cron | ⏳ Future | TTL watchdog, stale-session cleanup, health checks, and audit maintenance remain Phase 5 work. |
 
 ### What was promoted into M2b
 
@@ -307,11 +324,10 @@ fields and §6.6 for the parallel-spawn semantics.
 ### 4.3 Sandbox Cleanup
 
 After `task.complete` or timeout:
-1. Read artifacts from the sub-agent's workspace (diff, notes file,
-   audit JSONL fallback). Same sandbox — direct filesystem access, no
-   download.
-   *(Multi-sandbox delegation in M3 will require `openshell sandbox exec` to
-   pull files across sandbox boundaries.)*
+1. Read local artifacts from the sub-agent's workspace (diff, notes file).
+   Same sandbox — direct filesystem access, no download.
+   *(Multi-sandbox delegation in M3 must not assume this path is readable; it
+   needs explicit artifact transfer for any file artifacts.)*
 2. Kill the sub-agent process.
 3. Clean up workspace directory.
 4. TTL watchdog ensures cleanup even if the orchestrator misses `task.complete`.
@@ -1211,13 +1227,7 @@ Sub-agents use `AuditBuffer` (not direct `AuditDB`). Tool calls accumulate in
 memory and flush to the orchestrator via NMB `audit.flush` messages at round
 boundaries. The orchestrator ingests them into the central `AuditDB`.
 
-### 13.2 Fallback: JSONL Ingest on Task Completion
-
-If NMB flush fails (broker down, crash), the sub-agent writes audit records to
-a JSONL file in its workspace. On `task.complete`, the orchestrator reads and
-ingests the fallback file directly (same sandbox, shared filesystem).
-
-### 13.3 Progress Reporting
+### 13.2 Progress Reporting
 
 `task.progress` messages relay sub-agent status to the orchestrator for Slack
 rendering (thinking indicator, step count, current tool).
@@ -1386,47 +1396,49 @@ plus the audit flush behind it.
 | `delegate_task` tool | `tools/delegation.py` | ✅ |
 | Spawn → workspace-seeding → `task.assign` flow | `orchestrator/delegation.py` | ✅ |
 | Per-agent `asyncio.Semaphore` + `max_spawn_depth` caps (§8.1) | `orchestrator/delegation.py` | ✅ |
-| NMB event loop (`task.complete` / `task.progress` / `task.error` dispatch to per-workflow handlers) | `orchestrator/orchestrator.py` | ⏳ Pending (Phase 3b) — `DelegationManager` already round-trips `task.complete` / `task.error`; the centralized router for `task.progress` lands with finalization |
+| NMB event loop (`task.complete` / `task.progress` / `task.error` / `audit.flush` dispatch to per-workflow handlers) | `orchestrator/dispatcher.py`, `orchestrator/workflow.py` | ✅ — centralized dispatcher landed in Phase 3b and is wired into orchestrator startup |
 | Audit-record requested `model` per delegation (§6.5.2) | `audit/db.py`, `audit/models.py`, `audit/alembic/versions/005_delegations.py`, `orchestrator/delegation.py` | ✅ — new `delegations` table captures requested + used model, baseline, status, and outcome |
-| Tests | `tests/test_protocol.py`, `tests/test_git_helpers.py`, `tests/test_delegation.py`, `tests/test_delegation_tool.py`, `tests/test_audit_delegation.py`, `tests/integration/test_delegation.py` | ✅ |
+| Tests | `tests/test_protocol.py`, `tests/test_git_helpers.py`, `tests/test_delegation_manager.py`, `tests/test_delegation_tool.py`, `tests/test_audit_delegation.py`, `tests/integration/test_delegation.py` | ✅ |
 
 **Exit criteria:** orchestrator spawns a sub-agent over NMB; the
 sub-agent runs `AgentLoop` with the assigned `max_turns` and
 `model` and returns a baseline-anchored `task.complete` that
 validates against the typed protocol.  Concurrency and spawn-depth
-caps enforced.  Finalization not wired yet — orchestrator just
-logs the typed payload.
+caps enforced.  Phase 3b has since replaced the original "log only"
+receiver with the centralized dispatcher and finalization flow.
 
 #### Phase 3b — Finalization + audit
 
 | Task | Files | Status |
 |------|-------|--------|
-| Baseline verification + `BaselineDriftError` (§6.6.3) | `orchestrator/finalization.py` | ⏳ |
-| Finalization tools (`present_work_to_user`, `push_and_create_pr`, `push_branch`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py` | ⏳ |
-| `_finalize_workflow` (second `AgentLoop` with finalization registry) | `orchestrator/orchestrator.py` | ⏳ |
-| `re_delegate` reuses the workflow's pinned baseline (§6.6.2 case C) | `tools/finalization.py`, `orchestrator/delegation.py` | ⏳ |
-| Slack rendering for `present_work_to_user` with action buttons (§7.2) | `connectors/slack/finalization.py` | ⏳ |
-| `AuditBuffer` (NMB-batched flush + JSONL fallback) (§13) | `agent/audit_buffer.py`, `agent/__main__.py` | ⏳ |
-| Orchestrator-side `audit.flush` ingest with `workflow_id` / `parent_sandbox_id` / `agent_role` attribution | `orchestrator/orchestrator.py`, `agent/audit/db.py` | ⏳ |
-| Orchestrator-side JSONL-fallback ingest on `task.complete` | `orchestrator/finalization.py` | ⏳ |
-| Tests | `tests/test_finalization.py`, `tests/test_audit_buffer.py`, `tests/integration/test_finalization.py`, `tests/integration/test_audit_flush.py` | ⏳ |
+| Baseline verification + `BaselineDriftError` (§6.6.3) | `orchestrator/finalization.py` | ✅ |
+| Finalization tools (`present_work_to_user`, `push_and_create_pr`, `push_branch`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `tools/finalization.py`, `prompts/finalization_agent.md` | ✅ |
+| Finalization coordinator (second `AgentLoop` with finalization registry) | `orchestrator/finalization.py`, `orchestrator/dispatcher.py` | ✅ |
+| `re_delegate` reuses the workflow's pinned baseline (§6.6.2 case C) | `tools/finalization.py`, `orchestrator/delegation.py` | ✅ |
+| Slack rendering for `present_work_to_user` with action buttons (§7.2) | `connectors/slack/finalization.py`, `orchestrator/finalization_actions.py` | ✅ |
+| `AuditBuffer` (NMB-batched flush) (§13) | `agent/audit_buffer.py`, `agent/__main__.py` | ✅ |
+| Orchestrator-side `audit.flush` ingest with `workflow_id` / `parent_sandbox_id` / `agent_role` attribution | `orchestrator/dispatcher.py`, `audit/db.py`, `audit/sink.py` | ✅ |
+| Workflow lifecycle cleanup and live-workflow concurrency release | `orchestrator/dispatcher.py`, `orchestrator/delegation.py`, `tools/delegation.py` | ✅ |
+| Tests | `tests/test_finalization.py`, `tests/test_finalization_actions.py`, `tests/test_audit_buffer.py`, `tests/test_dispatcher.py`, `tests/test_delegation_manager.py`, `tests/test_delegation_tool.py` | ✅ |
 
-**Exit criteria:** every `task.complete` runs through finalization;
-drift is caught before push; Slack buttons fire the right
-finalization tool; every sub-agent tool call lands in the central
-audit DB exactly once with the right attribution.  The two
-sub-phases compose to deliver the §7 finalization flow and the
-§13 audit story end-to-end.
+**Exit criteria:** ✅ Completed in PR #18.  Every `task.complete`
+runs through finalization; drift is caught before push; Slack
+buttons fire the right finalization tool; `task.error` is rendered
+and stamped in audit; sub-agent tool calls land in the central audit
+DB via `audit.flush` with workflow / agent
+attribution.  The dispatcher deregisters terminal workflows and
+terminates spawned agents so delegation capacity tracks live
+workflows rather than completed send calls.
 
 ### Phase 4 — At-least-once NMB delivery
 
 | Task | Files | Status |
 |------|-------|--------|
 | `reliable_send` (atomic write to `pending/<id>.json` → send → `ack` deletes the file) (§9) | `nmb/reliable_send.py` | ⏳ |
-| Per-sandbox `pending/` directory; tracked in audit DB so the orchestrator can see in-flight messages on connect | `nmb/reliable_send.py`, `agent/audit/db.py` | ⏳ |
+| Per-sandbox `pending/` directory; tracked in audit DB so the orchestrator can see in-flight messages on connect | `nmb/reliable_send.py`, `audit/db.py` | ⏳ |
 | Wire `reliable_send` into `task.complete` and `audit.flush` send sites (Phase 3b ships them as plain sends) | `agent/__main__.py`, `agent/audit_buffer.py` | ⏳ |
 | Crash-recovery replay on startup (orchestrator scans every sandbox's `pending/` and re-emits unacked messages) | `nmb/broker.py`, `orchestrator/orchestrator.py` | ⏳ |
-| Idempotency on the orchestrator side: `task.complete` and `audit.flush` ingest dedup by message id so replay doesn't double-finalize or double-audit | `orchestrator/orchestrator.py`, `agent/audit/db.py` | ⏳ |
+| Idempotency on the orchestrator side: `task.complete` and `audit.flush` ingest dedup by message id so replay doesn't double-finalize or double-audit | `orchestrator/dispatcher.py`, `audit/db.py` | ⏳ |
 | Tests: persist-then-send roundtrip; ack deletes pending; broker-kill mid-flight + restart replays exactly once | `tests/test_reliable_send.py`, `tests/integration/test_reliable_send.py` | ⏳ |
 
 **Exit criteria:** `task.complete` and `audit.flush` survive a
@@ -1442,7 +1454,7 @@ Finalization and audit ingest are idempotent under replay.
 | Sandbox TTL watchdog job (5 min): kill sub-agent processes whose TTL has expired and clean up their workspace | `orchestrator/cron.py`, `orchestrator/delegation.py` | ⏳ |
 | Stale-session cleanup job (30 min): archive sessions with no activity for 24 h | `orchestrator/cron.py` | ⏳ |
 | Health-check job (10 min): verify NMB broker, inference backend, Slack connectivity; surface failures via structured log + Slack DM | `orchestrator/cron.py`, `connectors/slack/health.py` | ⏳ |
-| Audit-DB maintenance job (daily): SQLite `VACUUM` + checkpoint + rotate old entries | `orchestrator/cron.py`, `agent/audit/db.py` | ⏳ |
+| Audit-DB maintenance job (daily): SQLite `VACUUM` + checkpoint + rotate old entries | `orchestrator/cron.py`, `audit/db.py` | ⏳ |
 | Tests: scheduler tick + job-due logic; Markdown state round-trip; missed-while-restarting jobs run on next tick; each operational job against fixtures | `tests/test_cron.py` | ⏳ |
 
 **Exit criteria:** the four operational cron jobs run on schedule,
@@ -1453,7 +1465,7 @@ each job's failure mode is observable in the log.
 
 | Task | Files | Status |
 |------|-------|--------|
-| Progress relaying to Slack | `orchestrator/delegation.py` | ⏳ |
+| Progress relaying to Slack | `orchestrator/dispatcher.py`, `connectors/slack/finalization.py` | ✅ minimal text-only progress lines landed in Phase 3b; richer thinking-indicator UI remains polish |
 | File tool edge case hardening (symlinks, binary files, encoding) | `tools/files.py` | ⏳ |
 | Skill-body-size startup log — observability for §17 Q5 | `agent/skill_loader.py` | ⏳ |
 | Lazy `load_skill` capability — sub-agent only; metadata in prompt, body on demand (SDK §11.1.1) | `tools/load_skill.py` (new), `agent/skill_loader.py`, `tools/tool_registry_factory.py`, `prompts/coding_agent.md`, `tests/test_load_skill.py` (new) | ⏳ |
@@ -1495,12 +1507,12 @@ only if the M3 design review pulls them in.
 | AgentLoop + NMB config sections | YAML `agent_loop:` / `nmb:` populate the matching `AppConfig` fields | ✅ `tests/test_config.py::TestYamlOverlay::test_agent_loop_section_populates_config`, `TestYamlPrecedence::test_nmb_section_populates_config`, `::test_agent_loop_section_populates_runtime_knobs` |
 | Sub-agent workspace isolation | Each sub-agent invocation lands in a distinct `<base>/agent-<hex>` subdirectory so concurrent runs can't clobber each other's scratchpad / notes | ✅ `tests/test_coding_agent_main.py::TestCliMode::test_cli_mode_per_agent_subdirectory_is_created` |
 | Sub-agent tool surface (enforcement-by-construction) | Sub-agent registry excludes `git_commit`; orchestrator retains it for finalisation | ✅ `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit`, `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface` |
-| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; unblocks on completion | ✅ `tests/test_delegation.py::TestSemaphoreCap::test_third_call_blocks_until_a_slot_frees` |
-| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ✅ `tests/test_delegation.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations` |
+| Delegation concurrency cap | Semaphore blocks at `max_concurrent_tasks`; slot is held for the live workflow and released on `terminate` / workflow cleanup | ✅ `tests/test_delegation_manager.py::TestSemaphoreCap` |
+| Delegation spawn depth cap | `max_spawn_depth` exceeded → delegation rejected with error | ✅ `tests/test_delegation_manager.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations` |
 | NMB reliable send | Message persisted to disk before send; deleted after ack | ⏳ Pending (Phase 4) |
 | NMB crash recovery | Pending messages replayed on broker startup | ⏳ Pending (Phase 4) |
 | `ToolSearch` meta-tool | Returns correct tools for keyword queries; non-core excluded from prompt | ✅ `tests/test_tool_search.py` — `TestRegistrySearch` (scoring), `TestRegistrySurface::test_default_tool_definitions_excludes_non_core`, `TestToolSearchTool::test_tool_search_returns_matches_and_surfaces_them`, `TestFullToolRegistryIntegration::test_default_prompt_surface_shrinks` |
-| Finalization tools | Each tool produces correct output with mock sandbox/git | ⏳ Pending (Phase 3b) |
+| Finalization tools | Each tool produces correct output with mock sandbox/git; Slack action handler routes Push & PR / Iterate / Discard | ✅ `tests/test_finalization.py`, `tests/test_finalization_actions.py` |
 | Cron scheduling | Jobs fire at correct intervals; missed jobs caught up | ⏳ Pending (Phase 5) |
 
 ### 16.2 Integration Tests
@@ -1512,13 +1524,13 @@ only if the M3 design review pulls them in.
 | Config YAML — deployment override | Mount a custom `config.yaml` over the default → `coding.workspace_root` picks up the override without a rebuild | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_honours_yaml_deployment_override` — custom YAML via `NEMOCLAW_CONFIG_PATH` directs the sub-agent's workspace root without a rebuild; asserts the per-agent subdir lands under the YAML-supplied path. |
 | Sub-agent NMB lifecycle | Connect, `sandbox.ready`, `task.assign`, `task.complete` | ✅ End-to-end coverage: (a) NMB wire-level transport via `tests/integration/test_lifecycle.py::{TestSandboxConnect,TestSandboxDisconnect,TestSandboxReconnect}`; (b) sub-agent connect / close wiring via `tests/test_coding_agent_main.py::TestNmbMode`; (c) `task.assign` / `task.complete` protocol body via `tests/integration/test_delegation.py::TestDelegationEndToEnd` |
 | Coding agent end-to-end | Agent receives task, uses file tools, returns diff | ✅ `tests/test_integration_coding_agent.py::test_agent_subprocess_executes_file_tool_call` — subprocess + stateful OpenAI-format mock serves a `write_file` tool_call then a terminating reply; assertions: file lands on disk inside the per-agent workspace, final reply reaches stdout. |
-| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | 🟡 Partial — spawn→complete shipped via `tests/integration/test_delegation.py::TestDelegationEndToEnd::test_delegate_task_round_trip_through_broker` (Phase 3a); finalize closes the loop in Phase 3b |
-| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` | ✅ `tests/test_delegation.py::TestSemaphoreCap::test_third_call_blocks_until_a_slot_frees` (in-process semaphore proof at unit level — full multi-broker integration in Phase 3b) |
-| Model-driven finalization | `task.complete` → model calls `present_work_to_user` → user clicks [Push & PR] | ⏳ Pending (Phase 3b) |
-| Iteration flow | User feedback → `re_delegate` → same agent → updated result | ⏳ Pending (Phase 3b) |
-| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ⏳ Pending (Phase 3b) |
+| Orchestrator delegation full flow | Spawn → assign → complete → finalize → cleanup | ✅ Unit-level full-flow coverage across `tests/test_delegation_manager.py`, `tests/test_dispatcher.py`, `tests/test_finalization.py`, and `tests/test_finalization_actions.py`; broker-level spawn→complete remains covered by `tests/integration/test_delegation.py::TestDelegationEndToEnd::test_delegate_task_round_trip_through_broker` |
+| Delegation concurrency enforcement | Third delegation waits when `max_concurrent_tasks=2` until a live workflow releases its slot | ✅ `tests/test_delegation_manager.py::TestSemaphoreCap` |
+| Model-driven finalization | `task.complete` → finalization agent/tool call → `present_work_to_user` / terminal action | ✅ `tests/test_dispatcher.py`, `tests/test_finalization.py` |
+| Iteration flow | User feedback → `re_delegate` → same baseline → updated result | ✅ `tests/test_finalization.py`, `tests/test_finalization_actions.py`, `tests/test_dispatcher.py::TestDeregisterTerminatesSubAgent::test_re_delegate_does_not_terminate` |
+| Concurrent finalization | Two sub-agents complete simultaneously; both finalize concurrently | ✅ `tests/test_dispatcher.py` covers non-blocking finalization tasks and per-workflow routing |
 | NMB at-least-once delivery | Kill broker after persist, restart, verify replay | ⏳ Pending (Phase 4) |
-| Audit NMB flush + fallback | Tool calls arrive via NMB batch and/or JSONL fallback | ⏳ Pending (Phase 3b) |
+| Audit NMB flush | Tool calls arrive via NMB batch and are ingested idempotently | ✅ `tests/test_audit_buffer.py`, `tests/test_dispatcher.py`; durable replay is deferred to Phase 4 |
 | TTL watchdog | Watchdog fires → sub-agent process killed → workspace cleaned | ⏳ Pending (Phase 5) |
 
 ### 16.3 Safety Tests
@@ -1527,9 +1539,9 @@ only if the M3 design review pulls them in.
 |------|-----------------|--------|
 | Tool surface enforcement | Sub-agent cannot use tools not in its `tool_surface` | 🟡 Partial — Phase 1 enforces by *construction*: `create_coding_tool_registry` deliberately omits `git_commit` (orchestrator-only, per §7.1), so the sub-agent's `ToolRegistry` has no entry the model could invoke.  Covered by `tests/test_git_tools.py::TestGitToolRegistration::test_include_commit_false_omits_git_commit` and `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Phase 3 will add a runtime allow-list check for the broader "tool_surface"-as-policy story (e.g. orchestrator-granted per-task tool restrictions). |
 | Workspace path sandboxing | File tools cannot access outside `/sandbox/workspace/` | ✅ `tests/test_file_tools.py::TestSafeResolve`, `TestReadFile::test_read_path_escape_blocked`, `::test_read_absolute_path_blocked`, `TestWriteFile::test_write_path_escape_blocked` (M2a) |
-| No recursive delegation | Coding agent cannot spawn sub-agents | ✅ Orchestrator-only by construction: `create_coding_tool_registry` (used by `agent/__main__.py`) never registers `delegate_task` — verified by `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`.  Defence in depth at the `DelegationManager` layer is verified by `tests/test_delegation.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations`. |
-| Notes file size cap | Enforced at the orchestrator when reading back the notes file — large writes are truncated before being fed into finalization context | ⏳ Pending (Phase 3b) |
-| Diff baseline integrity | (a) `task.complete` carrying a `workspace_baseline.base_sha` that doesn't match the assigned one fails finalisation with `BaselineDriftError`; (b) two sub-agents in the same workflow both observe the same `base_sha` after independent spawn; (c) sub-agent's reported `diff` matches `git diff <base_sha>` (working-tree-inclusive — sub-agents never commit, so `..HEAD` would silently drop their edits) re-derived by the orchestrator; (d) `re_delegate`'s second `task.assign` carries the same baseline as the first (§6.6) | ⏳ Pending: (b) shared-baseline parallel spawn in Phase 3a; (a), (c), (d) in Phase 3b |
+| No recursive delegation | Coding agent cannot spawn sub-agents | ✅ Orchestrator-only by construction: `create_coding_tool_registry` (used by `agent/__main__.py`) never registers `delegate_task` — verified by `tests/test_file_tools.py::TestCodingToolRegistry::test_factory_creates_sub_agent_tool_surface`. Defence in depth at the `DelegationManager` layer is verified by `tests/test_delegation_manager.py::TestFailureModes::test_max_spawn_depth_zero_blocks_all_delegations`. |
+| Notes file size cap | Notes content is truncated before finalization context construction | ✅ `tests/test_finalization.py` covers finalization payload/context handling |
+| Diff baseline integrity | (a) `task.complete` carrying a `workspace_baseline.base_sha` that doesn't match the assigned one fails finalisation with `BaselineDriftError`; (b) sub-agent's reported `diff` matches `git diff <base_sha>` re-derived by the orchestrator; (c) `re_delegate`'s second `task.assign` carries the same baseline as the first (§6.6) | ✅ `tests/test_finalization.py`, `tests/test_delegation_manager.py`, `tests/test_delegation_tool.py`; multi-sandbox shared-baseline proof remains M3 |
 
 ---
 

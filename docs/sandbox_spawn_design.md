@@ -2,7 +2,7 @@
 
 > **Status:** Proposed
 >
-> **Last updated:** 2026-05-04
+> **Last updated:** 2026-05-11
 >
 > **Related:**
 > [NMB Design](nmb_design.md) |
@@ -248,3 +248,42 @@ storage, they should be treated as isolated by default:
   class, but they remain logically separate volumes.
 - Shared writable state across sandboxes requires explicit configuration
   (shared mount, shared PVC, or API-based exchange such as NMB).
+
+---
+
+## 11  OpenShell Slack Context
+
+Searches in `#openshell-dev` on 2026-05-11 found related discussion, but no
+confirmed native primitive for one sandbox to directly spawn or address another
+sandbox as an internal service.
+
+- [Sandbox-to-sandbox comms example](https://nvidia.slack.com/archives/C0AE9P50JVA/p1777313346977149)
+  mentioned draft PR [NVIDIA/OpenShell#991](https://github.com/NVIDIA/OpenShell/pull/991)
+  for multi-agent memory coordination between Codex agents running in different
+  OpenShell sandboxes.  The proposed coordination path uses GitHub and markdown
+  as shared state.  It was described as a getting-started example, not a new
+  OpenShell feature.
+- [Lumina sandbox spawning thread](https://nvidia.slack.com/archives/C0AE9P50JVA/p1772650754486069?thread_ts=1772468821.392609)
+  discussed Lumina spawning a sandbox/container workspace for artifacts and
+  logs, plus a desire for volume mounting.  The guidance was to keep operations
+  going through the gateway and use file sync/upload-download patterns instead
+  of adding nested sandbox or host-mount behavior.  The follow-up conclusion was
+  that Lumina could use the existing sandbox workspace rather than spawning a
+  Docker container workspace.
+- [SSH from inside OpenShell thread](https://nvidia.slack.com/archives/C0AE9P50JVA/p1778099232367489)
+  treated SSH access from within a sandbox as a security-sensitive escape path.
+  The useful current primitive is `sandbox exec` through the CLI/SDK; running
+  the OpenShell supervisor as a login shell was only future exploration.
+- [Sandboxed service exposure thread](https://nvidia.slack.com/archives/C0AE9P50JVA/p1778274070318439?thread_ts=1778274070.318439)
+  said `openshell service` is intended for long-running sandbox services through
+  the gateway, while `openshell forward` is better suited to ephemeral access.
+- [Nested virtualization thread](https://nvidia.slack.com/archives/C0AE9P50JVA/p1778275614633809?thread_ts=1778273176.712349)
+  noted that OpenShell needs one of Kubernetes, Docker, or KVM/QEMU to create a
+  sandbox; VM deployments therefore need the relevant runtime capability, such
+  as nested virtualization for KVM/QEMU.
+
+Implication for this design: keep "parent/child" as application metadata over
+gateway-managed sibling sandboxes.  Do not assume Docker-in-Docker, direct
+sandbox-to-sandbox service discovery, or host mounts.  Use gateway-mediated
+lifecycle APIs and an external rendezvous path for message traffic until
+OpenShell provides a first-class sandbox service mechanism.
