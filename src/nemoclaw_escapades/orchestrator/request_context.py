@@ -1,18 +1,11 @@
 """Per-request context exposed to tools via :class:`contextvars.ContextVar`.
 
-Some tools — notably ``delegate_task`` — need to address the user's
-originating channel/thread when finalisation results arrive
-asynchronously much later.  They can't know that at tool-registration
-time (channel/thread vary per request), so the orchestrator drops a
-:class:`RequestContext` into a ``ContextVar`` at the top of
-:meth:`Orchestrator.handle` and the tools read it back when invoked.
+Some tools need the user's originating channel/thread when asynchronous results
+arrive later.  The orchestrator binds a :class:`RequestContext` at the top of
+``Orchestrator.handle`` and tools read it when invoked.
 
-``ContextVar`` is the right primitive here because asyncio tasks
-spawned inside the request automatically inherit the parent's
-context, so a tool that ``await``s another tool sees the same
-binding.  A naïve module-level global would race across concurrent
-Slack events — two simultaneous requests would clobber each other's
-channel id.
+``ContextVar`` keeps concurrent Slack/CLI requests isolated while still flowing
+through awaits and child tasks spawned inside the request.
 """
 
 from __future__ import annotations
@@ -25,20 +18,17 @@ from dataclasses import dataclass
 class RequestContext:
     """Request-scoped context tools may read.
 
-    Attributes:
-        request_id: Orchestrator request identifier (mirrors
-            ``NormalizedRequest.request_id``).
-        channel_id: Connector channel identity (Slack channel, etc.).
-            ``None`` for headless / CLI invocations.
-        thread_ts: Thread / parent timestamp inside *channel_id*.
-            ``None`` posts to channel root.
-        source: Connector source string (``"slack"``, ``"cli"``, …);
-            useful for tools that branch on platform.
+    Bound once per orchestrator request and read by tools that need to route
+    later results back to the originating connector thread.
     """
 
+    # Orchestrator request identifier.
     request_id: str
+    # Connector channel id; None for headless or CLI invocations.
     channel_id: str | None = None
+    # Connector thread timestamp or parent id inside channel_id.
     thread_ts: str | None = None
+    # Connector source string, e.g. "slack" or "cli".
     source: str = ""
 
 
@@ -51,9 +41,8 @@ _REQUEST_CONTEXT: ContextVar[RequestContext | None] = ContextVar(
 def set_request_context(context: RequestContext | None) -> None:
     """Bind *context* to the current asyncio task.
 
-    Call once at the start of :meth:`Orchestrator.handle`; subsequent
-    tool invocations in the same task (and in any tasks the tools
-    spawn) will read the same binding.
+    Call once at the start of ``Orchestrator.handle``.  Pass ``None`` to clear
+    the binding for headless or teardown paths.
     """
     _REQUEST_CONTEXT.set(context)
 

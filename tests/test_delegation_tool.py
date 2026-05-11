@@ -41,17 +41,13 @@ class _FakeManager:
         raise_error: DelegationError | None = None,
     ) -> None:
         self.last_task: TaskAssignPayload | None = None
-        self.last_context: WorkflowContext | None = None
         self._raise = raise_error
 
     async def delegate(
         self,
         task: TaskAssignPayload,
-        *,
-        context: WorkflowContext | None = None,
     ) -> DelegationResult:
         self.last_task = task
-        self.last_context = context
         if self._raise:
             raise self._raise
         return DelegationResult(
@@ -199,9 +195,9 @@ class TestDispatcherRegistration:
 
         # Override the manager.delegate to record ordering.
         class _OrderManager(_FakeManager):
-            async def delegate(self, task: TaskAssignPayload, *, context: Any = None) -> Any:
+            async def delegate(self, task: TaskAssignPayload) -> Any:
                 order.append("delegate")
-                return await super().delegate(task, context=context)
+                return await super().delegate(task)
 
         # Wrap dispatcher.register so we observe the order.
         original_register = dispatcher.register_workflow

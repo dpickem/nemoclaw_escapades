@@ -1,53 +1,25 @@
 """Orchestrator — connector-facing request handler with conversation management.
 
-The orchestrator is the central component of the NemoClaw runtime.  It
-owns the full request lifecycle: receive a platform-neutral request from
-a connector, build prompt context, delegate inference + tool execution
-to ``AgentLoop``, and return a platform-neutral response.
+The orchestrator receives platform-neutral connector requests, builds prompt
+context, runs inference/tool execution, and returns platform-neutral responses.
+It imports no Slack/provider SDKs directly; those concerns stay behind connector
+and backend interfaces.
 
-**Isolation guarantees** — The orchestrator imports *no* platform SDK
-(``slack_sdk``, ``slack_bolt``, etc.) and contains *no* provider-specific
-logic.  It communicates with connectors through ``NormalizedRequest`` /
-``RichResponse`` and with backends through ``InferenceRequest`` /
-``InferenceResponse``.
+Each thread has an in-memory conversation history managed by
+``LayeredPromptBuilder``.  A request becomes system prompt + capped thread
+history + latest user message before it reaches the model.
 
-**Multi-turn conversation** — Each Slack thread (keyed by ``thread_ts``)
-maintains an in-memory message history.  The prompt sent to the model is
-always: system prompt + full thread history + latest user message.
-History is capped at a configurable maximum (default 50 messages) to
-prevent unbounded memory growth.  History is lost on restart — persistent
-conversation storage is deferred to M5.
+When tools are registered, ``AgentLoop`` owns the multi-turn tool-use cycle.
+The orchestrator still owns connector concerns around approval prompts,
+finalization button routing, error responses, and history commits.
 
-**Tool-use delegation** — When tools are registered, the orchestrator
-creates an ``AgentLoop`` and delegates the multi-turn inference + tool
-execution cycle to it.  The ``AgentLoop`` is stateless per call — all
-connector concerns (history, approval UI, error responses) remain here.
+Write tools pause for user approval.  The paused loop state is stored by thread
+key and resumed only when the user clicks Approve; Deny or a new user message
+clears the pending write.
 
-**Two-list message flow.**  The orchestrator is where NemoClaw's
-permanent and ephemeral message lists meet:
-
-1. ``LayeredPromptBuilder.messages_for_inference`` returns
-   ``[system, …capped history…, user]``.  This is the *input* to the
-   agent loop; history is stored in the prompt builder itself, not here.
-2. That list is passed to ``AgentLoop.run()``, which copies it into its
-   own per-run ``working_messages`` and extends it with
-   ``assistant``-with-``tool_calls`` and ``tool``-role messages as it
-   executes the tool-use cycle.  The orchestrator never sees these
-   intermediate messages while the loop runs.
-3. On return, the orchestrator reads ``result.content`` (the model's
-   final text-only reply) and calls
-   ``self._prompt.commit_turn(thread_key, request.text, result.content)``
-   to persist the user + final-assistant pair to thread history.  The
-   tool-call round-trips in ``result.working_messages`` are *not*
-   written back — otherwise a ``read_file`` on a large file would
-   dominate every subsequent prompt in that thread.  Those round-trips
-   survive only in the audit DB (per-tool-call records) and in the
-   ``inference_calls`` table (full request payload per round).
-
-**Approval gate** — Write tool calls are gated before execution.  The
-``AgentLoop`` raises ``WriteApprovalError`` which the orchestrator
-catches, saves the conversation state, and presents Approve / Deny
-buttons via the connector.
+Thread history stores user/final-assistant pairs only.  Tool-call round-trips
+live in audit surfaces, not future prompts, so large tool outputs do not poison
+later turns in the same thread.
 """
 
 from __future__ import annotations
@@ -99,6 +71,12 @@ if TYPE_CHECKING:
 
 logger = get_logger("orchestrator")
 
+# Number of decimal places for latency values in structured logs.
+_LATENCY_LOG_DECIMALS: int = 1
+
+# Initial inference attempt before continuation retries begin.
+_INITIAL_INFERENCE_ATTEMPT_COUNT: int = 1
+
 
 class Orchestrator:
     """Connector-facing request handler with conversation management.
@@ -134,80 +112,46 @@ class Orchestrator:
         agent_id: str = "",
         finalization_action_handler: FinalizationActionHandler | None = None,
     ) -> None:
-        """Initialise the orchestrator.
+        """Initialise the orchestrator and optional tool loop.
 
         Args:
-            backend: Inference backend used for chat-completions calls.
-            config: Orchestrator-level settings (model, temperature,
-                max tokens, system prompt path, history cap).
-            agent_loop: Reusable ``AgentLoop`` runtime knobs (tool-round
-                cap, continuation retries, compaction thresholds).
-                When ``None``, loop-runtime fields fall back to
-                ``AgentLoopConfig()`` defaults.  The orchestrator
-                always overrides ``model`` / ``temperature`` /
-                ``max_tokens`` on this config with the fields from
-                ``config`` so prompt-level settings stay in one place.
-            approval: Gate consulted before executing write tools.
-                Defaults to ``WriteApproval`` (writes require user
-                confirmation via Approve / Deny buttons).
-            tools: Optional tool registry.  When provided, an
-                ``AgentLoop`` is created and used for multi-turn
-                tool calling.
-            audit: Optional audit database.  When provided, every tool
-                invocation is logged (service, args, latency, success).
-            agent_id: Identifier surfaced in the runtime-metadata prompt
-                layer (useful for multi-agent traceability once M2b
-                lands).  Empty string omits the line.
-            finalization_action_handler: Optional handler that routes
-                ``FINALIZATION_ACTION_*`` button clicks to the
-                matching :class:`FinalizationSession` method.  When
-                ``None`` (e.g. delegation disabled), button clicks
-                fall through and are handled by the regular agent
-                loop, which is the right behaviour for a connector
-                that has no live workflows to act on.
+            backend: Inference backend.
+            config: Model and prompt-history settings.
+            agent_loop: Runtime knobs for tool-capable loops.
+            approval: Write-approval gate; defaults to user approval.
+            tools: Optional tool registry.
+            audit: Optional tool-call audit DB.
+            agent_id: Optional id surfaced in prompt metadata.
+            finalization_action_handler: Optional button-click handler.
         """
+        # Inference backend used by direct and tool-capable paths.
         self._backend = backend
+        # Orchestrator-level model, prompt, and history settings.
         self._config = config
-        # Default to WriteApproval — write tool calls are blocked and
-        # surfaced to the user with Approve/Deny buttons.  Callers can
-        # override with AutoApproval() for testing or trusted contexts.
+        # Approval gate for write tools and response-level checks.
         self._approval = approval or WriteApproval()
+        # Optional tool registry; absence uses direct inference path.
         self._tools = tools
+        # Optional audit DB passed through to AgentLoop.
         self._audit = audit
+        # Agent id rendered in runtime prompt metadata.
         self._agent_id = agent_id
+        # Optional router for finalization action button clicks.
         self._finalization_actions = finalization_action_handler
-        # LayeredPromptBuilder owns per-thread conversation histories,
-        # the 5-layer system prompt (identity, task context, cache
-        # boundary, runtime metadata, channel hint), and the message
-        # assembly for inference calls.
+        # Per-thread prompt history and message assembly.
         self._prompt = LayeredPromptBuilder(
             identity=load_system_prompt(config.system_prompt_path),
             max_thread_history=config.max_thread_history,
         )
-        # Cache a comma-separated list of available tool names for the
-        # runtime-metadata layer.  Kept empty when no tools are
-        # registered so the prompt doesn't advertise nothing.
+        # Comma-separated tool names for runtime prompt metadata.
         self._tools_summary = ", ".join(sorted(tools.names)) if tools else ""
-        # Keyed by thread_ts — stores the full conversation snapshot
-        # when a write tool is blocked.  Popped on Approve (resume
-        # execution) or Deny (discard), or when a new user message
-        # arrives in the same thread (stale cleanup).
+        # Thread key -> paused write approval state.
         self._pending_approvals: dict[str, PendingApproval] = {}
 
         # The AgentLoop is created once and reused for every request.
         # It's only instantiated when tools are registered — without
         # tools, the orchestrator uses the simpler _inference_with_repair
         # path which doesn't support multi-turn tool calling.
-        #
-        # The loop config merges two sources: prompt-level fields
-        # (model / temperature / max_tokens) come from
-        # ``OrchestratorConfig`` so the orchestrator stays the source
-        # of truth for what it says to the model; runtime knobs (tool-
-        # round cap, continuation retries, compaction thresholds) come
-        # from ``AgentLoopConfig``.  When a caller doesn't supply
-        # ``agent_loop``, loop-runtime knobs fall back to dataclass
-        # defaults — preserving the pre-``agent_loop``-in-AppConfig
-        # behaviour for tests that build ``Orchestrator`` directly.
         base_loop_cfg = agent_loop or AgentLoopConfig()
         merged_loop_cfg = dataclasses.replace(
             base_loop_cfg,
@@ -215,6 +159,7 @@ class Orchestrator:
             temperature=config.temperature,
             max_tokens=config.max_tokens,
         )
+        # Shared AgentLoop for tool-capable requests.
         self._agent_loop: AgentLoop | None = None
         if tools and len(tools) > 0:
             self._agent_loop = AgentLoop(
@@ -222,9 +167,6 @@ class Orchestrator:
                 tools=tools,
                 config=merged_loop_cfg,
                 audit=audit,
-                # Share the same approval gate so both the orchestrator's
-                # response-level check and the loop's tool-level check
-                # use the same policy.
                 approval=self._approval,
             )
 
@@ -233,24 +175,15 @@ class Orchestrator:
         request: NormalizedRequest,
         on_status: StatusCallback | None = None,
     ) -> RichResponse:
-        """Process a normalised request through the full agent loop.
+        """Process one connector request and return a connector response.
 
-        When tools are registered, the loop supports multi-turn tool
-        calling: the model can emit tool_calls, the orchestrator
-        executes them, feeds results back, and the model continues
-        until it produces a final text response.
-
-        Write tool calls are gated: the loop pauses and returns an
-        approval request with Approve / Deny buttons.  Clicking
-        Approve resumes execution; Deny discards the pending action.
+        Handles button clicks before inference, routes pending Iterate replies,
+        runs either AgentLoop or direct inference, and commits successful turns
+        to thread history.
 
         Args:
             request: Platform-neutral request from the connector.
-                May carry an ``ActionPayload`` for button clicks.
-            on_status: Optional async callback invoked with a
-                human-readable status string before each tool call
-                (e.g. "Searching Jira...").  Connectors use this to
-                update a thinking indicator in real time.
+            on_status: Optional thinking-indicator callback.
 
         Returns:
             A ``RichResponse`` containing the assistant's reply (text,
@@ -264,10 +197,7 @@ class Orchestrator:
         # the request_id so every message still gets a unique key.
         thread_key = request.thread_ts or request.request_id
 
-        # Plumb the request context to tools that need it (delegate_task
-        # needs channel/thread to register the workflow with the
-        # dispatcher; the renderer reads it back when rendering
-        # finalisation results).
+        # Make channel/thread metadata available to tools.
         set_request_context(
             RequestContext(
                 request_id=request.request_id,
@@ -277,9 +207,8 @@ class Orchestrator:
             )
         )
 
-        # ── 1. Button-click dispatch ──────────────────────────────────
-        # If the request carries an action payload, route it directly
-        # to the matching handler instead of running inference.
+        # ── 1. Button-click dispatch ─────────────────────────────────
+        # Button clicks bypass the planning model.
         if request.action:
             if request.action.action_id == APPROVAL_ACTION_APPROVE:
                 return await self._handle_write_approval(request, thread_key, on_status)
@@ -288,22 +217,16 @@ class Orchestrator:
             if self._finalization_actions is not None and is_finalization_action(request):
                 return await self._finalization_actions.handle(request)
 
-        # ── 1b. Pending iteration text ──────────────────────────────────
-        # When the user previously clicked Iterate, the next text
-        # message in that thread is the iteration prompt.  Routed to
-        # ``re_delegate`` here without running the planner — the user's
-        # intent is unambiguous.
+        # ── 2. Pending iteration text ────────────────────────────────
+        # Text after an Iterate click becomes the re-delegation prompt.
         if (
             self._finalization_actions is not None
             and self._finalization_actions.is_pending_iteration(thread_key)
         ):
             return await self._finalization_actions.consume_iteration_feedback(request, thread_key)
 
-        # ── 2. Stale approval cleanup ─────────────────────────────────
-        # If the user sends a new text message in a thread that has a
-        # pending write approval, discard it.  The user is moving on;
-        # executing a stale write after a new conversation turn would
-        # be confusing and potentially dangerous.
+        # ── 3. Stale approval cleanup ────────────────────────────────
+        # A fresh message supersedes any pending write approval.
         if thread_key in self._pending_approvals:
             logger.info(
                 "Clearing stale pending approval (new message in thread)",
@@ -312,18 +235,11 @@ class Orchestrator:
             self._pending_approvals.pop(thread_key)
 
         try:
-            # ── 3. Prompt assembly ────────────────────────────────────
-            # Build the full message list: system prompt + per-thread
-            # conversation history + the new user message.  History is
-            # capped at max_thread_history to bound context window usage.
+            # ── 4. Prompt assembly ───────────────────────────────────
             messages = self._prompt.messages_for_inference(
                 thread_key,
                 request.text,
                 agent_id=self._agent_id,
-                # Raw source string flows straight through — the prompt
-                # builder's channel-hint renders any platform name
-                # (e.g. "slack", "teams", "cli") into the Layer-4 text
-                # without needing enum coercion.
                 source_type=request.source,
                 tools_summary=self._tools_summary,
             )
@@ -333,14 +249,11 @@ class Orchestrator:
                 extra={
                     "request_id": request.request_id,
                     "thread_ts": thread_key,
-                    "history_length": len(messages) - 1,
+                    "history_length": len(messages) - _INITIAL_INFERENCE_ATTEMPT_COUNT,
                 },
             )
 
-            # ── 4. Inference ──────────────────────────────────────────
-            # Two paths: with tools (AgentLoop handles multi-turn
-            # tool calling) or without (single inference call with
-            # transcript repair for truncation/empty responses).
+            # ── 5. Inference ─────────────────────────────────────────
             if self._agent_loop:
                 callback = self._make_tool_start_callback(on_status)
                 result = await self._agent_loop.run(
@@ -355,11 +268,7 @@ class Orchestrator:
                 # inference with continuation retries for truncation.
                 content = await self._inference_with_repair(messages, request.request_id)
 
-            # ── 5. Response-level approval ────────────────────────────
-            # A second approval check on the *text content* itself.
-            # This is separate from the write-tool gate — it catches
-            # cases where the model's final answer should be filtered
-            # (e.g. policy violations in the response text).
+            # ── 6. Response approval ─────────────────────────────────
             approval = await self._approval.check(
                 "respond",
                 {"content": content, "request_id": request.request_id},
@@ -377,38 +286,23 @@ class Orchestrator:
                     "Please try rephrasing your request."
                 )
 
-            # ── 6. Commit to history ──────────────────────────────────
-            # Only commit after a successful round — failed inference or
-            # approval-blocked writes must not pollute the thread history,
-            # otherwise the model would see phantom turns on the next request.
-            #
-            # Only the final text ``content`` is persisted — the
-            # tool-call round-trips in ``result.working_messages`` (when
-            # the AgentLoop path ran) are deliberately dropped.  See
-            # this module's docstring "Two-list message flow" for why.
+            # ── 7. Commit + respond ──────────────────────────────────
+            # Persist only the final assistant text, not tool round-trips.
             self._prompt.commit_turn(thread_key, request.text, content)
 
             logger.info(
                 "Request completed",
                 extra={
                     "request_id": request.request_id,
-                    "latency_ms": round(timer.ms, 1),
+                    "latency_ms": round(timer.ms, _LATENCY_LOG_DECIMALS),
                 },
             )
 
             return self._shape_response(request, content)
 
-        # ── Error handling ────────────────────────────────────────────
-        # Errors are caught in specificity order.  Each produces a
-        # user-friendly message without leaking internal details.
-
+        # ── Error handling ───────────────────────────────────────────
         except WriteApprovalError as exc:
-            # The AgentLoop encountered a write tool and the approval
-            # gate denied it.  Save the full conversation state so we
-            # can resume exactly where we left off when the user clicks
-            # Approve.  The pending state includes the working messages,
-            # the assistant's tool-call message, and the original user
-            # text (needed to commit the turn on resume).
+            # Save paused loop state so Approve can resume exactly here.
             exc.pending.original_user_text = request.text
             self._pending_approvals[thread_key] = exc.pending
             logger.info(
@@ -416,36 +310,30 @@ class Orchestrator:
                 extra={
                     "request_id": request.request_id,
                     "thread_key": thread_key,
-                    "latency_ms": round(timer.ms, 1),
+                    "latency_ms": round(timer.ms, _LATENCY_LOG_DECIMALS),
                 },
             )
             return self._build_approval_response(request, exc.pending)
 
         except InferenceError as exc:
-            # Classified backend failure (auth, rate limit, timeout,
-            # model error).  Each category maps to a specific user-facing
-            # message so the user knows whether to retry or escalate.
             logger.error(
                 "Inference failed",
                 extra={
                     "request_id": request.request_id,
                     "error_category": exc.category.value,
-                    "latency_ms": round(timer.ms, 1),
+                    "latency_ms": round(timer.ms, _LATENCY_LOG_DECIMALS),
                 },
                 exc_info=True,
             )
             return self._error_response(request, exc.category)
 
         except Exception:
-            # Catch-all for truly unexpected failures (bugs, network
-            # issues, corrupted state).  Logged at ERROR with full
-            # traceback for debugging.
             logger.error(
                 "Unhandled error in orchestrator",
                 extra={
                     "request_id": request.request_id,
                     "error_category": ErrorCategory.UNKNOWN.value,
-                    "latency_ms": round(timer.ms, 1),
+                    "latency_ms": round(timer.ms, _LATENCY_LOG_DECIMALS),
                 },
                 exc_info=True,
             )
@@ -461,11 +349,8 @@ class Orchestrator:
     ) -> ToolStartCallback | None:
         """Build a per-request tool-start callback from the connector's status callback.
 
-        Returns a closure that appends "..." to the display name, or
-        ``None`` if no status callback was provided.  The returned
-        closure is passed to ``AgentLoop.run()`` as a parameter —
-        never stored on the shared loop instance — so concurrent
-        requests can't clobber each other's callbacks.
+        The closure is passed to ``AgentLoop.run`` for one request only, so
+        concurrent requests cannot clobber status callbacks.
         """
         if on_status is None:
             return None
@@ -486,10 +371,8 @@ class Orchestrator:
     ) -> str:
         """Call the inference backend without tools, with transcript repair.
 
-        Used when no ``ToolRegistry`` is configured.  The response is
-        passed through ``repair_response`` which handles empty replies,
-        content-filter blocks, and truncation (``finish_reason="length"``
-        triggers continuation retries).
+        Used when no ``ToolRegistry`` is configured.  Handles empty replies,
+        content-filter blocks, and truncation continuations.
 
         Args:
             messages: Full message list (system + history + user).
@@ -505,13 +388,7 @@ class Orchestrator:
         base_messages: list[dict[str, Any]] = [dict(m) for m in messages]
         prior_continuation_chunks: list[str] = []
 
-        # attempt 0 = initial call; attempts 1..N = continuation retries
-        # after finish_reason="length" truncation.
-        for attempt in range(1 + MAX_CONTINUATION_RETRIES):
-            # Rebuild the full message list: original messages + all
-            # prior (partial assistant → "please continue" user) pairs.
-            # This gives the model the full context of what it already
-            # said so it can pick up exactly where it left off.
+        for attempt in range(_INITIAL_INFERENCE_ATTEMPT_COUNT + MAX_CONTINUATION_RETRIES):
             call_messages: list[dict[str, Any]] = list(base_messages)
             for chunk in prior_continuation_chunks:
                 call_messages.append({"role": MessageRole.ASSISTANT, "content": chunk})
@@ -563,8 +440,6 @@ class Orchestrator:
             # loop again with a continuation prompt.
             prior_continuation_chunks.append(repair.content)
 
-        # If we exhaust all retries the model is producing very long
-        # output — return what we have rather than dropping it entirely.
         logger.warning(
             "Exhausted continuation retries, returning partial content",
             extra={"request_id": request_id},
@@ -583,10 +458,8 @@ class Orchestrator:
     ) -> RichResponse:
         """Execute a previously-blocked write after the user clicks Approve.
 
-        Pops the saved ``PendingApproval`` for this thread, appends the
-        assistant tool-call message and tool results to the saved
-        conversation, then resumes the agent loop so the model can
-        generate a final response.
+        Replays the paused tool call, appends its result, and resumes the agent
+        loop so the model can produce a final response.
 
         Args:
             request: The Approve button-click request.
@@ -628,14 +501,9 @@ class Orchestrator:
             },
         )
 
-        # Reconstruct the conversation to the point where the loop
-        # paused.  The assistant's tool-call message must precede the
-        # tool results (OpenAI protocol requirement).
+        # The assistant's tool-call message must precede tool results.
         pending.working_messages.append(pending.assistant_message)
 
-        # Now execute the previously-blocked write tools.  This runs
-        # outside the loop's normal cycle because the loop already
-        # exited via WriteApprovalError.
         callback = self._make_tool_start_callback(on_status)
         tool_results = await self._agent_loop.execute_tool_calls(
             pending.tool_calls,
@@ -666,9 +534,7 @@ class Orchestrator:
             )
             content = result.content
         except WriteApprovalError as exc:
-            # Cascading write: the model's post-approval response
-            # triggered yet another write tool.  Preserve the original
-            # user text so the eventual commit uses the right turn pair.
+            # Cascading write: show another approval prompt.
             exc.pending.original_user_text = pending.original_user_text
             self._pending_approvals[thread_key] = exc.pending
             return self._build_approval_response(request, exc.pending)
@@ -693,15 +559,8 @@ class Orchestrator:
         Returns:
             A ``RichResponse`` confirming cancellation.
         """
-        # Discard the saved state — the write will never execute.
-        # No history commit: the user's original message and the
-        # model's tool-call attempt are both dropped, keeping the
-        # thread history clean for the next turn.
         pending = self._pending_approvals.pop(thread_key, None)
         if not pending:
-            # Stale Deny click (e.g. user clicks an old Deny button after
-            # the approval was already consumed / superseded).  Suppress
-            # the reply rather than posting a noisy "no pending" note.
             logger.info(
                 "Stale Deny click — no pending approval",
                 extra={
@@ -730,9 +589,6 @@ class Orchestrator:
         pending: PendingApproval,
     ) -> RichResponse:
         """Build a ``RichResponse`` with Approve / Deny buttons for a blocked write."""
-        # The description (rendered by AgentLoop._format_write_description)
-        # shows exactly which tools will run and with what arguments, so
-        # the user can make an informed decision.
         text = (
             ":warning: *Write operation requires your approval*\n\n"
             f"{pending.description}\n\n"
@@ -780,10 +636,6 @@ class Orchestrator:
     @staticmethod
     def _error_response(request: NormalizedRequest, category: ErrorCategory) -> RichResponse:
         """Build a user-friendly error response for a classified failure."""
-        # Each category maps to a specific message tone: auth errors
-        # suggest escalating to an admin, rate limits suggest waiting,
-        # etc.  Internal details (stack traces, HTTP codes) are never
-        # exposed to the user — they're in the structured log instead.
         messages = {
             ErrorCategory.AUTH_ERROR: (
                 "I'm having a configuration issue and can't reach the model right now. "

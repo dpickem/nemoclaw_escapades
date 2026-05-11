@@ -1,25 +1,12 @@
 """``delegate_task`` — orchestrator-side fire-and-forget tool.
 
-The orchestrator's planning model calls this tool when the user asks
-for coding work that benefits from a focused sub-agent.  The tool
-spawns the sub-agent, sends ``task.assign``, registers the workflow
-with the :class:`WorkflowDispatcher`, and **returns immediately**.
+The orchestrator model calls this when coding work should run in a focused
+sub-agent.  The tool registers workflow context, sends ``task.assign``, and
+returns immediately; later ``task.complete`` / ``task.error`` arrivals are
+handled by the dispatcher.
 
-The sub-agent's eventual ``task.complete`` / ``task.error`` /
-``audit.flush`` arrive on the dispatcher's event loop and are routed
-to the per-workflow handler — the model's chat thread does **not**
-block on sub-agent latency (design §7.1, §8.2).  The user sees:
-
-1. An immediate "I've delegated this; results will appear in this
-   thread" reply (composed by the orchestrator's main agent loop
-   from this tool's return string).
-2. A separate Slack message later, posted by the finalisation
-   renderer, carrying the synthesised result and action buttons.
-
-The tool is deliberately **orchestrator-only** in M2b: a coding
-sub-agent shouldn't be able to delegate further (the depth-1 cap in
-:class:`DelegationConfig` enforces this).  Don't register
-``delegate_task`` in ``create_coding_tool_registry``.
+This tool is orchestrator-only in M2b.  Coding sub-agents do not receive it, and
+the delegation manager enforces the one-level spawn shape until M3.
 """
 
 from __future__ import annotations
@@ -43,8 +30,29 @@ if TYPE_CHECKING:
 
 logger = get_logger("tools.delegation")
 
-# Logical toolset name used by the registry for grouping
+# Logical toolset name used by the registry for grouping.
 _TOOLSET: str = "delegation"
+
+# Hex characters appended to generated coding-agent ids.
+_AGENT_ID_HEX_CHARS: int = 8
+
+# Hex characters appended to generated workflow ids.
+_WORKFLOW_ID_HEX_CHARS: int = 12
+
+# Minimum accepted max_turns value in the tool schema.
+_MIN_MAX_TURNS: int = 1
+
+# Suggested max_turns for a one-shot lookup.
+_BUDGET_HINT_LOOKUP_TURNS: int = 3
+
+# Suggested max_turns for a routine bug fix.
+_BUDGET_HINT_BUGFIX_TURNS: int = 15
+
+# Suggested max_turns for a multi-file refactor.
+_BUDGET_HINT_REFACTOR_TURNS: int = 30
+
+# Prefix used in generated coding-agent ids.
+_CODING_AGENT_PREFIX: str = "coding-"
 
 
 def _make_delegate_task(
@@ -58,6 +66,10 @@ def _make_delegate_task(
     audit: AuditDB | None = None,
 ) -> ToolSpec:
     """Bind a ``delegate_task`` tool spec to a manager + workspace.
+
+    The returned tool validates optional baseline input, registers workflow
+    context with the dispatcher, records audit start/error rows, and delegates
+    the actual send to :class:`DelegationManager`.
 
     Args:
         manager: The orchestrator's :class:`DelegationManager`.
@@ -96,11 +108,12 @@ def _make_delegate_task(
                     "type": "integer",
                     "description": (
                         "Optional cap on the sub-agent's tool-round budget for this "
-                        "task.  Pick ~3 for one-shot lookups, ~15 for routine bug "
-                        "fixes, ~30 for multi-file refactors.  Leave unset for the "
-                        "default."
+                        f"task. Pick ~{_BUDGET_HINT_LOOKUP_TURNS} for one-shot "
+                        f"lookups, ~{_BUDGET_HINT_BUGFIX_TURNS} for routine bug "
+                        f"fixes, ~{_BUDGET_HINT_REFACTOR_TURNS} for multi-file "
+                        "refactors. Leave unset for the default."
                     ),
-                    "minimum": 1,
+                    "minimum": _MIN_MAX_TURNS,
                 },
                 "model": {
                     "type": "string",
@@ -138,7 +151,8 @@ def _make_delegate_task(
         model: str | None = None,
         workspace_baseline: dict[str, object] | None = None,
     ) -> str:
-        agent_id = f"coding-{uuid.uuid4().hex[:8]}"
+        """Create a workflow, send it to a coding sub-agent, and return an ack."""
+        agent_id = f"{_CODING_AGENT_PREFIX}{uuid.uuid4().hex[:_AGENT_ID_HEX_CHARS]}"
         baseline = (
             WorkspaceBaseline.model_validate(workspace_baseline)
             if workspace_baseline is not None
@@ -146,10 +160,10 @@ def _make_delegate_task(
         )
         task = TaskAssignPayload(
             prompt=prompt,
-            workflow_id=f"wf-{uuid.uuid4().hex[:12]}",
+            workflow_id=f"wf-{uuid.uuid4().hex[:_WORKFLOW_ID_HEX_CHARS]}",
             parent_sandbox_id=parent_sandbox_id,
             agent_id=agent_id,
-            workspace_root=f"{workspace_root}/agent-{agent_id[len('coding-') :]}",
+            workspace_root=f"{workspace_root}/agent-{agent_id[len(_CODING_AGENT_PREFIX) :]}",
             max_turns=max_turns or default_max_turns,
             model=model or default_model,
             workspace_baseline=baseline,
@@ -162,12 +176,10 @@ def _make_delegate_task(
             thread_ts=request_ctx.thread_ts if request_ctx else None,
             request_id=request_ctx.request_id if request_ctx else "",
         )
-        # Register with the dispatcher BEFORE sending task.assign so a
-        # fast sub-agent can't race the registration: the dispatcher
-        # would then drop the resulting task.complete as "unknown
-        # workflow" (see WorkflowDispatcher._handle_task_complete).
+        # Register before send so a fast task.complete cannot race setup.
         if dispatcher is not None:
             dispatcher.register_workflow(workflow_ctx)
+
         logger.info(
             "Delegating task",
             extra={
@@ -191,18 +203,17 @@ def _make_delegate_task(
                 base_branch=baseline.branch if baseline else None,
             )
         try:
-            result = await manager.delegate(task, context=workflow_ctx)
+            result = await manager.delegate(task)
         except DelegationError as exc:
             if dispatcher is not None:
-                # ``manager.delegate`` already terminated the spawned
-                # agent and popped it from ``_spawned`` on its
-                # failure path; this call is a registry-cleanup +
-                # idempotent ``terminate()`` no-op.
+                # Cleans dispatcher state; manager cleanup is idempotent.
                 await dispatcher.deregister_workflow(task.workflow_id)
+
             logger.error(
                 "Delegation failed",
                 extra={"workflow_id": task.workflow_id, "error": str(exc)},
             )
+
             if audit is not None:
                 payload = exc.error_payload
                 await audit.log_delegation_error(

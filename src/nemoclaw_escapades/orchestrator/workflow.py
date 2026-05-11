@@ -1,17 +1,12 @@
 """Workflow-level types shared by the orchestrator's delegation flow.
 
-A *workflow* is everything tied to one ``workflow_id`` — the original
-``TaskAssignPayload``, the originating channel and thread, and any
-iteration state.  The orchestrator keeps this bag of metadata on the
-side so the dispatcher (``orchestrator/dispatcher.py``) can look it up
-when ``task.complete`` / ``task.error`` / ``task.progress`` arrive
-asynchronously, and so the finalisation flow can render results back
-to the right Slack thread.
+A workflow is everything tied to one ``workflow_id``: the current
+``TaskAssignPayload``, the originating channel/thread, and iteration state.  The
+dispatcher uses this metadata to route asynchronous ``task.*`` messages and to
+render finalisation results back to the right user thread.
 
-This module is dependency-free w.r.t. the rest of the package so that
-``WorkflowRenderer`` can be implemented by connectors
-(``connectors/slack/finalization.py``) without dragging the
-orchestrator's whole import graph into a connector unit test.
+This module stays lightweight so connector renderers can implement
+``WorkflowRenderer`` without importing the whole orchestrator stack.
 """
 
 from __future__ import annotations
@@ -32,37 +27,21 @@ from nemoclaw_escapades.nmb.protocol import (
 class WorkflowContext:
     """All workflow-scoped state the dispatcher needs to route arrivals.
 
-    Created by the orchestrator's ``delegate_task`` tool when it
-    sends ``task.assign`` and registered with the
-    :class:`WorkflowDispatcher` keyed by ``workflow_id``.
-
-    Attributes:
-        workflow_id: UUID stamped on every NMB message for this run.
-        task: The most recent ``TaskAssignPayload`` for this workflow.
-            Mutated in place by
-            :meth:`tools.finalization.FinalizationSession.re_delegate`
-            so iteration N+1's :class:`FinalizationSession` reads the
-            new prompt / ``iteration_number`` instead of the original.
-        channel_id: Connector channel identity (e.g. Slack channel ID)
-            — the renderer uses this to address user-facing posts.
-            ``None`` means "no connector context" (CLI invocations,
-            unit tests).
-        thread_ts: Thread / parent timestamp inside *channel_id*.
-            ``None`` posts to channel root.
-        request_id: Original orchestrator request ID — useful for
-            structured logging that needs to correlate the user's
-            Slack request with the eventual finalisation post.
-        started_at: Unix epoch seconds when the workflow was registered.
-            Used for stale-workflow GC and operator-facing dashboards.
-            **Not** updated on re-delegation — it marks workflow
-            start, not iteration start.
+    Re-delegation mutates ``task`` in place so the dispatcher sees the
+    latest prompt and iteration number for the next ``task.complete``.
     """
 
+    # UUID stamped on all NMB messages for this workflow.
     workflow_id: str
+    # Latest task assignment; updated in place by re-delegation.
     task: TaskAssignPayload
+    # Connector channel id, e.g. Slack channel; None for headless tests/CLI.
     channel_id: str | None = None
+    # Connector thread timestamp or parent id inside channel_id.
     thread_ts: str | None = None
+    # Original user request id for logs and trace correlation.
     request_id: str = ""
+    # Workflow registration time; not reset by later iterations.
     started_at: float = field(default_factory=time.time)
 
 
@@ -70,13 +49,8 @@ class WorkflowContext:
 class WorkflowRenderer(Protocol):
     """Connector-side surface the dispatcher / finalizer push results through.
 
-    Each connector (Slack today, more later) implements this Protocol
-    so the orchestrator stays platform-neutral.  The renderer never
-    raises into the dispatcher — implementations swallow connector
-    errors and log internally.
-
-    All methods are async because the typical implementation hits
-    the platform's async SDK (``slack-bolt``'s ``AsyncWebClient``).
+    Slack implements this today; future connectors can provide the same async
+    methods so dispatcher/finalization code remains platform-neutral.
     """
 
     async def render_present_work(
@@ -86,14 +60,10 @@ class WorkflowRenderer(Protocol):
         summary: str,
         diff: str,
     ) -> None:
-        """Post the synthesised work + action buttons to the originating thread.
+        """Post synthesized work and action buttons to the originating thread.
 
-        Args:
-            context: Workflow context (channel / thread).
-            summary: User-facing summary (already synthesised by the
-                finalisation model).
-            diff: Optional pre-truncated diff body.  Empty when the
-                finalisation tool elected to omit the diff.
+        ``summary`` is already produced by the finalisation model. ``diff`` may
+        be empty when the finalisation tool chose to omit it.
         """
         ...
 
@@ -106,10 +76,8 @@ class WorkflowRenderer(Protocol):
     ) -> None:
         """Post the outcome of a finalisation tool back to the thread.
 
-        ``action`` is the tool name (``"push_and_create_pr"``,
-        ``"discard_work"``, etc.); the renderer uses it to pick a
-        cosmetic icon / formatter.  ``result`` is the tool's textual
-        output (PR URL, "Discarded …", etc.).
+        ``action`` is the tool name and ``result`` is the tool's textual output
+        such as a PR URL or discard message.
         """
         ...
 
@@ -121,11 +89,8 @@ class WorkflowRenderer(Protocol):
     ) -> None:
         """Surface a sub-agent ``task.progress`` update to the thread.
 
-        Best-effort: the dispatcher swallows renderer errors here so
-        a transient connector glitch can't kill the dispatcher.
-        Implementations typically translate the typed progress into
-        a single thinking-indicator update; verbose progress posting
-        is intentionally not part of the renderer contract.
+        Implementations usually translate this into a concise thinking
+        indicator or status line.
         """
         ...
 
@@ -137,10 +102,8 @@ class WorkflowRenderer(Protocol):
     ) -> None:
         """Tell the user the sub-agent failed.
 
-        Called when the dispatcher receives ``task.error``.  The
-        finalisation flow does *not* run for errors — the user sees
-        the structured failure directly so they can decide whether
-        to retry, file a bug, or rephrase.
+        Called when the dispatcher receives ``task.error``.  Finalisation does
+        not run for failed sub-agent tasks.
         """
         ...
 
@@ -153,11 +116,7 @@ class WorkflowRenderer(Protocol):
     ) -> None:
         """Surface a finalisation-side failure back to the user.
 
-        Called when the dispatcher caught ``task.complete`` but the
-        finalisation flow itself raised (baseline drift, finalisation
-        ``AgentLoop`` blew up, etc.).  Distinct from
-        :meth:`render_workflow_error` because the *sub-agent*
-        succeeded; the failure is on the orchestrator's side and
-        the user may still want to inspect the diff.
+        This is distinct from ``task.error``: the sub-agent completed, but the
+        orchestrator failed while checking or presenting the result.
         """
         ...

@@ -11,23 +11,14 @@ the message ``type`` field:
 - ``task.progress`` → forward to the connector for thinking-indicator
   updates.
 - ``audit.flush`` → ingest into the central audit DB.
-
-Per-workflow state lives in a registry of :class:`WorkflowContext`
-objects, keyed by ``workflow_id``.  ``delegate_task`` registers a
-context before sending ``task.assign``; the dispatcher deregisters
-on terminal arrival (``task.complete`` after finalisation, or
-``task.error``).
-
-This module replaces the per-delegation ``bus.request()`` /
-"reply on the same future" pattern that was the Phase 3a interim:
-``DelegationManager.delegate`` now sends ``task.assign`` and returns
-immediately.  The dispatcher is the single owner of ``bus.listen()``.
 """
 
 from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
+
+from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_delay, wait_fixed
 
 from nemoclaw_escapades.nmb.protocol import (
     AUDIT_FLUSH,
@@ -56,23 +47,24 @@ if TYPE_CHECKING:
 
 logger = get_logger("orchestrator.dispatcher")
 
+# Default seconds tests wait for a finalization task to appear and finish.
+_DEFAULT_FINALIZATION_WAIT_TIMEOUT_S: float = 5.0
+
+# Seconds between test-helper polls for finalization task completion.
+_FINALIZATION_WAIT_POLL_S: float = 0.02
+
+
+class _FinalizationNotReadyError(Exception):
+    """Internal retry sentinel for ``wait_for_finalization``."""
+
 
 class WorkflowDispatcher:
     """Single owner of the orchestrator's NMB listen queue.
 
-    Lifecycle:
-
-    1. ``await dispatcher.start()`` after the bus is connected.
-    2. Each delegation calls
-       :meth:`register_workflow` *before* it sends ``task.assign``
-       (so a fast sub-agent can't race the registration).
-    3. Inbound NMB messages arrive on the dispatcher's loop and are
-       routed by ``type`` to the matching ``_handle_*`` method.
-       Handlers run inline if they're cheap (audit ingest, error
-       render); finalisation is forked into an independent
-       ``asyncio.Task`` so a slow finalisation can't head-of-line-
-       block ``audit.flush`` ingest for peer workflows.
-    4. ``await dispatcher.close()`` cancels the loop on shutdown.
+    The dispatcher keeps per-workflow context, forwards progress and
+    errors to the renderer, and ingests audit flushes.  Finalisation
+    runs in background tasks so slow workflows do not block other
+    inbound NMB traffic.
     """
 
     def __init__(
@@ -87,45 +79,32 @@ class WorkflowDispatcher:
         """Wire the dispatcher to its collaborators.
 
         Args:
-            bus: Connected NMB ``MessageBus``; the dispatcher owns
-                ``listen()`` so no other code in the orchestrator
-                process should consume from it.
-            audit: Optional audit DB.  When ``None``, ``audit.flush``
-                arrivals are logged and skipped.
-            finalizer: Optional :class:`FinalizationCoordinator`.
-                When ``None``, ``task.complete`` arrivals are logged
-                and the renderer (if any) is asked to surface the
-                payload directly.
-            renderer: Optional connector-side push surface.  When
-                ``None``, the dispatcher runs in headless mode —
-                useful for tests; the orchestrator's ``main.py``
-                always wires one in production.
-            delegation_manager: Optional :class:`DelegationManager`.
-                When supplied, :meth:`deregister_workflow` calls
-                :meth:`DelegationManager.terminate` so the spawned
-                sub-agent process and its in-memory ``SpawnedAgent``
-                handle are cleaned up the moment the workflow ends.
-                Without this wire, ``_spawned`` would accumulate
-                stale handles for the orchestrator's entire lifetime
-                — a slow leak proportional to delegation count.  The
-                argument is optional because tests construct the
-                dispatcher in isolation against a stub bus and don't
-                need the manager to assert routing behaviour.
+            bus: Connected NMB bus; this class owns ``listen()``.
+            audit: Optional central audit DB.
+            finalizer: Optional model-driven finalization coordinator.
+            renderer: Optional connector-side push surface.
+            delegation_manager: Optional spawned-agent lifecycle manager.
         """
+        # Connected NMB client; this dispatcher is the sole listen() consumer.
         self._bus = bus
+        # Central audit DB for audit.flush and delegation terminal status.
         self._audit = audit
+        # Model-driven finalization runner for task.complete payloads.
         self._finalizer = finalizer
+        # Connector-facing renderer for Slack/headless workflow updates.
         self._renderer = renderer
+        # Delegation lifecycle manager used to terminate completed workflows.
         self._delegation_manager = delegation_manager
 
+        # Per-workflow metadata keyed by workflow_id.
         self._workflows: dict[str, WorkflowContext] = {}
-        # Background finalisation tasks.  Indexed by workflow_id so
-        # we can cancel them on ``close()`` and so a duplicate
-        # ``task.complete`` (NMB at-least-once replay; Phase 4)
-        # doesn't fork two finalisations of the same workflow.
+        # One finalisation task per workflow id; prevents duplicate
+        # in-flight finalisations and makes shutdown cancellation easy.
         self._finalization_tasks: dict[str, asyncio.Task[None]] = {}
 
+        # Background task running the bus listen loop.
         self._loop_task: asyncio.Task[None] | None = None
+        # Guards start() so concurrent callers do not spawn multiple loops.
         self._loop_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -135,9 +114,8 @@ class WorkflowDispatcher:
     async def start(self) -> None:
         """Spawn the dispatch loop if it isn't already running.
 
-        Idempotent.  Concurrent ``start()`` calls are guarded by
-        :data:`_loop_lock` so two delegations racing through
-        ``main.py`` setup can't both create a loop task.
+        Idempotent under concurrent callers.  Once started, this
+        instance owns the bus listen queue until :meth:`close`.
         """
         async with self._loop_lock:
             if self._loop_task is None or self._loop_task.done():
@@ -149,14 +127,16 @@ class WorkflowDispatcher:
     async def close(self) -> None:
         """Cancel the dispatch loop and any running finalisations.
 
-        Safe to call multiple times.  Pending finalisation tasks are
-        cancelled and awaited so the asyncio loop can shut down
-        cleanly without ``Task was destroyed but it is pending!``
-        warnings.
+        Safe to call multiple times.  Finalisation tasks are awaited
+        after cancellation so shutdown does not leave pending tasks.
         """
         finalizers = list(self._finalization_tasks.values())
+
+        # Cancel all finalisation tasks; best-effort.
         for task in finalizers:
             task.cancel()
+
+        # Await all finalisation tasks; cancellation is best-effort.
         for task in finalizers:
             try:
                 await task
@@ -164,8 +144,10 @@ class WorkflowDispatcher:
                 pass
             except Exception:  # noqa: BLE001 — defensive; finalisation surface is broad
                 logger.warning("Finalisation task raised during close", exc_info=True)
+
         self._finalization_tasks.clear()
 
+        # Cancel the bus listen loop; best-effort.
         loop_task = self._loop_task
         if loop_task is None or loop_task.done():
             return
@@ -182,46 +164,18 @@ class WorkflowDispatcher:
     def register_workflow(self, context: WorkflowContext) -> None:
         """Track *context* under ``context.workflow_id``.
 
-        Replaces an existing registration of the same id.  Note: the
-        re-delegation path does **not** call this method — it mutates
-        the registered :class:`WorkflowContext` in place
-        (see :meth:`tools.finalization.FinalizationSession.re_delegate`)
-        so the same object the dispatcher holds picks up the new
-        iteration's task without an extra registry round-trip.  This
-        method is reserved for genuinely new workflows (the original
-        ``delegate_task`` invocation).
+        Re-delegation mutates the existing context in place; this is
+        for new workflows only.  Callers should register before
+        sending ``task.assign`` so fast completions do not race setup.
         """
         self._workflows[context.workflow_id] = context
 
     async def deregister_workflow(self, workflow_id: str) -> None:
-        """End-of-life cleanup for a workflow.
+        """Remove workflow state and terminate its spawned agent.
 
-        Two effects:
-
-        - Removes the workflow from ``self._workflows`` so any
-          late-arriving NMB frame is dropped as "unknown workflow".
-        - When a :class:`DelegationManager` is wired, asks it to
-          terminate the spawned sub-agent process and pop its
-          in-memory ``SpawnedAgent`` handle from
-          :data:`DelegationManager._spawned`.
-
-        Without that second effect, the manager's per-workflow
-        spawn registry would grow without bound: sub-agent
-        processes are single-shot and exit on their own after
-        sending ``task.complete``, but the ``SpawnedAgent`` handle
-        is only released when ``DelegationManager.close()`` runs at
-        process shutdown.  Wiring the call here ties the
-        :meth:`DelegationManager.terminate` lifecycle to the
-        workflow lifecycle the dispatcher owns.
-
-        Idempotent: missing workflows are silently ignored, and
-        :meth:`DelegationManager.terminate` is itself a no-op for
-        workflow ids whose ``SpawnedAgent`` was already popped (e.g.
-        the send-failure path inside :meth:`DelegationManager.delegate`
-        already cleaned up).  Order — registry first, terminate
-        second — frees the registry slot immediately so any
-        concurrent dispatcher path that races with this call sees
-        the workflow as gone before the slow ``terminate()`` await.
+        Idempotent for unknown workflow ids.  The registry entry is
+        removed before awaiting teardown so late frames see the
+        workflow as closed immediately.
         """
         self._workflows.pop(workflow_id, None)
         if self._delegation_manager is not None:
@@ -276,7 +230,13 @@ class WorkflowDispatcher:
     # ------------------------------------------------------------------
 
     async def _handle_task_complete(self, msg: NMBMessage) -> None:
-        """Validate ``task.complete`` and fork a finalisation task."""
+        """Validate ``task.complete`` and fork a finalisation task.
+
+        Duplicate completions are ignored while finalisation is still
+        running for the same workflow.  Completed finalisation tasks
+        may be replaced by later iteration results.
+        """
+        # Validate the payload.
         try:
             payload = load(TaskCompletePayload, TASK_COMPLETE, msg.payload)
         except PayloadValidationError:
@@ -286,6 +246,8 @@ class WorkflowDispatcher:
                 exc_info=True,
             )
             return
+
+        # Look up the workflow context for this completion.
         ctx = self._workflows.get(payload.workflow_id)
         if ctx is None:
             logger.warning(
@@ -293,9 +255,8 @@ class WorkflowDispatcher:
                 extra={"workflow_id": payload.workflow_id, "from": msg.from_sandbox},
             )
             return
-        # Forking the finalisation lets concurrent workflows finalise
-        # in parallel (§8.2) and prevents a slow finalisation from
-        # head-of-line-blocking peer workflows' ``audit.flush`` ingest.
+
+        # Finalisation may call tools or Slack; keep the listen loop free.
         existing = self._finalization_tasks.get(payload.workflow_id)
         if existing is not None and not existing.done():
             logger.info(
@@ -303,6 +264,8 @@ class WorkflowDispatcher:
                 extra={"workflow_id": payload.workflow_id},
             )
             return
+
+        # Fork a finalisation task; it will call tools or Slack.
         self._finalization_tasks[payload.workflow_id] = asyncio.create_task(
             self._finalize(ctx, payload),
             name=f"finalize-{payload.workflow_id}",
@@ -313,39 +276,15 @@ class WorkflowDispatcher:
         ctx: WorkflowContext,
         complete: TaskCompletePayload,
     ) -> None:
-        """Run finalisation for one workflow.
+        """Run finalisation and deregister terminal workflows.
 
-        Conditional deregistration:
-
-        - **On exception** the workflow is deregistered — the user
-          saw the failure rendering and there's nothing left to act
-          on.
-        - **On success** the chosen tool's ``is_terminal`` flag
-          decides:
-
-          * ``present_work_to_user`` keeps the workflow registered
-            because the user still has Push / Iterate / Discard
-            buttons in their thread; clicking them needs to find
-            the live :class:`WorkflowContext`.
-          * ``re_delegate`` keeps the workflow registered because
-            iteration 2's ``task.complete`` arrives on the same
-            ``workflow_id`` and would otherwise be dropped as
-            "unknown workflow".
-          * ``push_branch`` / ``push_and_create_pr`` /
-            ``discard_work`` / ``destroy_sandbox`` are terminal —
-            the workflow is done and the registration is freed.
-
-        The completed :class:`asyncio.Task` is **left** in
-        :data:`_finalization_tasks`.  ``_handle_task_complete``
-        checks ``existing.done()`` before forking a peer, so an
-        iteration-2 ``task.complete`` for the same workflow id
-        proceeds normally.  Memory is bounded by ``close()``.
+        Non-terminal actions such as presenting work or re-delegating
+        keep the workflow registered for the next button click or
+        iteration result.
         """
         try:
             if self._finalizer is None:
-                # No finalisation wired (e.g. tests); render the raw
-                # payload directly so the user still sees something.
-                # No registered workflow to deregister either.
+                # Headless/test fallback: surface the raw payload.
                 if self._renderer is not None:
                     await self._renderer.render_present_work(
                         context=ctx,
@@ -378,21 +317,10 @@ class WorkflowDispatcher:
             await self.deregister_workflow(ctx.workflow_id)
 
     async def _handle_task_error(self, msg: NMBMessage) -> None:
-        """Validate ``task.error`` and surface it to the user.
+        """Validate ``task.error``, render it, and stamp audit.
 
-        Mirrors :meth:`FinalizationCoordinator._record_completion` on
-        the success path: just as ``task.complete`` arrivals stamp
-        the audit row with :meth:`AuditDB.log_delegation_complete`,
-        ``task.error`` arrivals must stamp it with
-        :meth:`AuditDB.log_delegation_error`.  ``log_delegation_started``
-        already ran in the ``delegate_task`` tool before the
-        sub-agent was spawned, so without this write the row would
-        sit in ``status="started"`` with a ``NULL`` ``completed_at``
-        forever.
-
-        The audit write is best-effort: a DB hiccup must not abort
-        rendering or workflow deregistration.  ``deregister_workflow``
-        runs last so it can't be skipped on an audit failure.
+        Rendering and audit writes are best-effort.  The workflow is
+        deregistered after both attempts so cleanup still runs.
         """
         try:
             payload = load(TaskErrorPayload, TASK_ERROR, msg.payload)
@@ -403,6 +331,8 @@ class WorkflowDispatcher:
                 exc_info=True,
             )
             return
+
+        # Look up the workflow context for this error.
         ctx = self._workflows.get(payload.workflow_id)
         if ctx is None:
             logger.warning(
@@ -410,6 +340,8 @@ class WorkflowDispatcher:
                 extra={"workflow_id": payload.workflow_id, "from": msg.from_sandbox},
             )
             return
+
+        # Render the error to the originating thread.
         if self._renderer is not None:
             try:
                 await self._renderer.render_workflow_error(context=ctx, error=payload)
@@ -419,6 +351,8 @@ class WorkflowDispatcher:
                     extra={"workflow_id": payload.workflow_id},
                     exc_info=True,
                 )
+
+        # Write the error to the audit DB.
         if self._audit is not None:
             try:
                 await self._audit.log_delegation_error(
@@ -433,6 +367,7 @@ class WorkflowDispatcher:
                     extra={"workflow_id": payload.workflow_id},
                     exc_info=True,
                 )
+
         await self.deregister_workflow(payload.workflow_id)
 
     async def _handle_task_progress(self, msg: NMBMessage) -> None:
@@ -445,6 +380,8 @@ class WorkflowDispatcher:
                 extra={"from": msg.from_sandbox},
             )
             return
+
+        # Look up the workflow context for this progress.
         ctx = self._workflows.get(payload.workflow_id)
         if ctx is None or self._renderer is None:
             return
@@ -461,6 +398,7 @@ class WorkflowDispatcher:
         """Ingest a sub-agent ``audit.flush`` batch into the central DB."""
         if self._audit is None:
             return
+
         try:
             payload = load(AuditFlushPayload, AUDIT_FLUSH, msg.payload)
         except PayloadValidationError:
@@ -470,6 +408,7 @@ class WorkflowDispatcher:
                 exc_info=True,
             )
             return
+
         try:
             count = await self._audit.ingest_audit_flush(payload)
         except Exception:  # noqa: BLE001 — DB surface is broad
@@ -479,6 +418,7 @@ class WorkflowDispatcher:
                 exc_info=True,
             )
             return
+
         logger.info(
             "Ingested sub-agent audit flush",
             extra={"workflow_id": payload.workflow_id, "tool_calls": count},
@@ -492,38 +432,30 @@ class WorkflowDispatcher:
         self,
         workflow_id: str,
         *,
-        timeout: float = 5.0,
+        timeout: float = _DEFAULT_FINALIZATION_WAIT_TIMEOUT_S,
     ) -> bool:
         """Block until *workflow_id*'s finalisation task finishes.
 
-        Polls :data:`_finalization_tasks` for the workflow's task to
-        appear (the dispatcher's loop forks it asynchronously after
-        ``task.complete`` arrives), then awaits the task.
-
-        Returns ``True`` if the task is already done or finishes
-        within *timeout*; ``False`` if no task ever appeared.  Used
-        by tests to synchronise without sleeping.
+        Test helper. Returns ``False`` if the task never appears or
+        does not finish within *timeout*.  The finalization task is
+        never awaited directly, so a helper timeout cannot cancel it.
         """
-        deadline = asyncio.get_running_loop().time() + timeout
-        task = self._finalization_tasks.get(workflow_id)
-        while task is None:
-            if asyncio.get_running_loop().time() >= deadline:
-                return False
-            await asyncio.sleep(0.02)
-            task = self._finalization_tasks.get(workflow_id)
-        if task.done():
-            return True
-        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
-        except (TimeoutError, asyncio.CancelledError):
+            async for attempt in AsyncRetrying(
+                retry=retry_if_exception_type(_FinalizationNotReadyError),
+                wait=wait_fixed(_FINALIZATION_WAIT_POLL_S),
+                stop=stop_after_delay(timeout),
+                reraise=True,
+            ):
+                with attempt:
+                    task = self._finalization_tasks.get(workflow_id)
+                    if task is None or not task.done():
+                        raise _FinalizationNotReadyError
+        except _FinalizationNotReadyError:
             return False
         return True
 
     @property
     def in_flight_finalizations(self) -> int:
         """Number of finalisation tasks currently running (not yet done)."""
-        return sum(1 for t in self._finalization_tasks.values() if not t.done())
-
-
-__all__ = ["WorkflowDispatcher"]
+        return len([t for t in self._finalization_tasks.values() if not t.done()])
