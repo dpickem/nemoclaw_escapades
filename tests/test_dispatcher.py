@@ -43,6 +43,7 @@ from nemoclaw_escapades.nmb.protocol import (
 )
 from nemoclaw_escapades.orchestrator.dispatcher import WorkflowDispatcher
 from nemoclaw_escapades.orchestrator.workflow import WorkflowContext
+from nemoclaw_escapades.tools.finalization import FinalizationAction
 
 # ── Fakes ──────────────────────────────────────────────────────────
 
@@ -318,7 +319,7 @@ class TestTaskCompleteRouting:
                 # ``TestConditionalDeregistration``.
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="push_branch",
+                    action=FinalizationAction.PUSH_BRANCH,
                     message="ok",
                     is_terminal=True,
                 )
@@ -354,7 +355,7 @@ class TestTaskCompleteRouting:
                 called.append(ctx.workflow_id)
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="present_work_to_user",
+                    action=FinalizationAction.PRESENT_WORK_TO_USER,
                     message="ok",
                     is_terminal=True,
                 )
@@ -417,7 +418,7 @@ class TestTaskCompleteRouting:
                 await gate.wait()
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="push_branch",
+                    action=FinalizationAction.PUSH_BRANCH,
                     message="ok",
                     is_terminal=True,
                 )
@@ -647,7 +648,7 @@ class TestConditionalDeregistration:
                 # Mimic ``present_work_to_user``: non-terminal.
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="present_work_to_user",
+                    action=FinalizationAction.PRESENT_WORK_TO_USER,
                     message="rendered",
                     is_terminal=False,
                 )
@@ -679,7 +680,7 @@ class TestConditionalDeregistration:
             ) -> FinalizationResult:
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="push_and_create_pr",
+                    action=FinalizationAction.PUSH_AND_CREATE_PR,
                     message="https://github.com/.../pull/1",
                     is_terminal=True,
                 )
@@ -711,7 +712,7 @@ class TestConditionalDeregistration:
             ) -> FinalizationResult:
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="re_delegate",
+                    action=FinalizationAction.RE_DELEGATE,
                     message="Re-delegated",
                     is_terminal=False,
                 )
@@ -847,7 +848,7 @@ class TestDeregisterTerminatesSubAgent:
             ) -> FinalizationResult:
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="push_and_create_pr",
+                    action=FinalizationAction.PUSH_AND_CREATE_PR,
                     message="https://github.com/.../pull/1",
                     is_terminal=True,
                 )
@@ -939,7 +940,7 @@ class TestDeregisterTerminatesSubAgent:
             ) -> FinalizationResult:
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="re_delegate",
+                    action=FinalizationAction.RE_DELEGATE,
                     message="iter 2",
                     is_terminal=False,
                 )
@@ -973,7 +974,7 @@ class TestDeregisterTerminatesSubAgent:
             ) -> FinalizationResult:
                 return FinalizationResult(
                     workflow_id=ctx.workflow_id,
-                    action="push_and_create_pr",
+                    action=FinalizationAction.PUSH_AND_CREATE_PR,
                     message="ok",
                     is_terminal=True,
                 )

@@ -1,28 +1,12 @@
 """Slack-side rendering for finalisation results.
 
-Two surfaces live here:
+This module provides a RichResponse builder for the standard "work ready"
+message and a :class:`WorkflowRenderer` implementation that posts finalization
+updates directly to Slack threads.
 
-- **Rendering helpers** — ``build_present_work_response`` returns a
-  platform-neutral :class:`RichResponse` carrying the synthesised
-  summary, an optional diff preview, and the three action buttons
-  (Push & PR, Iterate, Discard).  The ``SlackConnector`` renders
-  this through its existing block-builder pipeline (which splits
-  oversized ``TextBlock``s automatically).
-- **WorkflowRenderer implementation** — :class:`SlackFinalizationRenderer`
-  pushes finalisation outputs back to the originating thread by
-  posting new Slack messages directly through the Bolt
-  ``AsyncWebClient``.  This is the connector's "outbound-from-the-
-  orchestrator" channel that the design (§7.1, §8.2) calls for.
-  Because the renderer constructs raw Block Kit JSON (it bypasses
-  the connector's regular ``RichResponse`` pipeline), it splits
-  long bodies itself using
-  :func:`connectors.slack.connector._split_text_for_slack` and
-  caps blocks at :data:`_SLACK_MAX_TEXTBLOCK_CHUNKS` so the actions
-  block always fits under Slack's 50-block message limit.
-
-Action-click → finalisation-tool routing is platform-neutral and
-lives on the orchestrator side
-(:mod:`nemoclaw_escapades.orchestrator.finalization_actions`).
+Action-click routing stays platform-neutral in
+``orchestrator.finalization_actions``.  This file only builds Slack Block Kit
+payloads and handles Slack posting failures.
 """
 
 from __future__ import annotations
@@ -55,21 +39,17 @@ if TYPE_CHECKING:
 
 logger = get_logger("connectors.slack.finalization")
 
-# Headroom inside each section's text so the surrounding code-fence
-# delimiters (``\`\`\`<lang>\\n`` opener + ``\\n\`\`\``` closer, ≈ 12
-# chars) stay within :data:`_SLACK_SECTION_TEXT_LIMIT`.  Sized
-# generously to account for the longest ``language`` tag we use
-# (``"diff"``).
+# Headroom for code-fence delimiters inside Slack section text.
 _FENCE_OVERHEAD: int = 16
 
-# UI-readability cap on the diff body inlined into
-# :func:`build_present_work_response`.  The connector's render
-# pipeline splits the resulting ``TextBlock`` per
-# :data:`_SLACK_SECTION_TEXT_LIMIT`, so this is a soft cap on how
-# much diff context we surface in chat — not a hard Slack
-# constraint.  Roughly four full section blocks worth, enough for a
-# typical PR review preview.
-_BUILD_PREVIEW_LIMIT: int = _SLACK_SECTION_TEXT_LIMIT * 4
+# Number of Slack-sized sections worth of diff preview in RichResponse output.
+_BUILD_PREVIEW_SECTION_COUNT: int = 4
+
+# UI-readability cap on the diff body inlined into RichResponse output.
+_BUILD_PREVIEW_LIMIT: int = _SLACK_SECTION_TEXT_LIMIT * _BUILD_PREVIEW_SECTION_COUNT
+
+# Characters of tool result included in Slack's fallback text field.
+_ACTION_FALLBACK_TEXT_LIMIT: int = 200
 
 
 def build_present_work_response(
@@ -82,12 +62,8 @@ def build_present_work_response(
 ) -> RichResponse:
     """Build the Slack-style response carrying the finalisation buttons.
 
-    Used by tests and by any caller that wants a
-    :class:`RichResponse` shape rather than a direct
-    ``chat_postMessage`` push.  The returned response goes through
-    the connector's regular render pipeline, which auto-splits
-    oversized ``TextBlock``s — so the diff truncation here is a
-    soft UI cap, not a hard Slack constraint.
+    The returned response goes through the connector's regular render pipeline,
+    so the diff cap is for readability rather than Slack correctness.
 
     Args:
         channel_id: Slack channel the user originally posted to.
@@ -136,15 +112,13 @@ def build_present_work_response(
 class SlackFinalizationRenderer:
     """:class:`WorkflowRenderer` implementation for Slack.
 
-    Constructed in ``main.py`` from the connector's already-
-    authenticated ``AsyncWebClient``.  All methods are no-ops when
-    the workflow context lacks a ``channel_id`` (CLI / headless
-    workflows); errors are caught and logged so the dispatcher
-    never sees a renderer raise.
+    Methods no-op for headless workflows without ``channel_id`` and swallow
+    Slack API errors so renderer failures do not crash the dispatcher.
     """
 
     def __init__(self, client: Any) -> None:
         """Store the Bolt ``AsyncWebClient`` to ``chat_postMessage`` through."""
+        # Slack Bolt async client used for direct thread posts.
         self._client = client
 
     async def render_present_work(
@@ -209,7 +183,7 @@ class SlackFinalizationRenderer:
         await self._post(
             channel=context.channel_id,
             thread_ts=context.thread_ts,
-            text=f"{action}: {result[:200]}",
+            text=f"{action}: {result[:_ACTION_FALLBACK_TEXT_LIMIT]}",
             blocks=blocks,
         )
 
@@ -219,12 +193,7 @@ class SlackFinalizationRenderer:
         context: WorkflowContext,
         progress: TaskProgressPayload,
     ) -> None:
-        """Best-effort thinking indicator update.
-
-        Phase 3b ships a minimal text-only progress line.  The richer
-        thinking-indicator UI lives on the connector's per-request
-        ``StatusCallback`` flow and is upgraded in Phase 6.
-        """
+        """Post a minimal text progress line to the originating thread."""
         if context.channel_id is None or progress.note is None:
             return
         await self._post(
@@ -263,8 +232,11 @@ class SlackFinalizationRenderer:
         complete: TaskCompletePayload,
         error: str,
     ) -> None:
-        """Surface a finalisation-side failure (e.g. baseline drift)."""
-        del complete  # carried for renderer parity; not embedded by default
+        """Surface a finalisation-side failure such as baseline drift.
+
+        ``complete`` is accepted for protocol parity but intentionally omitted
+        from the default Slack rendering.
+        """
         if context.channel_id is None:
             return
         header = f":x: *Finalisation failed for workflow {context.workflow_id}*"
@@ -306,13 +278,8 @@ class SlackFinalizationRenderer:
 def _text_section_blocks(text: str) -> list[dict[str, Any]]:
     """Split *text* into Slack-safe mrkdwn section blocks.
 
-    Uses :func:`connectors.slack.connector._split_text_for_slack` so
-    the per-section cap matches what the connector's regular
-    response pipeline applies.  Output is capped at
-    :data:`_SLACK_MAX_TEXTBLOCK_CHUNKS` blocks so a pathological
-    body can't push the actions block past Slack's 50-block message
-    limit.  Returns an empty list for empty input — the caller
-    decides whether to elide or substitute a placeholder.
+    Output is capped so pathological text cannot push action blocks past
+    Slack's message block limit.
     """
     if not text:
         return []
@@ -327,13 +294,8 @@ def _code_fence_section_blocks(
 ) -> list[dict[str, Any]]:
     """Wrap *body* in code fences split across Slack-safe section blocks.
 
-    Each section is independently fenced so Slack renders each as
-    its own monospace block — splitting a single fence across
-    sections would leave the first with an unclosed open and the
-    second with an orphan close, which Slack would render as raw
-    text.  The split limit reserves :data:`_FENCE_OVERHEAD` chars
-    inside each chunk so the wrapped section text stays under
-    :data:`_SLACK_SECTION_TEXT_LIMIT`.
+    Each section is independently fenced; Slack would render a fence split
+    across sections as raw text.
 
     Args:
         body: Raw text to fence.
@@ -384,9 +346,3 @@ _ACTION_ICONS: dict[str, str] = {
     "re_delegate": ":repeat:",
     "destroy_sandbox": ":boom:",
 }
-
-
-__all__ = [
-    "SlackFinalizationRenderer",
-    "build_present_work_response",
-]

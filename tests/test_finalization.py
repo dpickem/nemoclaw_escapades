@@ -4,7 +4,6 @@ Covers:
 
 - Baseline echo-match (§6.6.3 part 1) — ``verify_baseline``.
 - Diff verification (§6.6.3 part 2) — ``FinalizationCoordinator._verify_diff``.
-- JSONL fallback ingest (§13.2) — ``FinalizationCoordinator._ingest_jsonl_fallback``.
 - The full finalisation registry — every tool registered, baselines plumbed
   through ``re_delegate``, ``discard_work`` safety check, ``push_branch`` end-to-end.
 - Slack rendering for ``present_work_to_user`` (action-button shape).
@@ -21,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.base import BackendBase
 from nemoclaw_escapades.config import AgentLoopConfig
 from nemoclaw_escapades.connectors.slack.finalization import build_present_work_response
@@ -47,6 +45,7 @@ from nemoclaw_escapades.orchestrator.finalization import (
 )
 from nemoclaw_escapades.orchestrator.workflow import WorkflowContext
 from nemoclaw_escapades.tools.finalization import (
+    FinalizationAction,
     FinalizationSession,
     create_finalization_tool_registry,
 )
@@ -197,10 +196,7 @@ class TestFinalizationToolRegistry:
             async def delegate(
                 self,
                 task: TaskAssignPayload,
-                *,
-                context: object | None = None,
             ) -> Any:
-                del context
                 captured["task"] = task
                 return type("Result", (), {"workflow_id": task.workflow_id})()
 
@@ -223,15 +219,10 @@ class TestFinalizationToolRegistry:
         """Regression: cascading ``re_delegate`` produces monotonic iteration numbers.
 
         Previously :class:`WorkflowContext.task` was never updated
-        after :meth:`re_delegate` — :meth:`DelegationManager.delegate`
-        explicitly discards the context and nothing else re-registered
-        it.  On every subsequent iteration, the dispatcher's
-        registered context still pointed at the *original* task and
-        ``iteration_number = original.iteration_number + 1`` always
-        produced 1, no matter how many follow-ups had already been
-        sent.  The fix mutates ``context.task`` in place so the
-        dispatcher sees the latest iteration on the next
-        ``task.complete`` arrival.
+        after :meth:`re_delegate`. On every subsequent iteration,
+        the dispatcher still pointed at the original task and
+        produced ``iteration_number = 1``. The fix mutates
+        ``context.task`` in place before delegation.
         """
         captured_tasks: list[TaskAssignPayload] = []
 
@@ -239,10 +230,7 @@ class TestFinalizationToolRegistry:
             async def delegate(
                 self,
                 task: TaskAssignPayload,
-                *,
-                context: object | None = None,
             ) -> Any:
-                del context
                 captured_tasks.append(task)
                 return type("Result", (), {"workflow_id": task.workflow_id})()
 
@@ -433,7 +421,6 @@ class TestPushAndCreatePrSingleRender:
         async def render_finalization_action(
             self, *, context: Any, action: str, result: str
         ) -> None:
-            del context
             self.actions.append((action, result))
 
         async def render_workflow_progress(self, **_: Any) -> None:
@@ -568,129 +555,6 @@ class TestTerminalFlagOnFailure:
         assert session.state.is_terminal is True
 
 
-# ── JSONL fallback ingest ─────────────────────────────────────────
-
-
-class TestJsonlFallbackIngest:
-    @pytest.mark.asyncio
-    async def test_corrupted_jsonl_does_not_abort_finalize(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Regression: a truncated / malformed JSONL must not raise.
-
-        Previously :meth:`_ingest_jsonl_fallback` called
-        ``json.loads(line)`` and ``model_validate`` without exception
-        handling, so a sub-agent that crashed mid-write would corrupt
-        the audit fallback file and the orchestrator would abort
-        finalisation — the user's actual sub-agent work would never
-        be presented.
-        """
-        workspace = tmp_path / "agent-abcdef02"
-        workspace.mkdir()
-        fallback_dir = workspace / ".nemoclaw"
-        fallback_dir.mkdir()
-        fallback = fallback_dir / "audit-wf-1.jsonl"
-        # Mix valid + truncated + missing-field rows.
-        valid = {
-            "workflow_id": "wf-1",
-            "parent_sandbox_id": "orchestrator",
-            "agent_id": "coding-abcdef02",
-            "agent_role": "coding",
-            "tool_call": {
-                "id": "row-good",
-                "service": "files",
-                "command": "read_file",
-                "args": "{}",
-                "operation_type": "READ",
-                "duration_ms": 1.0,
-                "success": True,
-                "response_payload": "ok",
-            },
-        }
-        fallback.write_text(
-            json.dumps(valid)
-            + "\n"
-            + '{"workflow_id":"wf-1","truncated\n'  # JSON parse error
-            + '{"workflow_id":"wf-1"}\n'  # missing tool_call key
-            + json.dumps(valid).replace("row-good", "row-good-2")
-            + "\n"
-        )
-        db_path = tmp_path / "audit.db"
-        db = AuditDB(str(db_path))
-        await db.open()
-        try:
-            from nemoclaw_escapades.backends.base import BackendBase as _Backend
-
-            class _StubBackend(_Backend):
-                async def complete(self, request: InferenceRequest) -> InferenceResponse:
-                    raise NotImplementedError
-
-            coord = FinalizationCoordinator(
-                backend=_StubBackend(),
-                config=AgentLoopConfig(),
-                audit=db,
-            )
-            count = await coord._ingest_jsonl_fallback(_task(workspace))
-            # Only the valid rows were ingested; bad lines were
-            # logged-and-skipped, the coordinator did NOT raise.
-            assert count == 2
-            rows = await db.query("SELECT id FROM tool_calls ORDER BY id")
-            assert sorted(r["id"] for r in rows) == ["row-good", "row-good-2"]
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_ingest_picks_up_disk_rows(self, tmp_path: Path) -> None:
-        workspace = tmp_path / "agent-abcdef02"
-        workspace.mkdir()
-        fallback_dir = workspace / ".nemoclaw"
-        fallback_dir.mkdir()
-        fallback = fallback_dir / "audit-wf-1.jsonl"
-        # Mirror the AuditBuffer.write_jsonl_fallback shape.
-        row = {
-            "workflow_id": "wf-1",
-            "parent_sandbox_id": "orchestrator",
-            "agent_id": "coding-abcdef02",
-            "agent_role": "coding",
-            "tool_call": {
-                "id": "row-disk-1",
-                "service": "files",
-                "command": "read_file",
-                "args": "{}",
-                "operation_type": "READ",
-                "duration_ms": 1.0,
-                "success": True,
-                "response_payload": "ok",
-            },
-        }
-        fallback.write_text(json.dumps(row) + "\n")
-        db_path = tmp_path / "audit.db"
-        db = AuditDB(str(db_path))
-        await db.open()
-        try:
-            from nemoclaw_escapades.backends.base import BackendBase as _Backend
-
-            class _StubBackend(_Backend):
-                async def complete(self, request: InferenceRequest) -> InferenceResponse:
-                    raise NotImplementedError
-
-            coord = FinalizationCoordinator(
-                backend=_StubBackend(),
-                config=AgentLoopConfig(),
-                audit=db,
-            )
-            task = _task(workspace)
-            count = await coord._ingest_jsonl_fallback(task)
-            assert count == 1
-            rows = await db.query("SELECT * FROM tool_calls WHERE id = 'row-disk-1'")
-            assert len(rows) == 1
-            assert rows[0]["workflow_id"] == "wf-1"
-            assert rows[0]["agent_id"] == "coding-abcdef02"
-        finally:
-            await db.close()
-
-
 # ── End-to-end coordinator ─────────────────────────────────────────
 
 
@@ -710,7 +574,7 @@ class TestFinalizationCoordinator:
             task=_task(per_agent_workspace),
         )
         result = await coordinator.finalize(ctx, _complete())
-        assert result.action == "present_work_to_user"
+        assert result.action == FinalizationAction.PRESENT_WORK_TO_USER
         assert result.message.startswith("show this")
 
     @pytest.mark.asyncio

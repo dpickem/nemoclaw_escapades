@@ -1,10 +1,9 @@
 """Model-callable finalization tools.
 
-The orchestrator's finalisation ``AgentLoop`` (see
-``orchestrator/finalization.py``) registers these tools and then runs
-them against a typed ``TaskCompletePayload``.  Each tool's job is to
-*do* the work and let the renderer (a connector-side hook) push the
-user-facing result to the originating channel.
+The finalization AgentLoop registers these tools after a coding sub-agent
+returns ``task.complete``.  Tools do the side effect, update
+:class:`FinalizationState`, and optionally ask the connector renderer to post
+the result to the originating thread.
 
 Tool inventory (per design §7.1):
 
@@ -27,9 +26,9 @@ finalisation runs as its own dispatcher-driven ``asyncio.Task``.
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,6 +40,7 @@ from nemoclaw_escapades.agent.git_helpers import (
 from nemoclaw_escapades.agent.git_helpers import (
     push_branch as git_push_branch,
 )
+from nemoclaw_escapades.agent.github_helpers import GitHubCommandError, create_pull_request
 from nemoclaw_escapades.nmb.protocol import TaskAssignPayload, TaskCompletePayload
 from nemoclaw_escapades.observability.logging import get_logger
 from nemoclaw_escapades.tools.registry import ToolRegistry, tool
@@ -51,69 +51,77 @@ if TYPE_CHECKING:
 
 logger = get_logger("tools.finalization")
 
-# Logical toolset name used by the registry for grouping
+# Logical toolset name used by the registry for grouping.
 _TOOLSET: str = "finalization"
 
-# Sanity cap on the diff body the tool passes to its platform-specific
-# renderer.  This is **not** a per-message Slack constraint —
-# splitting the rendered text into Slack-safe section blocks is the
-# renderer's job (see ``connectors/slack/finalization.py``).  This cap
-# is a transport bound that keeps the tool's textual return value
-# digestible for the model's next inference round and prevents
-# pathological diffs from blowing out the renderer's input.  Diffs
-# larger than this are truncated; users can still inspect the full
-# diff in the workspace directly.
+# Diff characters passed to the renderer/model as preview text.
 _DIFF_PREVIEW_LIMIT: int = 8_000
 
 # Default commit message when the finalisation model didn't supply one.
 _DEFAULT_COMMIT_MESSAGE: str = "Finalize delegated work"
+
+# Default remote for finalization git push operations.
+_DEFAULT_REMOTE: str = "origin"
+
+# Branch prefix used by button-driven finalization flows.
+_FINALIZATION_BRANCH_PREFIX: str = "finalize"
+
+# Iteration number increment for each re-delegation.
+_ITERATION_INCREMENT: int = 1
+
+# Minimum max_turns accepted by re_delegate's schema.
+_MIN_MAX_TURNS: int = 1
+
+# Prefix used to identify recoverable tool errors.
+_ERROR_PREFIX: str = "Error:"
+
+
+class FinalizationAction(StrEnum):
+    """Names of model-callable finalization tools."""
+
+    PRESENT_WORK_TO_USER = "present_work_to_user"
+    PUSH_BRANCH = "push_branch"
+    PUSH_AND_CREATE_PR = "push_and_create_pr"
+    DISCARD_WORK = "discard_work"
+    RE_DELEGATE = "re_delegate"
+    DESTROY_SANDBOX = "destroy_sandbox"
+    MODEL_RESPONSE = "model_response"
 
 
 @dataclass
 class FinalizationState:
     """Outcome captured by finalization tools for the coordinator's caller.
 
+    The coordinator reads this after the tool call to decide what text to return
+    and whether the dispatcher should deregister the workflow.
+
     Attributes:
-        action: Tool name that ran (``"present_work_to_user"`` etc.).
-        message: User-facing text from the tool — already rendered or
-            ready to render.  The coordinator returns this verbatim
-            from :meth:`FinalizationCoordinator.finalize_to_text`.
-        is_terminal: ``True`` when the chosen action ends the
-            workflow's lifecycle (push, discard, sandbox-destroy)
-            so the dispatcher can deregister the
-            :class:`WorkflowContext`.  ``False`` for actions that
-            keep the workflow alive (``present_work_to_user``
-            waits on a button click; ``re_delegate`` carries the
-            same ``workflow_id`` into iteration 2).
+        action: Tool name that ran, or ``None`` if no tool was called.
+        message: User-facing tool result.
+        is_terminal: Whether this action ends the workflow.
     """
 
-    action: str = ""
+    # Tool name that ran, or empty when no finalization tool was called.
+    action: FinalizationAction | None = None
+    # User-facing tool result text.
     message: str = ""
+    # Whether this action ends the workflow lifecycle.
     is_terminal: bool = False
 
 
 class FinalizationSession:
     """Per-workflow context bound to one finalisation ``AgentLoop`` run.
 
-    The orchestrator's finalisation flow constructs one session per
-    incoming ``task.complete``, then runs an ``AgentLoop`` whose tool
-    registry is built from this session.  Tools mutate
-    ``self.state`` and (for user-facing rendering) call into
-    ``self.renderer`` so the connector pushes the result to the
-    originating thread.
+    A fresh session is created for each ``task.complete``.  Tool methods mutate
+    ``state`` and use the optional renderer to publish user-facing results.
 
     Attributes:
-        task: The original ``TaskAssignPayload`` (carries
-            ``workspace_root``, ``workspace_baseline``, etc.).
-        complete: The validated ``TaskCompletePayload`` from the
-            sub-agent.
-        context: Workflow-level metadata (channel, thread,
-            workflow_id) the renderer needs to address Slack.
-        delegation_manager: Required to fire ``re_delegate`` follow-
-            ups; ``None`` disables that tool path.
-        renderer: Connector-side push surface.  ``None`` runs in
-            "headless" mode (e.g. tests) where ``present_work_to_user``
-            simply records text in ``state.message``.
+        task: Original or current task assignment.
+        complete: Validated sub-agent completion payload.
+        context: Optional workflow metadata for rendering.
+        delegation_manager: Optional manager for re-delegation.
+        renderer: Optional connector renderer for user-facing results.
+        state: Mutable outcome recorded by tool calls.
     """
 
     def __init__(
@@ -125,11 +133,17 @@ class FinalizationSession:
         delegation_manager: DelegationManager | None = None,
         renderer: WorkflowRenderer | None = None,
     ) -> None:
+        # Original/current task assignment for this workflow.
         self.task = task
+        # Validated completion payload from the sub-agent.
         self.complete = complete
+        # Optional workflow metadata for connector rendering.
         self.context = context
+        # Optional manager used by re_delegate.
         self.delegation_manager = delegation_manager
+        # Optional connector renderer for user-facing tool results.
         self.renderer = renderer
+        # Mutable outcome recorded by tool calls.
         self.state = FinalizationState()
 
     async def present_work_to_user(
@@ -139,17 +153,15 @@ class FinalizationSession:
     ) -> str:
         """Render the synthesised work to the originating channel.
 
+        Uses the sub-agent summary unless *summary* overrides it.  When a
+        renderer is wired, the user also receives action buttons.
+
         Args:
-            summary: Override for the user-facing summary.  When
-                ``None``, the sub-agent's verbatim ``summary`` is used.
-            include_diff: Inline a truncated diff preview below the
-                summary; ignored when the diff is empty.
+            summary: Optional replacement for the sub-agent summary.
+            include_diff: Whether to include a truncated diff preview.
 
         Returns:
-            The rendered text (or, when no renderer is wired, the
-            same text the renderer would have posted).  The
-            finalisation ``AgentLoop`` consumes this verbatim so the
-            tool result the model sees matches what the user sees.
+            The text shown to the user and returned to the finalization model.
         """
         rendered = summary or self.complete.summary
         diff_preview = (
@@ -161,7 +173,7 @@ class FinalizationSession:
                 summary=rendered,
                 diff=diff_preview,
             )
-        self.state.action = "present_work_to_user"
+        self.state.action = FinalizationAction.PRESENT_WORK_TO_USER
         self.state.message = rendered
         return rendered
 
@@ -169,41 +181,26 @@ class FinalizationSession:
         self,
         branch_name: str,
         commit_message: str = _DEFAULT_COMMIT_MESSAGE,
-        remote: str = "origin",
+        remote: str = _DEFAULT_REMOTE,
     ) -> str:
         """Commit the workspace changes and push *branch_name* to *remote*.
 
-        Operates on the local workspace the sub-agent left behind;
-        delegates the actual git invocations to public helpers in
-        ``agent/git_helpers.py`` so the structured-error / timeout /
-        TLS-bundle behaviour matches the model-callable git tools.
+        Sets ``state.is_terminal`` only when checkout, commit, and push all
+        succeed.  Recoverable git failures keep the workflow registered.
 
         Args:
-            branch_name: Local branch the work lands on.  Created
-                with ``-B`` semantics so an existing branch is reset
-                to HEAD.
-            commit_message: Commit subject; falls back to
-                ``"Finalize delegated work"``.
-            remote: Remote name (default ``origin``).
+            branch_name: Branch to create/reset and push.
+            commit_message: Commit message for staged delegated work.
+            remote: Git remote name.
 
         Returns:
-            Combined push output on success, or a structured error
-            string if any sub-step (checkout / commit / push) fails.
-            Errors are also rendered to the originating channel via
-            ``renderer.render_finalization_action`` so the user sees
-            them.
-
-        State: ``is_terminal`` is set to ``True`` only when the push
-        actually succeeded.  A recoverable git failure (network blip,
-        auth refresh, divergence) leaves the workflow registered so
-        the user can retry from the same Push & PR / Iterate /
-        Discard buttons in their thread.
+            Git push output or an ``Error: ...`` message.
         """
         message = await self._do_push_branch(branch_name, commit_message, remote)
-        await self._render_action_result("push_branch", message)
-        self.state.action = "push_branch"
+        await self._render_action_result(FinalizationAction.PUSH_BRANCH, message)
+        self.state.action = FinalizationAction.PUSH_BRANCH
         self.state.message = message
-        self.state.is_terminal = not message.startswith("Error:")
+        self.state.is_terminal = not message.startswith(_ERROR_PREFIX)
         return message
 
     async def _do_push_branch(
@@ -212,15 +209,15 @@ class FinalizationSession:
         commit_message: str,
         remote: str,
     ) -> str:
-        """Inner git-ops only — no rendering, no state mutation.
+        """Run checkout/commit/push without rendering or mutating state.
 
-        Shared by :meth:`push_branch` (which adds the single render +
-        state mutation) and :meth:`push_and_create_pr` (which composes
-        push with ``gh pr create`` and renders once for the whole
-        operation).  Splitting the rendering off here is the fix for
-        the double-render bug where ``push_and_create_pr`` used to
-        post one Slack message for the push and a second for the PR
-        creation, when the user expects a single atomic outcome.
+        Args:
+            branch_name: Branch to create/reset and push.
+            commit_message: Commit message for staged delegated work.
+            remote: Git remote name.
+
+        Returns:
+            Git push output or an ``Error: ...`` message.
         """
         workspace = self.task.workspace_root
         try:
@@ -228,94 +225,74 @@ class FinalizationSession:
             await commit_workspace(workspace, commit_message)
             return await git_push_branch(workspace, branch_name, remote=remote)
         except GitCommandError as exc:
-            return f"Error: {exc}"
+            return f"{_ERROR_PREFIX} {exc}"
 
     async def push_and_create_pr(
         self,
         branch_name: str,
         title: str,
         body: str = "",
-        remote: str = "origin",
+        remote: str = _DEFAULT_REMOTE,
     ) -> str:
         """Commit, push, and open a GitHub PR via ``gh``.
 
-        Composed from the same inner git ops as :meth:`push_branch`
-        plus a ``gh pr create`` invocation, but renders **exactly
-        once** for the combined operation: the user sees a single
-        Slack message describing the final outcome rather than one
-        for the push and another for the PR.
+        Renders one combined result for push plus PR creation.  Sets
+        ``state.is_terminal`` only when both steps succeed.
 
         Args:
-            branch_name: Branch to push.
-            title: Pull-request title.
-            body: PR body; defaults to the sub-agent's ``summary``.
-            remote: Remote name (default ``origin``).
+            branch_name: Branch to create/reset and push.
+            title: Pull request title.
+            body: Pull request body; defaults to the sub-agent summary.
+            remote: Git remote name.
 
         Returns:
-            ``gh`` stdout on success (typically the PR URL) or an
-            ``Error: …`` string on failure.  Always rendered through
-            the renderer so the user sees the outcome.
-
-        State: ``is_terminal`` is set to ``True`` only when the push
-        AND ``gh pr create`` both succeeded.  Either failure leaves
-        the workflow registered so the user can retry, iterate, or
-        discard from the same buttons.
+            Pull request URL/output or an ``Error: ...`` message.
         """
         push_output = await self._do_push_branch(branch_name, title, remote)
-        if push_output.startswith("Error:"):
+        if push_output.startswith(_ERROR_PREFIX):
             message = push_output
         else:
-            proc = await asyncio.create_subprocess_exec(
-                "gh",
-                "pr",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body or self.complete.summary,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.task.workspace_root,
-            )
-            stdout, stderr = await proc.communicate()
-            out = (stdout or stderr).decode(errors="replace").strip()
-            message = out if proc.returncode == 0 else f"Error: gh pr create failed: {out}"
-        await self._render_action_result("push_and_create_pr", message)
-        self.state.action = "push_and_create_pr"
+            try:
+                message = await create_pull_request(
+                    self.task.workspace_root,
+                    title=title,
+                    body=body or self.complete.summary,
+                )
+            except GitHubCommandError as exc:
+                message = f"{_ERROR_PREFIX} {exc}"
+
+        await self._render_action_result(FinalizationAction.PUSH_AND_CREATE_PR, message)
+        self.state.action = FinalizationAction.PUSH_AND_CREATE_PR
         self.state.message = message
-        self.state.is_terminal = not message.startswith("Error:")
+        self.state.is_terminal = not message.startswith(_ERROR_PREFIX)
         return message
 
     async def discard_work(self, reason: str = "") -> str:
         """Discard the per-workflow workspace.
 
-        The workspace path is verified to be a real directory under
-        the configured per-agent subdirectory (``agent-…``) before
-        ``shutil.rmtree``.  The check is defence-in-depth against a
-        misconfigured ``TaskAssignPayload.workspace_root`` — the
-        intended path is always
-        ``<config.coding.workspace_root>/agent-<agent_id>``, so any
-        other shape fails closed.
+        Refuses paths that do not look like per-agent workspaces.  Successful
+        deletion marks the workflow terminal.
 
         Args:
-            reason: Optional human-readable note rendered with the
-                acknowledgement.
+            reason: Optional acknowledgement text.
 
         Returns:
-            Acknowledgement text.
+            Discard acknowledgement or an ``Error: ...`` message.
         """
         path = Path(self.task.workspace_root).expanduser().resolve()
         if not _looks_like_per_agent_workspace(path, self.task.agent_id):
-            error_text = f"Error: refusing to discard non-agent path {path}"
-            await self._render_action_result("discard_work", error_text)
-            self.state.action = "discard_work"
+            error_text = f"{_ERROR_PREFIX} refusing to discard non-agent path {path}"
+            await self._render_action_result(FinalizationAction.DISCARD_WORK, error_text)
+            self.state.action = FinalizationAction.DISCARD_WORK
             self.state.message = error_text
             return error_text
+
         if path.exists():
             shutil.rmtree(path)
+
         message = reason or f"Discarded delegated workspace at {path}."
-        await self._render_action_result("discard_work", message)
-        self.state.action = "discard_work"
+        await self._render_action_result(FinalizationAction.DISCARD_WORK, message)
+        self.state.action = FinalizationAction.DISCARD_WORK
         self.state.message = message
         self.state.is_terminal = True
         return message
@@ -328,37 +305,20 @@ class FinalizationSession:
     ) -> str:
         """Fire a follow-up ``task.assign`` reusing the pinned baseline.
 
-        Returns immediately after the follow-up is sent — the second
-        iteration's finalisation runs as its own dispatcher-driven
-        ``asyncio.Task`` (design §8.2), so this call does not block
-        the orchestrator's main loop.
-
-        **Workflow-context mutation.**  Before the follow-up is sent,
-        the workflow's :class:`WorkflowContext` is updated in place so
-        ``context.task`` reflects the new iteration's payload.  The
-        context is the *same object* the dispatcher holds in its
-        ``_workflows`` registry — the mutation propagates to every
-        future ``task.complete`` arrival on this ``workflow_id``.
-        Without this update, the dispatcher would forever see the
-        iteration-0 task on the registered context and every cascading
-        re-delegation would compute ``iteration_number = 0 + 1 = 1``
-        no matter how many follow-ups had already happened.
-        ``self.task`` is also rebound so a model that calls
-        ``re_delegate`` twice within the same finalisation increments
-        correctly on the second call too.
+        Updates the registered workflow context before sending so the next
+        ``task.complete`` finalizes the new iteration.
 
         Args:
-            prompt: Updated instructions for the sub-agent.
-            max_turns: Optional cap override; defaults to the
-                original task's value.
-            model: Optional model override.
+            prompt: Updated instructions for the coding sub-agent.
+            max_turns: Optional per-iteration tool-round cap.
+            model: Optional per-iteration model override.
 
         Returns:
-            Acknowledgement string suitable for the finalisation
-            ``AgentLoop`` to read as the tool's textual result.
+            Re-delegation acknowledgement or an error message.
         """
         if self.delegation_manager is None:
-            return "Error: delegation manager unavailable"
+            return f"{_ERROR_PREFIX} delegation manager unavailable"
+
         followup = TaskAssignPayload(
             prompt=prompt,
             workflow_id=self.task.workflow_id,
@@ -371,94 +331,93 @@ class FinalizationSession:
             context_files=self.task.context_files,
             workspace_baseline=self.task.workspace_baseline,
             is_iteration=True,
-            iteration_number=self.task.iteration_number + 1,
+            iteration_number=self.task.iteration_number + _ITERATION_INCREMENT,
         )
-        # Update the dispatcher's registered workflow BEFORE firing the
-        # new ``task.assign`` so a fast sub-agent can't race the
-        # mutation: the dispatcher's ``_handle_task_complete`` reads
-        # ``ctx.task`` to seed the next iteration's
-        # :class:`FinalizationSession`, and we need that to see the
-        # new ``iteration_number`` / ``prompt``.  Mutating in place
-        # is intentional — :class:`WorkflowContext` is a regular
-        # dataclass and the dispatcher holds the same object.
+
+        # Keep dispatcher-held context in sync before sending task.assign.
         if self.context is not None:
             self.context.task = followup
+
         self.task = followup
-        await self.delegation_manager.delegate(followup, context=self.context)
+        await self.delegation_manager.delegate(followup)
+
         message = (
             f"Re-delegated workflow {followup.workflow_id} (iteration {followup.iteration_number})."
         )
-        await self._render_action_result("re_delegate", message)
-        self.state.action = "re_delegate"
+        await self._render_action_result(FinalizationAction.RE_DELEGATE, message)
+        self.state.action = FinalizationAction.RE_DELEGATE
         self.state.message = message
         return message
 
     async def destroy_sandbox(self) -> str:
-        """No-op in M2b: the sub-agent process is single-shot.
+        """No-op in M2b; real sandbox teardown lands with M3.
 
-        Recorded as a tool call so audit trails distinguish "model
-        chose not to push" (this) from "model never picked any tool".
-        Real teardown lands in M3 alongside ``openshell sandbox delete``.
+        Returns:
+            Acknowledgement text explaining that no sandbox exists to destroy.
         """
         message = "Sub-agent process is already single-shot; no sandbox to destroy."
-        await self._render_action_result("destroy_sandbox", message)
-        self.state.action = "destroy_sandbox"
+        await self._render_action_result(FinalizationAction.DESTROY_SANDBOX, message)
+        self.state.action = FinalizationAction.DESTROY_SANDBOX
         self.state.message = message
         self.state.is_terminal = True
         return message
 
-    async def _render_action_result(self, action: str, result: str) -> None:
+    async def _render_action_result(self, action: FinalizationAction, result: str) -> None:
         """Render a finalisation action result through the connector.
 
-        No-op when no renderer is wired (headless tests).  Errors are
-        swallowed so a connector failure can't poison the
-        finalisation loop's tool-call output.
+        Args:
+            action: Finalization tool name.
+            result: User-facing tool result text.
         """
         if self.renderer is None or self.context is None:
             return
         try:
             await self.renderer.render_finalization_action(
                 context=self.context,
-                action=action,
+                action=action.value,
                 result=result,
             )
         except Exception:  # noqa: BLE001 — connector surface is broad
             logger.warning(
                 "Renderer raised on finalization action %s",
-                action,
+                action.value,
                 exc_info=True,
             )
 
 
 def _looks_like_per_agent_workspace(path: Path, agent_id: str) -> bool:
-    """Return ``True`` when *path* matches the expected per-agent shape.
+    """Return ``True`` when *path* looks like a per-agent workspace.
 
-    The orchestrator's ``delegate_task`` tool builds workspace roots
-    as ``<config.coding.workspace_root>/agent-<short-id>``; the
-    sub-agent's ``agent_id`` is ``coding-<short-id>``.  We accept
-    either form so the check is robust to future spawn-id schemes
-    while still refusing arbitrary paths the model could pass through.
+    Args:
+        path: Candidate workspace path.
+        agent_id: Coding sub-agent id.
+
+    Returns:
+        Whether the path shape is safe for discard.
     """
     name = path.name
     if name.startswith("agent-"):
         return True
+
     if agent_id and name.endswith(agent_id):
         return True
+
     return False
 
 
 def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegistry:
-    """Build the finalization tool registry bound to one *session*.
+    """Build the single-use finalization tool registry for *session*.
 
-    Returned registry is single-use: each ``task.complete`` constructs
-    a new session and a new registry.  No surfacing or ``tool_search``
-    indirection — the finalisation model sees every tool up front
-    because the surface is small and bounded.
+    Args:
+        session: Per-workflow finalization session.
+
+    Returns:
+        Tool registry bound to that session.
     """
     registry = ToolRegistry()
 
     @tool(
-        "present_work_to_user",
+        FinalizationAction.PRESENT_WORK_TO_USER.value,
         "Present synthesized sub-agent work to the user with review actions.",
         {
             "type": "object",
@@ -472,17 +431,18 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         is_concurrency_safe=False,
     )
     async def present_work_to_user(summary: str | None = None, include_diff: bool = True) -> str:
+        """Present delegated work to the user."""
         return await session.present_work_to_user(summary, include_diff)
 
     @tool(
-        "push_branch",
+        FinalizationAction.PUSH_BRANCH.value,
         "Commit delegated work and push a branch without creating a PR.",
         {
             "type": "object",
             "properties": {
                 "branch_name": {"type": "string"},
                 "commit_message": {"type": "string", "default": _DEFAULT_COMMIT_MESSAGE},
-                "remote": {"type": "string", "default": "origin"},
+                "remote": {"type": "string", "default": _DEFAULT_REMOTE},
             },
             "required": ["branch_name"],
         },
@@ -493,12 +453,13 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
     async def push_branch(
         branch_name: str,
         commit_message: str = _DEFAULT_COMMIT_MESSAGE,
-        remote: str = "origin",
+        remote: str = _DEFAULT_REMOTE,
     ) -> str:
+        """Push delegated work to a branch."""
         return await session.push_branch(branch_name, commit_message, remote)
 
     @tool(
-        "push_and_create_pr",
+        FinalizationAction.PUSH_AND_CREATE_PR.value,
         "Commit delegated work, push a branch, and create a GitHub PR.",
         {
             "type": "object",
@@ -506,7 +467,7 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
                 "branch_name": {"type": "string"},
                 "title": {"type": "string"},
                 "body": {"type": "string", "default": ""},
-                "remote": {"type": "string", "default": "origin"},
+                "remote": {"type": "string", "default": _DEFAULT_REMOTE},
             },
             "required": ["branch_name", "title"],
         },
@@ -518,12 +479,13 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         branch_name: str,
         title: str,
         body: str = "",
-        remote: str = "origin",
+        remote: str = _DEFAULT_REMOTE,
     ) -> str:
+        """Push delegated work and create a pull request."""
         return await session.push_and_create_pr(branch_name, title, body, remote)
 
     @tool(
-        "discard_work",
+        FinalizationAction.DISCARD_WORK.value,
         "Discard delegated workspace changes.",
         {"type": "object", "properties": {"reason": {"type": "string", "default": ""}}},
         toolset=_TOOLSET,
@@ -531,16 +493,17 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         is_concurrency_safe=False,
     )
     async def discard_work(reason: str = "") -> str:
+        """Discard delegated workspace changes."""
         return await session.discard_work(reason)
 
     @tool(
-        "re_delegate",
+        FinalizationAction.RE_DELEGATE.value,
         "Send updated instructions to the same sub-agent baseline.",
         {
             "type": "object",
             "properties": {
                 "prompt": {"type": "string"},
-                "max_turns": {"type": "integer", "minimum": 1},
+                "max_turns": {"type": "integer", "minimum": _MIN_MAX_TURNS},
                 "model": {"type": "string"},
             },
             "required": ["prompt"],
@@ -554,10 +517,11 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         max_turns: int | None = None,
         model: str | None = None,
     ) -> str:
+        """Send follow-up instructions to the coding sub-agent."""
         return await session.re_delegate(prompt, max_turns, model)
 
     @tool(
-        "destroy_sandbox",
+        FinalizationAction.DESTROY_SANDBOX.value,
         "Tear down the sub-agent sandbox or process.",
         {"type": "object", "properties": {}},
         toolset=_TOOLSET,
@@ -565,6 +529,7 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         is_concurrency_safe=False,
     )
     async def destroy_sandbox() -> str:
+        """Tear down the sub-agent sandbox or process."""
         return await session.destroy_sandbox()
 
     for spec in (
@@ -576,4 +541,5 @@ def create_finalization_tool_registry(session: FinalizationSession) -> ToolRegis
         destroy_sandbox,
     ):
         registry.register(spec)
+
     return registry

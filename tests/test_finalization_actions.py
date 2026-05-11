@@ -35,7 +35,7 @@ from nemoclaw_escapades.orchestrator.finalization_actions import (
     is_finalization_action,
 )
 from nemoclaw_escapades.orchestrator.workflow import WorkflowContext
-from nemoclaw_escapades.tools.finalization import FinalizationSession
+from nemoclaw_escapades.tools.finalization import FinalizationAction, FinalizationSession
 
 
 def _task() -> TaskAssignPayload:
@@ -97,13 +97,13 @@ def _session_factory_returning(
         session = FinalizationSession(task=ctx.task, complete=complete, context=ctx)
 
         async def _push_and_create_pr(*_args: Any, **_kwargs: Any) -> str:
-            session.state.action = "push_and_create_pr"
+            session.state.action = FinalizationAction.PUSH_AND_CREATE_PR
             session.state.message = state_message
             session.state.is_terminal = state_is_terminal
             return state_message
 
         async def _discard_work(*_args: Any, **_kwargs: Any) -> str:
-            session.state.action = "discard_work"
+            session.state.action = FinalizationAction.DISCARD_WORK
             session.state.message = state_message
             session.state.is_terminal = state_is_terminal
             return state_message
