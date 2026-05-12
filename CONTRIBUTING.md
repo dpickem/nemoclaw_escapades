@@ -211,9 +211,13 @@ Key requirements:
 
 Keep docstrings **concise**:
 
-- **Summary + body ≤ 10 lines** before the `Args:` block.  Signature
-  sections (`Args` / `Returns` / `Raises`) scale with the function,
-  but prose doesn't.
+- **Loose length guide:** module/file docstrings usually read best at
+  around two short paragraphs; class docstrings at one short
+  paragraph; function and method docstrings at two or three sentences
+  before any `Args:` / `Returns:` / `Raises:` sections.  This is a
+  guideline, not a hard rule — more documentation is warranted for
+  tricky invariants, public APIs, security boundaries, or unusual
+  failure modes.
 - **One-line bullets.**  A bullet that wraps to 5 lines is a paragraph
   pretending to be a list item; rewrite it as prose or split it.
 - **No embedded design docs.**  If you need to explain call-site

@@ -84,7 +84,7 @@ from nemoclaw_escapades.orchestrator.transcript_repair import (
 from nemoclaw_escapades.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from nemoclaw_escapades.audit.db import AuditDB
+    from nemoclaw_escapades.audit.sink import AuditSink
 
 logger = get_logger("agent.loop")
 
@@ -132,7 +132,7 @@ class AgentLoop:
         backend: BackendBase,
         tools: ToolRegistry,
         config: AgentLoopConfig,
-        audit: AuditDB | None = None,
+        audit: AuditSink | None = None,
         approval: ApprovalGate | None = None,
         on_tool_start: ToolStartCallback | None = None,
         on_tool_end: ToolEndCallback | None = None,

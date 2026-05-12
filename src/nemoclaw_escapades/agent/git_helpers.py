@@ -1,28 +1,33 @@
-"""Git helpers for the sub-agent's lifecycle code.
+"""Git helpers for sub-agent and orchestrator lifecycle code.
 
 Distinct from ``tools/git.py`` (which exposes ``git_*`` *model-callable*
-tools): these helpers are called by the sub-agent's NMB receive loop
-and the orchestrator's delegation manager, never by the model.
+tools): these helpers are called by the sub-agent's NMB receive loop,
+the orchestrator's delegation manager, and the orchestrator's
+finalisation flow — never by the model.
 
 Two responsibilities:
 
 - **Baseline resolution** — given a freshly seeded workspace, return
-  the ``WorkspaceBaseline`` the orchestrator pinned the workflow to
-  (``git rev-parse origin/<branch>`` + ``git config --get remote.origin.url``).
+  the ``WorkspaceBaseline`` the orchestrator pinned the workflow to.
 - **Baseline-anchored diff** — ``git diff <base_sha>`` for
-  ``TaskCompletePayload.diff``.
+  ``TaskCompletePayload.diff`` and the orchestrator's §6.6.3
+  cross-check.
 
-Both reuse ``tools.git._run_git`` so timeout / TLS-bundle / output-cap
-behaviour stays consistent with the model-callable tools.
+All helpers reuse :func:`tools.git.run_git` so timeout, TLS-bundle,
+and output-cap behaviour stay consistent with the model-callable
+tools.
 
-See ``docs/design_m2b.md`` §6.6 (Workspace Baseline Semantics).
+See ``docs/design_m2b.md`` §6.6 (Workspace Baseline Semantics) and
+§7 (Work Collection and Finalization).  Finalisation-side commit / branch /
+push operations live with the model-callable tools in ``tools/finalization.py``.
 """
 
 from __future__ import annotations
 
-from nemoclaw_escapades.nmb.protocol import WorkspaceBaseline
-from nemoclaw_escapades.tools.git import _run_git
+from pathlib import Path
 
+from nemoclaw_escapades.nmb.protocol import WorkspaceBaseline
+from nemoclaw_escapades.tools.git import is_git_error, run_git
 
 class WorkspaceNotAGitRepoError(Exception):
     """Raised when baseline resolution is requested for a non-git workspace.
@@ -40,7 +45,7 @@ class GitDiffError(Exception):
     Attributes:
         workspace_root: Workspace path that failed.
         base_sha: Baseline SHA passed to ``git diff``.
-        output: Structured git-tool error text returned by ``_run_git``.
+        output: Structured git-tool error text returned by :func:`run_git`.
     """
 
     def __init__(self, workspace_root: str, base_sha: str, output: str) -> None:
@@ -48,6 +53,9 @@ class GitDiffError(Exception):
         self.workspace_root = workspace_root
         self.base_sha = base_sha
         self.output = output
+
+
+# ── Baseline resolution ────────────────────────────────────────────
 
 
 async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaseline:
@@ -76,15 +84,16 @@ async def resolve_baseline(workspace_root: str, branch: str) -> WorkspaceBaselin
         RuntimeError: If git is installed but the rev-parse fails for
             an unexpected reason — surfaces the git error verbatim.
     """
-    head_sha = (await _run_git(workspace_root, "rev-parse", "HEAD")).strip()
-    if head_sha.startswith(("Exit code:", "Error:")):
+    await _require_git_workspace_root(workspace_root)
+    head_sha = (await run_git(workspace_root, "rev-parse", "HEAD")).strip()
+    if is_git_error(head_sha):
         # Both "not a git repo" and "git not installed" land here;
         # callers branch on the message in the rare cases that matters.
         if "not a git repository" in head_sha or "Not a git repository" in head_sha:
             raise WorkspaceNotAGitRepoError(workspace_root)
         raise RuntimeError(f"git rev-parse HEAD failed: {head_sha}")
-    repo_url = (await _run_git(workspace_root, "config", "--get", "remote.origin.url")).strip()
-    if repo_url.startswith(("Exit code:", "Error:")):
+    repo_url = (await run_git(workspace_root, "config", "--get", "remote.origin.url")).strip()
+    if is_git_error(repo_url):
         # No origin configured (operator added a local-only branch
         # for testing).  Empty string is a valid sentinel for
         # "unknown" — the orchestrator's finalisation echo-match
@@ -103,8 +112,9 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
     """Compute the unified diff between *base_sha* and the working tree.
 
     Used by the sub-agent's NMB receive loop to populate
-    ``TaskCompletePayload.diff``.  The orchestrator can re-derive
-    the same diff at finalisation time as a cross-check (§6.6.3).
+    ``TaskCompletePayload.diff`` and by the orchestrator at
+    finalisation time to re-derive the same diff as a §6.6.3
+    cross-check.
 
     Working tree, not ``HEAD``.  The sub-agent's tool surface
     deliberately omits ``git_commit`` (orchestrator-only per §7.1),
@@ -117,14 +127,7 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
 
     To also include **untracked** files (the common case for
     sub-agent-created files like new modules), we first mark every
-    untracked path with ``git add --intent-to-add --all``.  That
-    registers the paths in the index without staging their content,
-    so the subsequent ``git diff`` reports them as additions
-    starting from an empty state.  The index mutation is harmless
-    here: the sub-agent process is single-shot and the workspace is
-    either thrown away on completion (Phase 3b) or re-cloned by
-    finalisation, so we never need a pristine ``.git/index`` past
-    this point.
+    untracked path with ``git add --intent-to-add --all``.
 
     Args:
         workspace_root: Absolute path to the workspace.
@@ -137,20 +140,20 @@ async def diff_against_baseline(workspace_root: str, base_sha: str) -> str:
     Raises:
         GitDiffError: If ``git diff`` itself fails.
     """
+    await _require_git_workspace_root(workspace_root)
+
     # Best-effort: ``--intent-to-add`` failures (read-only repo,
     # weird permissions) shouldn't sink the diff entirely — we still
     # get the tracked-file diff below.  The error string surfaces in
-    # the sub-agent's structured log via ``_run_git``.
-    await _run_git(workspace_root, "add", "--intent-to-add", "--all")
-    diff = await _run_git(workspace_root, "diff", base_sha)
-    if _is_git_error(diff):
+    # the sub-agent's structured log via :func:`run_git`.
+    await run_git(workspace_root, "add", "--intent-to-add", "--all")
+    diff = await run_git(workspace_root, "diff", base_sha)
+    if is_git_error(diff):
         raise GitDiffError(workspace_root, base_sha, diff)
     return diff
 
 
-def _is_git_error(output: str) -> bool:
-    """Return whether ``_run_git`` produced its structured error text."""
-    return output.startswith(("Exit code:", "Error:"))
+# ── Internal ───────────────────────────────────────────────────────
 
 
 async def _is_shallow(workspace_root: str) -> bool:
@@ -166,10 +169,22 @@ async def _is_shallow(workspace_root: str) -> bool:
     ``git fetch --unshallow`` defensively and proceed.  The opposite
     default (``out == "true"``) would skip the deepen step on git
     failure and crash at rebase time when the missing history
-    finally caught up with us.  The Pydantic model
-    (:class:`WorkspaceBaseline.is_shallow`) and the ``delegate_task``
-    JSON schema both default to ``True`` for the same reason — this
-    helper now matches them.
+    finally caught up with us.
     """
-    out = (await _run_git(workspace_root, "rev-parse", "--is-shallow-repository")).strip()
+    try:
+        await _require_git_workspace_root(workspace_root)
+    except WorkspaceNotAGitRepoError:
+        return True
+
+    out = (await run_git(workspace_root, "rev-parse", "--is-shallow-repository")).strip()
     return out != "false"
+
+
+async def _require_git_workspace_root(workspace_root: str) -> None:
+    """Raise unless *workspace_root* is the root of its own git repository."""
+    top_level = (await run_git(workspace_root, "rev-parse", "--show-toplevel")).strip()
+    if is_git_error(top_level):
+        raise WorkspaceNotAGitRepoError(workspace_root)
+
+    if Path(top_level).resolve() != Path(workspace_root).resolve():
+        raise WorkspaceNotAGitRepoError(workspace_root)

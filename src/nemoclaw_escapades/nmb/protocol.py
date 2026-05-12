@@ -48,6 +48,7 @@ class MessageType(StrEnum):
     TASK_PROGRESS = "task.progress"
     TASK_COMPLETE = "task.complete"
     TASK_ERROR = "task.error"
+    AUDIT_FLUSH = "audit.flush"
 
 
 class TaskProgressStatus(StrEnum):
@@ -74,6 +75,7 @@ TASK_ASSIGN: MessageType = MessageType.TASK_ASSIGN
 TASK_PROGRESS: MessageType = MessageType.TASK_PROGRESS
 TASK_COMPLETE: MessageType = MessageType.TASK_COMPLETE
 TASK_ERROR: MessageType = MessageType.TASK_ERROR
+AUDIT_FLUSH: MessageType = MessageType.AUDIT_FLUSH
 
 
 # ── Workspace baseline ─────────────────────────────────────────────
@@ -332,6 +334,51 @@ class TaskErrorPayload(BaseModel):
     traceback: str | None = None
 
 
+# ── Audit flush (sub-agent → orchestrator, best-effort) ─────────────
+
+
+class AuditToolCallPayload(BaseModel):
+    """One buffered sub-agent tool-call audit row.
+
+    Attributes mirror :meth:`AuditDB.log_tool_call` plus a stable
+    ``id`` so replayed ``audit.flush`` messages are idempotent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    service: str = ""
+    command: str = Field(min_length=1)
+    args: str = ""
+    operation_type: Literal["READ", "WRITE"]
+    approval_status: str | None = None
+    approved_by: str | None = None
+    approval_time_ms: float | None = None
+    exit_code: int | None = None
+    duration_ms: float = Field(ge=0)
+    success: bool
+    error_code: str | None = None
+    error_message: str | None = None
+    response_payload: str = ""
+
+
+class AuditFlushPayload(BaseModel):
+    """Batch of sub-agent tool-call audit rows.
+
+    Sent as ``audit.flush`` after a task finishes.  The orchestrator
+    ingests each row into the central audit DB with workflow and agent
+    attribution.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str = Field(min_length=1)
+    parent_sandbox_id: str = Field(min_length=1)
+    agent_id: str = Field(min_length=1)
+    agent_role: str = "coding"
+    tool_calls: list[AuditToolCallPayload] = Field(default_factory=list)
+
+
 # ── Codec helpers ──────────────────────────────────────────────────
 
 
@@ -404,10 +451,13 @@ def load[T: BaseModel](model: type[T], payload_type: str, raw: dict[str, Any] | 
 
 
 __all__ = [
+    "AUDIT_FLUSH",
     "TASK_ASSIGN",
     "TASK_COMPLETE",
     "TASK_ERROR",
     "TASK_PROGRESS",
+    "AuditFlushPayload",
+    "AuditToolCallPayload",
     "ContextFile",
     "MessageType",
     "PayloadValidationError",

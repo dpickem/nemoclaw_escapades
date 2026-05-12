@@ -3,6 +3,7 @@
 from nemoclaw_escapades.models.types import (
     ActionBlock,
     ActionButton,
+    ActionId,
     ActionPayload,
     ApprovalResult,
     ConfirmBlock,
@@ -20,6 +21,7 @@ from nemoclaw_escapades.models.types import (
 __all__ = [
     "ActionBlock",
     "ActionButton",
+    "ActionId",
     "ActionPayload",
     "ApprovalResult",
     "ConfirmBlock",

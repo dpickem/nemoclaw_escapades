@@ -24,13 +24,23 @@ class ErrorCategory(StrEnum):
     UNKNOWN = "unknown"
 
 
-# Platform-neutral action IDs for the Approve / Deny buttons attached to
-# write-approval prompts.  Lives in ``models`` so connectors can detect
-# approval interactions (to apply button-lifecycle UI updates) without
-# importing from ``orchestrator`` — preserves the one-way dependency
-# (``orchestrator`` → ``models``, ``connectors`` → ``models``).
-APPROVAL_ACTION_APPROVE: str = "approve_write"
-APPROVAL_ACTION_DENY: str = "deny_write"
+class ActionId(StrEnum):
+    """Platform-neutral button/action identifiers shared across connectors."""
+
+    APPROVE_WRITE = "approve_write"
+    DENY_WRITE = "deny_write"
+    FINALIZATION_PUSH_PR = "finalization_push_pr"
+    FINALIZATION_ITERATE = "finalization_iterate"
+    FINALIZATION_DISCARD = "finalization_discard"
+
+
+# Compatibility aliases for existing call sites.  ``StrEnum`` keeps these usable
+# anywhere a connector expects a plain string action_id.
+APPROVAL_ACTION_APPROVE: str = ActionId.APPROVE_WRITE
+APPROVAL_ACTION_DENY: str = ActionId.DENY_WRITE
+FINALIZATION_ACTION_PUSH_PR: str = ActionId.FINALIZATION_PUSH_PR
+FINALIZATION_ACTION_ITERATE: str = ActionId.FINALIZATION_ITERATE
+FINALIZATION_ACTION_DISCARD: str = ActionId.FINALIZATION_DISCARD
 
 
 # ---------------------------------------------------------------------------

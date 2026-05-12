@@ -13,17 +13,24 @@ signal arrives.  The wiring order is:
 2. **Inference backend** — ``InferenceHubBackend`` wraps the
    OpenAI-compatible chat-completions endpoint (Inference Hub or
    ``inference.local`` inside an OpenShell sandbox).
-3. **Tool registry** — optional; when enabled, tool modules (e.g.
+3. **Audit DB** — SQLite database for tool-call + delegation logging.
+4. **NMB bus** + delegation manager + workflow dispatcher — Phase 3b
+   centralised event loop (design §8.2).  The dispatcher owns
+   ``bus.listen()``; the delegation manager fires ``task.assign`` and
+   returns immediately; finalisation runs as an independent
+   ``asyncio.Task`` per ``task.complete`` arrival.
+5. **Tool registry** — optional; when enabled, tool modules (e.g.
    ``register_jira_tools``) populate the registry with ``ToolSpec``
    entries that the orchestrator can invoke during the agent loop.
-4. **Orchestrator** — the agent loop itself: prompt building,
+6. **Orchestrator** — the agent loop itself: prompt building,
    multi-turn tool use, transcript repair, and approval gating.
-5. **Connector** — ``SlackConnector`` opens a socket-mode WebSocket
+7. **Connector** — ``SlackConnector`` opens a socket-mode WebSocket
    to Slack and bridges platform events to ``orchestrator.handle()``.
 
 After ``connector.start()`` the process blocks on an ``asyncio.Event``
 until SIGINT or SIGTERM.  A second signal forces an immediate exit.
-Shutdown tears down the connector and backend in reverse order.
+Shutdown tears down the connector, dispatcher, delegation manager,
+audit DB, and backend in reverse order.
 
 ``run()`` is the synchronous entry point invoked by the Makefile and
 CLI (``python -m nemoclaw_escapades``).
@@ -41,10 +48,15 @@ from nemoclaw_escapades.agent.skill_loader import SkillLoader
 from nemoclaw_escapades.audit.db import AuditDB
 from nemoclaw_escapades.backends.inference_hub import InferenceHubBackend
 from nemoclaw_escapades.config import create_orchestrator_config, load_dotenv_if_present
-from nemoclaw_escapades.connectors.slack import SlackConnector
+from nemoclaw_escapades.connectors.base import StatusCallback
+from nemoclaw_escapades.connectors.slack import SlackConnector, SlackFinalizationRenderer
+from nemoclaw_escapades.models.types import NormalizedRequest, RichResponse
 from nemoclaw_escapades.nmb.client import MessageBus
 from nemoclaw_escapades.observability.logging import get_logger, setup_logging
 from nemoclaw_escapades.orchestrator.delegation import DelegationManager
+from nemoclaw_escapades.orchestrator.dispatcher import WorkflowDispatcher
+from nemoclaw_escapades.orchestrator.finalization import FinalizationCoordinator
+from nemoclaw_escapades.orchestrator.finalization_actions import FinalizationActionHandler
 from nemoclaw_escapades.orchestrator.orchestrator import Orchestrator
 from nemoclaw_escapades.runtime import (
     RuntimeEnvironment,
@@ -64,25 +76,11 @@ async def main() -> None:
     load_dotenv_if_present()
 
     # ── 0. Runtime self-check ─────────────────────────────────────
-    # Evaluate sandbox signals *before* config loading so a broken
-    # deployment (OpenShell version drift, gateway misconfigured,
-    # sandbox env vars leaked into a local shell) fails fast with a
-    # structured diagnostic instead of silently booting with the
-    # wrong defaults.
     runtime = detect_runtime_environment()
     if runtime.classification is RuntimeEnvironment.INCONSISTENT:
-        # Logging isn't configured yet (we haven't loaded config); emit
-        # via the detector's own logger, which uses whatever the root
-        # handler defaults to.  That's fine for a fatal startup error.
         raise SandboxConfigurationError(runtime)
 
     # ── 1. Configuration ──────────────────────────────────────────
-    # Dataclass defaults → YAML overlay (``/app/config.yaml``) →
-    # secret env vars.  Credentials are L7-proxy placeholders
-    # resolved at HTTP-request time — the config layer never sees
-    # real secrets.  The ``runtime`` self-check above already
-    # confirmed we're in a healthy sandbox, so the loader itself
-    # doesn't need to branch on that classification.
     config = create_orchestrator_config()
     setup_logging(level=config.log.level, log_file=config.log.log_file)
 
@@ -100,9 +98,6 @@ async def main() -> None:
     backend = InferenceHubBackend(config.inference)
 
     # ── 3. Skill loader (optional) ────────────────────────────────
-    # Scans the skills directory at startup for SKILL.md files.  The
-    # loader itself is harmless when the directory is empty — only the
-    # subsequent register_skill_tool call is skipped.
     skill_loader: SkillLoader | None = None
     if config.skills.enabled:
         skills_dir = str(Path(config.skills.skills_dir).expanduser())
@@ -113,10 +108,6 @@ async def main() -> None:
         )
 
     # ── 4. Audit DB ───────────────────────────────────────────────
-    # SQLite database for tool-call + delegation logging.  Built
-    # *before* the tool registry so ``delegate_task`` can route
-    # ``log_delegation_*`` writes through the same DB the rest of
-    # the orchestrator uses.
     audit: AuditDB | None = None
     if config.audit.enabled:
         audit_path = str(Path(config.audit.db_path).expanduser())
@@ -125,17 +116,15 @@ async def main() -> None:
         await audit.start_background_writer()
         logger.info("Audit DB opened", extra={"path": audit_path})
 
-    # ── 5. NMB bus + DelegationManager (optional) ─────────────────
-    # ``delegate_task`` needs a live ``MessageBus`` and a
-    # ``DelegationManager`` to actually reach a sub-agent.  Both are
-    # constructed here so the registry factory can register the tool
-    # in the same step.  A broker that's unreachable is *not* fatal —
-    # we log and run degraded (no delegation), since the orchestrator
-    # can still serve interactive coding requests.  Operators who
-    # don't want delegation at all set ``delegation.enabled=false``
-    # in YAML to skip the bus dial entirely.
+    # ── 5. NMB bus + delegation manager + dispatcher ──────────────
+    # Phase 3b architecture (design §8.2): the dispatcher owns
+    # ``bus.listen()``, the delegation manager is fire-and-forget,
+    # and finalisation runs as independent asyncio tasks.
     nmb_bus: MessageBus | None = None
     delegation_manager: DelegationManager | None = None
+    dispatcher: WorkflowDispatcher | None = None
+    finalization_actions: FinalizationActionHandler | None = None
+    slack_connector: SlackConnector | None = None
     if config.delegation.enabled:
         nmb_bus = MessageBus(
             broker_url=config.nmb.broker_url,
@@ -166,13 +155,46 @@ async def main() -> None:
             delegation_manager = None
 
     # ── 6. Tool registry ──────────────────────────────────────────
-    # Single-call factory builds the process-wide registry from config.
-    # ``delegate_task`` is registered iff ``delegation_manager`` is set;
-    # see ``tools/tool_registry_factory.py``.
+    # Build a placeholder Slack connector early so the renderer can
+    # attach to its already-authenticated client.  The connector is
+    # configured but not started yet; ``connector.start()`` runs in
+    # step 9 once the orchestrator + dispatcher are ready.
+    if delegation_manager is not None:
+        renderer: SlackFinalizationRenderer | None = None
+        slack_connector = SlackConnector(
+            handler=_placeholder_handler,
+            bot_token=config.slack.bot_token,
+            app_token=config.slack.app_token,
+        )
+        renderer = SlackFinalizationRenderer(slack_connector.client)
+
+        finalizer = FinalizationCoordinator(
+            backend=backend,
+            config=config.agent_loop,
+            delegation_manager=delegation_manager,
+            audit=audit,
+            renderer=renderer,
+        )
+        assert nmb_bus is not None  # set in step 5 alongside delegation_manager
+        dispatcher = WorkflowDispatcher(
+            nmb_bus,
+            audit=audit,
+            finalizer=finalizer,
+            renderer=renderer,
+            delegation_manager=delegation_manager,
+        )
+        await dispatcher.start()
+        finalization_actions = FinalizationActionHandler(
+            dispatcher=dispatcher,
+            delegation_manager=delegation_manager,
+            renderer=renderer,
+        )
+
     registry = build_full_tool_registry(
         config,
         skill_loader=skill_loader,
         delegation_manager=delegation_manager,
+        dispatcher=dispatcher,
         audit=audit,
     )
 
@@ -187,8 +209,6 @@ async def main() -> None:
         tools = None
 
     # ── 7. Orchestrator + connector ───────────────────────────────
-    # The orchestrator owns the agent loop; the connector bridges
-    # Slack events to orchestrator.handle().
     orchestrator = Orchestrator(
         backend,
         config.orchestrator,
@@ -196,16 +216,18 @@ async def main() -> None:
         approval=WriteApproval(),
         tools=tools,
         audit=audit,
+        finalization_action_handler=finalization_actions,
     )
-    connector = SlackConnector(
-        handler=orchestrator.handle,
-        bot_token=config.slack.bot_token,
-        app_token=config.slack.app_token,
-    )
+    if slack_connector is None:
+        slack_connector = SlackConnector(
+            handler=orchestrator.handle,
+            bot_token=config.slack.bot_token,
+            app_token=config.slack.app_token,
+        )
+    else:
+        slack_connector.set_handler(orchestrator.handle)
 
     # ── 8. Signal handling ────────────────────────────────────────
-    # First SIGINT/SIGTERM triggers graceful shutdown; a second one
-    # forces immediate exit (useful when teardown hangs).
     shutdown_event = asyncio.Event()
     _shutting_down = False
 
@@ -224,16 +246,30 @@ async def main() -> None:
 
     # ── 9. Run until shutdown ─────────────────────────────────────
     try:
-        await connector.start()
+        await slack_connector.start()
         logger.info("NemoClaw is running. Press Ctrl+C to stop.")
         await shutdown_event.wait()
     except Exception:
         logger.error("Fatal error during startup", exc_info=True)
         sys.exit(1)
     finally:
-        # Teardown in reverse order: connector → bus → audit → backend.
+        # Teardown in reverse order: connector → dispatcher →
+        # delegation manager → bus → audit → backend.  The dispatcher
+        # owns the longest-lived asyncio tasks (the listen loop +
+        # in-flight finalisations), so cancelling it first lets the
+        # bus.close() below complete cleanly.
         logger.info("Shutting down...")
-        await connector.stop()
+        await slack_connector.stop()
+        if dispatcher is not None:
+            try:
+                await dispatcher.close()
+            except Exception:
+                logger.warning("Dispatcher close failed", exc_info=True)
+        if delegation_manager is not None:
+            try:
+                await delegation_manager.close()
+            except Exception:
+                logger.warning("Delegation manager close failed", exc_info=True)
         if nmb_bus is not None:
             try:
                 await nmb_bus.close()
@@ -246,6 +282,22 @@ async def main() -> None:
             logger.info("Audit DB closed")
         await backend.close()
         logger.info("Shutdown complete")
+
+
+async def _placeholder_handler(
+    _request: NormalizedRequest,
+    _on_status: StatusCallback | None = None,
+) -> RichResponse:
+    """Connector handler used during startup before the orchestrator exists.
+
+    The :class:`SlackConnector` is constructed early so the
+    finalisation renderer can attach to its authenticated client;
+    the connector's handler is rewritten via
+    :meth:`SlackConnector.set_handler` once the orchestrator is built.
+    The placeholder is never actually invoked because the connector
+    isn't started until step 9.
+    """
+    raise RuntimeError("Slack connector started before orchestrator wiring completed")
 
 
 def run() -> None:

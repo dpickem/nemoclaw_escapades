@@ -225,3 +225,7 @@ class ToolCallRow(Base):
 
     response_payload: Mapped[str | None] = mapped_column(String)
     payload_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(String)
+    parent_sandbox_id: Mapped[str | None] = mapped_column(String)
+    agent_id: Mapped[str | None] = mapped_column(String)
+    agent_role: Mapped[str | None] = mapped_column(String)

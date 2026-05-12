@@ -25,7 +25,10 @@ import pytest
 from pydantic import ValidationError
 
 from nemoclaw_escapades.nmb.protocol import (
+    AUDIT_FLUSH,
     TASK_ASSIGN,
+    AuditFlushPayload,
+    AuditToolCallPayload,
     ContextFile,
     MessageType,
     PayloadValidationError,
@@ -85,6 +88,7 @@ class TestProtocolEnums:
     def test_message_type_constant_is_str_enum(self) -> None:
         assert TASK_ASSIGN is MessageType.TASK_ASSIGN
         assert TASK_ASSIGN == "task.assign"
+        assert AUDIT_FLUSH is MessageType.AUDIT_FLUSH
 
     def test_progress_status_serialises_as_string(self) -> None:
         payload = TaskProgressPayload(
@@ -343,6 +347,41 @@ class TestTaskProgressPayload:
         bad = {**_PROGRESS_REQUIRED, "status": "thinking"}
         with pytest.raises(PayloadValidationError):
             load(TaskProgressPayload, "task.progress", bad)
+
+
+# ── AuditFlushPayload ───────────────────────────────────────────────
+
+
+class TestAuditFlushPayload:
+    def test_roundtrip(self) -> None:
+        payload = AuditFlushPayload(
+            workflow_id="wf-abc123",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-12345678",
+            tool_calls=[
+                AuditToolCallPayload(
+                    id="row-1",
+                    service="files",
+                    command="read_file",
+                    args='{"path":"README.md"}',
+                    operation_type="READ",
+                    duration_ms=12.5,
+                    success=True,
+                    response_payload="ok",
+                )
+            ],
+        )
+        assert load(AuditFlushPayload, "audit.flush", dump(payload)) == payload
+
+    def test_invalid_operation_type_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AuditToolCallPayload(
+                id="row-1",
+                command="x",
+                operation_type="EXEC",  # type: ignore[arg-type]
+                duration_ms=1.0,
+                success=True,
+            )
 
 
 # ── Codec edge cases ───────────────────────────────────────────────

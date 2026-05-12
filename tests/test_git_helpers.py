@@ -1,15 +1,15 @@
 """Tests for ``agent/git_helpers.py``.
 
-Two helpers, both wrappers around ``tools.git._run_git``:
+The helpers wrap :func:`tools.git.run_git`:
 
 - ``resolve_baseline`` reads HEAD + ``remote.origin.url`` after
   workspace seeding so the orchestrator can pin a
   ``WorkspaceBaseline`` for the workflow.
 - ``diff_against_baseline`` emits ``git diff <base_sha>`` for
-  ``TaskCompletePayload.diff``.
+  ``TaskCompletePayload.diff`` and the orchestrator's §6.6.3 cross-check.
 
 These tests use real ``git`` invocations against a tmp-path repo —
-the helpers are thin enough that mocking ``_run_git`` would test
+the helpers are thin enough that mocking ``run_git`` would test
 the mock more than the helper.  The repo is created via
 ``git init`` + a single empty commit so we have a known SHA.
 """

@@ -604,6 +604,7 @@ class TestAwaitAndHandleOneTask:
             _config: Any,
             _backend: Any,
             _logger: Any,
+            **_: Any,
         ) -> agent_main.TaskCompletePayload:
             return agent_main.TaskCompletePayload(
                 workflow_id=task.workflow_id,
@@ -633,6 +634,213 @@ class TestAwaitAndHandleOneTask:
         assert rc == 1
         assert [reply_type for reply_type, _ in replies] == [TASK_COMPLETE]
         assert all(reply_type != TASK_ERROR for reply_type, _ in replies)
+
+    @pytest.mark.asyncio
+    async def test_error_path_emits_task_error_when_audit_jsonl_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``task.error`` must be sent even when the audit JSONL write fails.
+
+        Regression for the audit-flush exception leak: previously
+        ``_await_and_handle_one_task``'s error path called
+        ``_flush_audit_buffer`` without exception handling.  Inside,
+        ``write_jsonl_fallback`` ran before any try/except guard
+        and would raise on filesystem errors (read-only workspace,
+        missing parent, permission denied).  That exception escaped
+        the outer ``except`` block and skipped the
+        ``bus.reply(TASK_ERROR, ...)`` call — directly contradicting
+        the "don't crash; emit task.error" contract documented at
+        the call site.
+        """
+        from nemoclaw_escapades.agent.audit_buffer import AuditBuffer
+        from nemoclaw_escapades.config import AppConfig
+        from nemoclaw_escapades.nmb.models import NMBMessage, Op
+        from nemoclaw_escapades.nmb.protocol import TASK_ASSIGN, TASK_ERROR
+
+        def _boom(self: AuditBuffer, path: str | Path) -> Path:
+            raise OSError("simulated read-only workspace")
+
+        monkeypatch.setattr(AuditBuffer, "write_jsonl_fallback", _boom)
+
+        task = agent_main.TaskAssignPayload(
+            prompt="will fail",
+            workflow_id="wf-jsonl-fails",
+            parent_sandbox_id="orchestrator",
+            agent_id="coding-abcdef02",
+            workspace_root=str(tmp_path),
+        )
+        assign_msg = NMBMessage(
+            op=Op.DELIVER,
+            from_sandbox="orchestrator",
+            type=TASK_ASSIGN,
+            payload=agent_main.dump(task),
+        )
+        replies: list[tuple[str, dict[str, Any]]] = []
+
+        class _FakeBus:
+            async def listen(self) -> Any:
+                yield assign_msg
+
+            async def reply(
+                self,
+                _original: NMBMessage,
+                type: str,
+                payload: dict[str, Any],
+            ) -> None:
+                replies.append((type, payload))
+
+            async def send(self, **_: Any) -> None:
+                pass
+
+        async def _fake_run_assigned_task(
+            _task: Any,
+            _config: Any,
+            _backend: Any,
+            _logger: Any,
+            **_: Any,
+        ) -> agent_main.TaskCompletePayload:
+            raise RuntimeError("simulated task failure")
+
+        monkeypatch.setattr(agent_main, "_run_assigned_task", _fake_run_assigned_task)
+
+        class _FakeBackend:
+            async def close(self) -> None:
+                pass
+
+        import logging
+
+        rc = await agent_main._await_and_handle_one_task(
+            bus=_FakeBus(),
+            config=AppConfig(),
+            backend=_FakeBackend(),
+            logger=logging.getLogger("test"),
+            shutdown_event=asyncio.Event(),
+        )
+
+        assert rc == 0
+        reply_types = [reply_type for reply_type, _ in replies]
+        assert TASK_ERROR in reply_types, (
+            f"task.error must reach the orchestrator even when the audit "
+            f"JSONL write raises; got reply types: {reply_types!r}"
+        )
+
+
+class TestFlushAuditBuffer:
+    """``_flush_audit_buffer`` must never let audit-side errors escape."""
+
+    @pytest.mark.asyncio
+    async def test_jsonl_failure_does_not_propagate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failing JSONL write must be swallowed so the caller can continue.
+
+        The function is called on both the success and error paths
+        of ``_await_and_handle_one_task``.  Letting an exception
+        escape would crash the success path's ``task.complete``
+        delivery and the error path's ``task.error`` delivery.
+        """
+        from nemoclaw_escapades.agent.audit_buffer import AuditBuffer
+
+        def _boom(self: AuditBuffer, path: str | Path) -> Path:
+            raise OSError("readonly fs")
+
+        monkeypatch.setattr(AuditBuffer, "write_jsonl_fallback", _boom)
+
+        task = agent_main.TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-1",
+            parent_sandbox_id="orch",
+            agent_id="coding-1",
+            workspace_root=str(tmp_path),
+        )
+        buf = AuditBuffer(
+            workflow_id=task.workflow_id,
+            parent_sandbox_id=task.parent_sandbox_id,
+            agent_id=task.agent_id,
+        )
+        await buf.log_tool_call(
+            service="files",
+            command="read_file",
+            args="{}",
+            operation_type="READ",
+            duration_ms=1.0,
+            success=True,
+        )
+
+        sent: list[tuple[str, str, dict[str, Any]]] = []
+
+        class _FakeBus:
+            async def send(
+                self,
+                *,
+                to: str,
+                type: str,
+                payload: dict[str, Any],
+            ) -> None:
+                sent.append((to, type, payload))
+
+        import logging
+
+        # Should not raise.
+        await agent_main._flush_audit_buffer(
+            _FakeBus(),
+            task,
+            buf,
+            logging.getLogger("test"),
+        )
+        # The bus.send still ran — JSONL fallback failure must not
+        # gate the primary in-band path.
+        assert len(sent) == 1
+        assert sent[0][1] == "audit.flush"
+
+    @pytest.mark.asyncio
+    async def test_bus_send_failure_does_not_propagate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failing ``bus.send`` must be swallowed (existing contract)."""
+        from nemoclaw_escapades.agent.audit_buffer import AuditBuffer
+
+        task = agent_main.TaskAssignPayload(
+            prompt="x",
+            workflow_id="wf-2",
+            parent_sandbox_id="orch",
+            agent_id="coding-2",
+            workspace_root=str(tmp_path),
+        )
+        buf = AuditBuffer(
+            workflow_id=task.workflow_id,
+            parent_sandbox_id=task.parent_sandbox_id,
+            agent_id=task.agent_id,
+        )
+        await buf.log_tool_call(
+            service="files",
+            command="read_file",
+            args="{}",
+            operation_type="READ",
+            duration_ms=1.0,
+            success=True,
+        )
+
+        class _BrokenBus:
+            async def send(self, **_: Any) -> None:
+                raise RuntimeError("websocket dropped")
+
+        import logging
+
+        await agent_main._flush_audit_buffer(
+            _BrokenBus(),
+            task,
+            buf,
+            logging.getLogger("test"),
+        )
+        # JSONL fallback path was still exercised — the file exists.
+        fallback_path = tmp_path / ".nemoclaw" / f"audit-{task.workflow_id}.jsonl"
+        assert fallback_path.exists()
 
 
 # ── AgentSetupBundle round-trip ─────────────────────────────────────
