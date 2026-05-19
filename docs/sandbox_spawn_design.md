@@ -158,7 +158,8 @@ endpoint chosen by the deployment.  In the prototype, that endpoint is the
 forwarded broker listener at `host.docker.internal:9876`; see
 [`prototypes/nmb_sandbox_communication`](../prototypes/nmb_sandbox_communication).
 
-If native sandbox service routing becomes available, the model is still
+OpenShell 0.0.44 includes a `service` command for exposing long-lived sandbox
+services. If native sandbox service routing is used, the model is still
 source-side egress control: a child sandbox that initiates HTTP or WebSocket
 traffic to a sibling sandbox must explicitly allow that sibling service host and
 port in its own `network_policies`, and the sibling service must listen on
@@ -180,8 +181,8 @@ Targets:
 Add optional settings such as:
 
 - `SANDBOX_SPAWN_ENABLED=true|false`
-- `OPENSHELL_GATEWAY_URL=...`
-- `OPENSHELL_GATEWAY_NAME=...`
+- `OPENSHELL_GATEWAY_NAME=...` (registered gateway selected by the operator)
+- `OPENSHELL_GATEWAY_ENDPOINT=...` (only when bypassing stored registration)
 - `CHILD_SANDBOX_POLICY=...`
 - `CHILD_SANDBOX_IMAGE_SOURCE=...` (for `--from`)
 

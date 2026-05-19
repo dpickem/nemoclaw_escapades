@@ -3,11 +3,11 @@
 # Quick start:
 #   cp .env.example .env        # fill in real values
 #   make setup                  # conda env + gateway + providers + sandbox
-#   make run-local-sandbox      # (re)create and run the orchestrator in the sandbox
+#   make run                    # (re)create and run the orchestrator in the sandbox
 #
 # The OpenShell sandbox is the only supported runtime for the app.
 # Local development runs inside a locally-created sandbox via
-# ``make setup-sandbox`` / ``make run-local-sandbox`` — bare-process
+# ``make setup-sandbox`` / ``make run`` — bare-process
 # execution outside the sandbox is no longer a supported path (see
 # ``runtime.py`` — the runtime self-check refuses to start without
 # sandbox signals present).
@@ -69,7 +69,7 @@ CONDA_RUN     := conda run --live-stream -n $(CONDA_ENV)
 MAIN_MODULE   := nemoclaw_escapades.main
 BROKER_MODULE := nemoclaw_escapades.nmb.broker
 
-# Audit DB paths — sandbox uses PVC-backed /sandbox (OpenShell >= 0.0.22)
+# Audit DB paths — sandbox uses OpenShell 0.0.44+ sandbox-scoped /sandbox storage.
 AUDIT_DB_LOCAL    := $(HOME)/.nemoclaw/audit.db
 AUDIT_DB_SANDBOX  := /sandbox/audit.db
 AUDIT_SYNC_INTERVAL := 60
@@ -86,7 +86,7 @@ SSH_CMD := ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 
 .PHONY: help
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------------------
@@ -103,35 +103,16 @@ install: ## Create conda env (if needed) and install the package + dev deps
 		     conda create -n $(CONDA_ENV) python=$(PYTHON_VER) -y --solver=classic; }
 	$(CONDA_RUN) pip install -e ".[dev]"
 
-# OpenShell v0.0.21: `openshell gateway start` cannot restart a stopped
-# gateway without destroying it.  Try `docker start` first to preserve
-# provider/routing config.
 .PHONY: setup-gateway
-setup-gateway: ## Start the OpenShell gateway if not already running
+setup-gateway: ## Verify the registered OpenShell gateway is reachable
 	@command -v openshell >/dev/null 2>&1 || { echo "✗ openshell CLI not found. Install it first."; exit 1; }
-	@command -v docker >/dev/null 2>&1 || { echo "✗ docker not found. Install Docker first."; exit 1; }
-	@docker info >/dev/null 2>&1 || { echo "✗ Docker is not running. Start Docker Desktop and retry."; exit 1; }
 	@if openshell status >/dev/null 2>&1; then \
 		echo "✓ Gateway already running."; \
-	elif docker inspect $(GATEWAY_CONTAINER) >/dev/null 2>&1; then \
-		echo "Gateway stopped — restarting via docker..."; \
-		docker start $(GATEWAY_CONTAINER); \
-		echo "Waiting for k3s to initialise (up to 60s)..."; \
-		for i in $$(seq 1 12); do \
-			sleep 5; \
-			if openshell status >/dev/null 2>&1; then \
-				echo "✓ Gateway restarted (after $$(( i * 5 ))s)."; \
-				break; \
-			fi; \
-			printf "  ...%ds\n" "$$(( i * 5 ))"; \
-		done; \
-		if ! openshell status >/dev/null 2>&1; then \
-			echo "✗ Gateway failed to start after 60s. Run: openshell gateway destroy --name $(GATEWAY_NAME) && openshell gateway start"; \
-			exit 1; \
-		fi; \
 	else \
-		echo "No existing gateway — creating from scratch..."; \
-		openshell gateway start; \
+		echo "✗ No reachable OpenShell gateway."; \
+		echo "  Start the local service (for Homebrew: brew services restart openshell)"; \
+		echo "  then register/select it with openshell gateway add/select."; \
+		exit 1; \
 	fi
 
 # All provider targets are idempotent: delete-then-create ensures a clean
@@ -239,7 +220,9 @@ setup-sandbox: gen-policy gen-config ## Build image, create sandbox, and start t
 # Run
 # ---------------------------------------------------------------------------
 
-.PHONY: run-local-sandbox
+.PHONY: run run-local-sandbox
+run: run-local-sandbox ## Bring up OpenShell and run the orchestrator sandbox
+
 run-local-sandbox: setup-gateway setup-providers setup-sandbox ## (Re)create and run the orchestrator in the sandbox
 
 .PHONY: run-broker
@@ -438,5 +421,4 @@ clean: ## Delete sandbox, providers, and local image (saves audit DB first)
 	@docker rmi $(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
 
 .PHONY: clean-all
-clean-all: clean ## clean + stop the gateway
-	@command -v openshell >/dev/null 2>&1 && openshell gateway stop 2>/dev/null || true
+clean-all: clean ## clean repo resources; gateway service lifecycle is managed outside this Makefile

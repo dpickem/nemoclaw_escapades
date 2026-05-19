@@ -156,7 +156,7 @@ M3 also adopts two design primitives from the
 │  │  OpenShell Gateway (control plane)  │                                  │
 │  │  - openshell sandbox create/delete  │                                  │
 │  │  - openshell sandbox upload/download│                                  │
-│  │  - openshell policy set --wait      │                                  │
+│  │  - openshell policy update/prove    │                                  │
 │  └─────────────────────────────────────┘                                  │
 │           │           │           │           │                           │
 │           ▼           ▼           ▼           ▼                           │
@@ -205,7 +205,7 @@ Components introduced or extended in M3:
 | `SandboxClient` | M3 | new | Wrapper around `openshell sandbox` CLI commands. `create()`, `start()`, `delete()`, `upload()`, `download()`, `policy_set()`. |
 | `Manifest` | M3 | new | Pydantic dataclass. Workspace contract: entries, env, users, `extra_path_grants`. |
 | `PolicyBuilder` | M3 | new | Merges per-role base policy + skill `nemoclaw.infrastructure` blocks + per-task overlay → final OpenShell YAML. |
-| `PolicyOverlay` | M3 | new | Per-sandbox runtime additions from `policy.request`. Hot-reloaded via `openshell policy set --wait`. |
+| `PolicyOverlay` | M3 | new | Per-sandbox runtime additions from `policy.request`. Hot-reloaded via `openshell policy update` after optional `policy prove`. |
 | `ReviewAgent` | M3 | M2a `AgentLoop` | New agent role. Read-only tool surface against the coding workspace. |
 | `DelegationManager` | M2b | extended | Spawn path now branches: same-sandbox subprocess (M2b mode, kept for tests) vs. multi-sandbox CLI (M3 prod). |
 | `AuditFlush` | M2b | extended | Adds `openshell sandbox download` fallback for the audit JSONL when NMB-batched flush misses records. |
@@ -636,7 +636,7 @@ class PolicyOverlay:
         ...
 
     async def apply(self) -> None:
-        """Write merged policy to a temp file and call openshell policy set --wait."""
+        """Prove and apply an incremental OpenShell policy update."""
         merged_path = self._write_temp_policy()
         await openshell_policy_set(self.sandbox_id, merged_path)
 ```
@@ -1093,7 +1093,7 @@ a new code path, not a replacement).
 | `nemoclaw.infrastructure` parsing in `SkillLoader` | `src/nemoclaw_escapades/agent/skill_loader.py` | ⏳ |
 | `auto_policy_approval` config + per-skill approval store | `src/nemoclaw_escapades/config.py`, `~/.nemoclaw/skill_approvals.json` | ⏳ |
 | `policy.request` / `.updated` / `.denied` NMB types | `src/nemoclaw_escapades/nmb/types.py`, broker | ⏳ |
-| `PolicyOverlay.apply()` calling `openshell policy set --wait` | `src/nemoclaw_escapades/sandbox/policy_overlay.py` (new) | ⏳ |
+| `PolicyOverlay.apply()` calling `openshell policy update` | `src/nemoclaw_escapades/sandbox/policy_overlay.py` (new) | ⏳ |
 | Auto-approval evaluator with per-task `task.lang` rule | `src/nemoclaw_escapades/orchestrator/policy_handler.py` (new) | ⏳ |
 | Slack escalation for unknown endpoints | `src/nemoclaw_escapades/connectors/slack/policy_approval.py` (new) | ⏳ |
 | Audit table for `policy.*` events | `src/nemoclaw_escapades/audit/db.py` | ⏳ |
@@ -1166,7 +1166,7 @@ per-sub-sandbox card for each in-flight workflow.
 |---|---|
 | `Manifest` validation | Reject absolute paths, `..` escapes, Windows-absolute paths, unknown env-var providers. |
 | `PolicyBuilder` | Base + skill blocks + overlay merge produces expected YAML; conflicts (writes-vs-no-writes) resolve to strictest. |
-| `PolicyOverlay.apply()` | Calls `openshell policy set --wait` with the merged YAML; returns control after the gateway acks. |
+| `PolicyOverlay.apply()` | Calls `openshell policy prove` where possible, then `openshell policy update` for the approved runtime grant; returns control after the gateway acks. |
 | Auto-approval evaluator | Allowlist matches; condition expressions (`task.lang == "python"`) work; deny→escalate fallback. |
 | `materialize` | Each entry type produces the expected `openshell sandbox upload`/`exec` calls; mounts apply correct user/group/permissions. |
 | `LocalSnapshot.persist` / `.restore` | Atomic write; restore works after an orchestrator restart. |
@@ -1201,7 +1201,7 @@ per-sub-sandbox card for each in-flight workflow.
 |---|---|
 | `openshell sandbox create` is slow (~5-15s in practice) and blocks every delegation. | Pre-warmed sandbox pool: keep N idle coding sandboxes ready, hot-reload their policy and reset their workspace per task.  Pool size capped at `cfg.delegation.warm_pool_size`.  Falls back to cold spawn if the pool is empty.  Land in Phase 5 if cold spawn proves too slow in practice. |
 | Skill auto-policy widens the attack surface — a malicious / mis-authored skill can request arbitrary network access. | Two-tier approval: only skills in `auto_policy_allowlist` merge silently; everything else surfaces to the user.  Skills in the allowlist are a small, audited set (`pip-install`, `npm-install`, etc.), shipped in-repo, reviewed at PR time. |
-| Policy hot-reload latency is non-trivial (~1-3s for `policy set --wait`), and a failed hot-reload mid-run leaves the sandbox in an inconsistent state. | The `--wait` flag blocks until the policy is applied; the `PolicyOverlay.apply()` retries with exponential backoff up to 30s.  On total failure, the orchestrator sends `policy.denied` and the sub-agent treats the original tool call as a hard error.  No silent partial application. |
+| Policy hot-reload latency is non-trivial (~1-3s for `policy update`), and a failed hot-reload mid-run leaves the sandbox without the requested permission. | `PolicyOverlay.apply()` proves the generated change where possible and retries with exponential backoff up to 30s.  On total failure, the orchestrator sends `policy.denied` and the sub-agent treats the original tool call as a hard error.  No silent partial application. |
 | Review agent loops indefinitely on subjective issues (style preferences). | `max_review_rounds=3` (config-tunable) hard cap; on hitting the cap, the diff + comments are surfaced to the user for human override.  Severity gating: only `blocker` and `high` comments trigger another iteration; `low` and `info` are reported but don't block approval. |
 | `Manifest` adoption requires touching workspace seeding everywhere it lives (M2b's `setup-workspace.sh`, the audit fallback path, the skills directory). | Phase 1 keeps `setup-workspace.sh` working alongside the new manifest path; phase 3 retires the old path.  Migration is incremental, not flag-day. |
 | Per-sandbox cost grows linearly with concurrent workflows; an unbounded `delegate_task` storm could blow the budget. | Per-agent semaphores from M2b extend to the role level (one cap for coding, one for review), and `cfg.budget.daily_usd` enforces a hard daily ceiling — over-budget delegations queue or fail with a clear user message. |
@@ -1265,7 +1265,7 @@ per-sub-sandbox card for each in-flight workflow.
   composition patterns this milestone borrows from.
 - [OpenShell deep dive](deep_dives/openshell_deep_dive.md) — sandbox
   CLI surface (`create`, `delete`, `upload`, `download`,
-  `policy set --wait`), policy enforcement model, network policy
+  `policy update`), policy enforcement model, network policy
   schema.
 - [BYOO tutorial deep dive](deep_dives/build_your_own_openclaw_deep_dive.md) —
   per-agent semaphores (§9), at-least-once outbound delivery (§4),

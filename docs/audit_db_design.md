@@ -148,7 +148,7 @@ await audit.close()                   # dispose engine
 
 | Environment | Path | Persistence |
 |-------------|------|-------------|
-| Sandbox (OpenShell >= 0.0.22) | `/sandbox/audit.db` | PVC-backed; survives gateway/host restarts. Lost on `sandbox delete` or `gw destroy`. |
+| Sandbox (OpenShell >= 0.0.44) | `/sandbox/audit.db` | Sandbox-scoped durable storage; survives normal gateway/host restarts. Lost on `sandbox delete` or explicit runtime state cleanup. |
 | Local dev | `~/.nemoclaw/audit.db` | Host filesystem; always durable. |
 
 The Makefile provides safeguards against data loss:

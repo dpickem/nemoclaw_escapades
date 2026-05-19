@@ -7,7 +7,7 @@
 >
 > **Official blog:** [Run Autonomous, Self-Evolving Agents More Safely with NVIDIA OpenShell](https://developer.nvidia.com/blog/run-autonomous-self-evolving-agents-more-safely-with-nvidia-openshell/)
 >
-> **Last reviewed:** 2026-03-29
+> **Last reviewed:** 2026-05-19 against OpenShell 0.0.44
 
 ---
 
@@ -67,6 +67,16 @@ runtime before any action executes.
 
 Alpha stage — "single-player mode" for individual developers. Multi-tenant
 enterprise deployments planned for future versions.
+
+### Version Notes for NemoClaw
+
+NemoClaw targets **OpenShell >= 0.0.44**. OpenShell 0.0.37 and later are
+incompatible with gateway state created by earlier releases, so upgrading from
+0.0.36 or older requires backing up sandbox artifacts, deleting old sandboxes,
+destroying the old gateway with the old CLI, and then installing/registering
+the new gateway. Current local installs run the gateway as a service, then
+register it with `openshell gateway add`; the CLI no longer treats
+`openshell gateway start` as the primary lifecycle path.
 
 ### Five Key Advantages
 
@@ -484,7 +494,7 @@ Every outbound connection from agent code follows the same decision path:
 |---------|---------|
 | **Container isolation** | Docker-based, isolated from host and other sandboxes |
 | **Filesystem control** | Landlock LSM: explicit read_only and read_write lists; unlisted paths inaccessible |
-| **Network control** | All egress via proxy → policy engine; deny by default |
+| **Network control** | All egress via proxy and nftables-backed enforcement → policy engine; deny by default |
 | **Process control** | Runs as unprivileged user (sandbox:sandbox); seccomp filters block dangerous syscalls |
 | **Inference routing** | Calls to `inference.local` intercepted and routed to configured provider |
 | **Credential management** | Credentials injected by runtime, never exposed to agent |
@@ -543,6 +553,9 @@ Every outbound connection from agent code follows the same decision path:
 │  │            - allow:                                             │  │
 │  │                method: GET                                      │  │
 │  │                path: "/**"                                      │  │
+│  │            - deny:                                              │  │
+│  │                method: POST                                     │  │
+│  │                path: "/admin/**"                                │  │
 │  │      binaries:               # which binaries can use this      │  │
 │  │        - path: /usr/bin/curl                                    │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
@@ -590,6 +603,10 @@ Every outbound connection from agent code follows the same decision path:
 └───────────────────────────────────────────────────────────────┘
 ```
 
+OpenShell 0.0.44 supports both allow and deny rules. Use explicit deny rules
+for sensitive subpaths that should remain blocked even when a broader endpoint
+grant is present.
+
 ### Policy Iteration Workflow
 
 ```
@@ -600,8 +617,8 @@ Every outbound connection from agent code follows the same decision path:
 └──────────┘    └────────────┘    └──────────┘    └─────┬──────┘
                                                        │
                  ┌──────────┐    ┌──────────┐          │
-                 │ 6. VERIFY│◀───│ 5. PUSH  │◀─────────┘
-                 │ loaded?  │    │ updated  │
+                 │ 6. VERIFY│◀───│ 5. PROVE │◀─────────┘
+                 │ loaded?  │    │ + UPDATE │
                  │ repeat   │    │ policy   │
                  └──────────┘    └──────────┘
 ```
@@ -721,7 +738,7 @@ the sandbox's egress guarantees.
 │                    Gateway Architecture                               │
 │                                                                       │
 │  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │  Gateway = Control-Plane API (runs inside Docker)               │  │
+│  │  Gateway = Control-Plane API (runs as a service/container)      │  │
 │  │                                                                 │  │
 │  │  Responsibilities:                                              │  │
 │  │  • Sandbox lifecycle management (create, delete, list)          │  │
@@ -735,20 +752,18 @@ the sandbox's egress guarantees.
 │                                                                       │
 │  ┌───────────────┐  ┌───────────────┐  ┌──────────────────────────┐   │
 │  │  LOCAL        │  │  REMOTE       │  │  CLOUD                   │   │
-│  │               │  │  (SSH)        │  │  (reverse proxy)         │   │
-│  │  openshell    │  │  openshell    │  │  openshell gateway add   │   │
-│  │  gateway start│  │  gateway start│  │    https://gw.example.com│   │
-│  │               │  │  --remote     │  │                          │   │
-│  │  Docker on    │  │   user@host   │  │  Already running behind  │   │
-│  │  workstation  │  │               │  │  Cloudflare Access etc.  │   │
-│  │               │  │  Only Docker  │  │  Register + auth via     │   │
-│  │  Auto-        │  │  needed on    │  │  browser                 │   │
-│  │  provisioned  │  │  remote       │  │                          │   │
+│  │               │  │  (service)    │  │  (reverse proxy/OIDC)    │   │
+│  │  brew services│  │  systemd,     │  │  openshell gateway add   │   │
+│  │  restart      │  │  Compose,     │  │    https://gw.example.com│   │
+│  │  openshell    │  │  or Helm      │  │                          │   │
+│  │               │  │               │  │  Already running behind  │   │
+│  │  Register via │  │  Register via │  │  Cloudflare Access, OIDC │   │
+│  │  gateway add  │  │  gateway add  │  │  or mTLS                 │   │
 │  └───────────────┘  └───────────────┘  └──────────────────────────┘   │
 │                                                                       │
 │  Multiple gateways: openshell gateway select <name>                   │
 │  Gateway on Brev: brev.nvidia.com/launchable (OpenShell Launchable)   │
-│  Gateway on Spark: openshell gateway start --remote user@spark.local  │
+│  Gateway on Spark: start service/container, then gateway add/select   │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -933,25 +948,25 @@ port, mTLS by default).
 │  and inference work identically. Only the transport differs.             │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  LOCAL GATEWAY                                                     │  │
+│  │  LOCAL GATEWAY SERVICE                                             │  │
 │  │                                                                    │  │
-│  │  $ openshell gateway start                                         │  │
+│  │  $ brew services restart openshell                                 │  │
+│  │  $ openshell gateway add https://127.0.0.1:17670 --local           │  │
 │  │                                                                    │  │
-│  │  • Runs in Docker on your workstation                              │  │
-│  │  • CLI connects via localhost:8080                                 │  │
-│  │  • Auto-bootstrapped if you just run `sandbox create`              │  │
+│  │  • Gateway lifecycle is owned by the service manager               │  │
+│  │  • CLI targets a registered gateway by name                        │  │
 │  │  • Best for: development, quick iteration                          │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  REMOTE GATEWAY (SSH)                                              │  │
+│  │  REMOTE OR CONTAINER GATEWAY                                       │  │
 │  │                                                                    │  │
-│  │  $ openshell gateway start --remote user@hostname                  │  │
-│  │  $ openshell gateway start --remote user@host --ssh-key ~/.ssh/key │  │
+│  │  $ openshell gateway add https://remote-host:17670 --name dgx      │  │
+│  │  $ openshell gateway login dgx                                     │  │
 │  │                                                                    │  │
-│  │  • Installs and starts gateway in Docker on the remote host        │  │
-│  │  • CLI connects over SSH tunnel (automatic, transparent)           │  │
-│  │  • Only Docker needed on remote — no OpenShell install required    │  │
+│  │  • Gateway is started by systemd, Docker Compose, Helm, or a host   │  │
+│  │    service outside the CLI                                         │  │
+│  │  • CLI registration/authentication is explicit                     │  │
 │  │  • Sandboxes run on remote hardware (GPU, disk, memory)            │  │
 │  │  • Best for: DGX Spark, on-prem servers, any Linux VM              │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
@@ -962,8 +977,8 @@ port, mTLS by default).
 │  │  $ openshell gateway add https://gateway.example.com               │  │
 │  │  $ openshell gateway add https://gw.example.com --name production  │  │
 │  │                                                                    │  │
-│  │  • Gateway already running behind Cloudflare Access / similar      │  │
-│  │  • CLI authenticates via browser (bearer token stored locally)     │  │
+│  │  • Gateway already running behind Cloudflare Access / OIDC         │  │
+│  │  • CLI authenticates via browser or gateway-specific auth flow     │  │
 │  │  • Re-authenticate on token expiry: `openshell gateway login`      │  │
 │  │  • Best for: cloud VMs, Brev instances, team-accessible gateways   │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
@@ -971,11 +986,11 @@ port, mTLS by default).
 │  ┌────────────────────────────────────────────────────────────────────┐  │
 │  │  REGISTER EXISTING GATEWAY (any type)                              │  │
 │  │                                                                    │  │
-│  │  # Already-running remote gateway (SSH access)                     │  │
-│  │  $ openshell gateway add ssh://user@remote-host:8080               │  │
+│  │  # Already-running remote gateway                                  │  │
+│  │  $ openshell gateway add https://remote-host:17670 --name remote   │  │
 │  │                                                                    │  │
-│  │  # Already-running local gateway (started outside CLI)             │  │
-│  │  $ openshell gateway add https://127.0.0.1:8080 --local            │  │
+│  │  # Already-running local gateway service                           │  │
+│  │  $ openshell gateway add https://127.0.0.1:17670 --local           │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1253,12 +1268,14 @@ NVIDIA drivers pre-installed. OpenShell publishes an official
 │  Toolkit + OpenShell, runs the onboard wizard, and connects you to       │
 │  the sandbox — all in one command.                                       │
 │                                                                          │
-│  OPTION C: Manual SSH remote gateway                                     │
+│  OPTION C: Manual remote gateway                                         │
 │  ─────────────────────────────────────                                   │
 │  1. Create a Brev instance manually (any GPU or CPU type)                │
-│  2. From your laptop:                                                    │
+│  2. Start the OpenShell gateway as a host service or container there     │
+│  3. From your laptop:                                                    │
 │                                                                          │
-│     $ openshell gateway start --remote ubuntu@<brev-hostname>            │
+│     $ openshell gateway add https://<brev-gateway-url> --name brev       │
+│     $ openshell gateway select brev                                      │
 │     $ openshell sandbox create --gpu -- claude                           │
 │                                                                          │
 │  All three options result in the same architecture:                      │
@@ -1287,8 +1304,10 @@ DGX Spark is a desktop AI supercomputer with the Grace Blackwell GB10 chip
 (128 GB unified memory). OpenShell treats it as a remote SSH host.
 
 ```bash
-# From laptop — deploy gateway to Spark over SSH
-openshell gateway start --remote <username>@<spark-ssid>.local
+# On Spark: start the OpenShell gateway service/container.
+# From laptop: register and select it.
+openshell gateway add https://<spark-gateway-url> --name spark
+openshell gateway select spark
 
 # Create a sandbox on the Spark
 openshell sandbox create --gpu --from openclaw
@@ -1322,8 +1341,8 @@ multiple concurrent subagents (4–8 with Qwen3 Coder 80B).
 │  │  Laptop  │──────────────▶ │  Remote Host         │                 │
 │  │  CLI     │                │  Gateway + Sandbox(s)│                 │
 │  └──────────┘                └──────────────────────┘                 │
-│  Setup: openshell gateway start --remote user@host                    │
-│  Prereq: Docker on remote host, SSH access                            │
+│  Setup: start gateway service/container, then gateway add/select       │
+│  Prereq: Gateway endpoint reachable from the laptop                    │
 │                                                                       │
 │  Mode 3: CLOUD GATEWAY (reverse proxy)                                │
 │  ┌──────────┐    HTTPS     ┌─────────────┐   ┌───────────────────┐    │
@@ -1348,7 +1367,7 @@ multiple concurrent subagents (4–8 with Qwen3 Coder 80B).
 │  │  CLI     │              │  Gateway + Sandbox + Local Inference │   │
 │  │          │              │  Grace Blackwell GB10 (128 GB)       │   │
 │  └──────────┘              └──────────────────────────────────────┘   │
-│  Setup: openshell gateway start --remote user@spark.local             │
+│  Setup: start gateway on Spark, then gateway add/select                │
 │                                                                       │
 │  KEY INSIGHT: Same CLI, same commands, same policies in all modes.    │
 │  Just switch the gateway: openshell gateway select <name>             │
@@ -1365,12 +1384,13 @@ The development workflow would be:
 │  Dev Cycle: Develop Local → Deploy Remote → Monitor from Anywhere     │
 │                                                                       │
 │  1. Develop locally                                                   │
-│     $ openshell gateway start                     # local gateway     │
+│     $ brew services restart openshell             # local gateway     │
+│     $ openshell gateway select openshell                              │
 │     $ openshell sandbox create --from openclaw    # local sandbox     │
 │     # iterate on agent code, policies, skills                         │
 │                                                                       │
 │  2. Deploy to Brev for always-on                                      │
-│     $ openshell gateway start --remote ubuntu@brev-host               │
+│     $ openshell gateway add https://brev-gw --name brev-prod          │
 │     # — or —                                                          │
 │     $ nemoclaw deploy my-agent                                        │
 │     # Same sandbox definition, same policies, just remote hardware    │
@@ -1407,30 +1427,44 @@ openshell --help
 
 | Category | Command | Description |
 |----------|---------|-------------|
-| **Gateway** | `openshell gateway start` | Start local gateway |
-| | `openshell gateway start --remote user@host` | Start on remote host |
-| | `openshell gateway add https://url` | Register cloud gateway |
+| **Gateway** | `brew services restart openshell` | Start/restart local Homebrew gateway service |
+| | `openshell gateway add https://url --name <name>` | Register a local, remote, or cloud gateway |
 | | `openshell gateway select <name>` | Switch active gateway |
+| | `openshell gateway list` | List registered gateways |
+| | `openshell gateway remove <name>` | Remove a local registration |
+| | `openshell gateway login <name>` | Authenticate with OIDC or edge-auth gateway |
 | | `openshell status` | Show gateway health |
 | **Sandbox** | `openshell sandbox create -- <agent>` | Create sandbox |
 | | `openshell sandbox create --from <name>` | From community catalog |
 | | `openshell sandbox create --gpu -- <agent>` | With GPU access |
 | | `openshell sandbox connect <name>` | SSH into sandbox |
-| | `openshell sandbox list` | List all sandboxes |
+| | `openshell sandbox list -o json` | List sandboxes for automation |
 | | `openshell sandbox get <name>` | Detailed info |
 | | `openshell sandbox delete <name>` | Destroy sandbox |
+| | `openshell sandbox provider <name> ...` | Manage providers attached to a sandbox |
 | | `openshell sandbox ssh-config <name>` | Generate SSH config |
 | **Files** | `openshell sandbox upload <name> <src> <dst>` | Upload to sandbox |
 | | `openshell sandbox download <name> <src> <dst>` | Download from sandbox |
 | **Policy** | `openshell policy get <name> --full` | Pull current policy |
 | | `openshell policy set <name> --policy <file> --wait` | Push updated policy |
+| | `openshell policy update <name> --add-endpoint ...` | Incrementally add runtime access |
+| | `openshell policy prove --policy <file> --credentials <file>` | Prove policy properties before apply |
 | | `openshell policy list <name>` | List policy revisions |
+| **Providers** | `openshell provider create --name <n> --type <t> --from-existing` | Create provider from local credentials |
+| | `openshell provider refresh ...` | Manage credential refresh |
+| | `openshell provider profile ...` | Manage reusable provider profiles |
 | **Inference** | `openshell inference set --provider <p> --model <m>` | Switch model |
 | **Monitoring** | `openshell logs <name> --tail` | Stream logs |
 | | `openshell term` | Live TUI dashboard |
+| **Services** | `openshell service ...` | Expose long-lived sandbox services |
 | **Ports** | `openshell forward start <port> <name>` | Forward port |
 | | `openshell forward list` | List forwards |
 | | `openshell forward stop <port> <name>` | Stop forward |
+
+Use `openshell policy update` for small, operator-approved runtime grants and
+reserve `openshell policy set` for full policy replacement. Use
+`--gateway-insecure` only for local or throwaway development gateways where TLS
+verification is intentionally disabled.
 
 ---
 

@@ -327,11 +327,10 @@ documents the cross-sandbox primitives:
   for shared storage between sandboxes (deep dive §6's CLI surface,
   lines 449–478).
 - `/sandbox` is a per-sandbox directory declared in the policy's
-  `filesystem_policy.read_write` list (deep dive §7, lines
-  512–520).  On OpenShell ≥ 0.0.22 it is backed by a Kubernetes
-  PVC managed by k3s under the gateway; default k3s ships only the
-  `local-path` storage class, which is `ReadWriteOnce` — the PVC
-  cannot be attached to two sandboxes at the same time.
+  `filesystem_policy.read_write` list.  On current OpenShell releases this
+  storage is sandbox-scoped and should not be treated as a shareable volume;
+  Kubernetes-backed deployments may use PVCs, but the default storage path is
+  still not a portable cross-sandbox sharing primitive.
 - The only documented cross-sandbox data-transfer primitives are
   `openshell sandbox upload` and `openshell sandbox download`
   (deep dive lines 467–468) — gateway-mediated file copies, used
@@ -442,8 +441,8 @@ state, not to execute agent logic.
 ### 5.3 Audit DB access across sandbox boundaries
 
 The dashboard needs read access to `/sandbox/audit.db` inside the
-orchestrator sandbox (path from `Makefile:AUDIT_DB_SANDBOX`, PVC-backed
-in OpenShell ≥ 0.0.22).  Two infrastructure paths exist on OpenShell;
+orchestrator sandbox (path from `Makefile:AUDIT_DB_SANDBOX`, sandbox-scoped
+storage on OpenShell 0.0.44).  Two infrastructure paths exist on OpenShell;
 §4.3 already picked one as the MVP:
 
 | Option | How it works on real OpenShell | Verdict |

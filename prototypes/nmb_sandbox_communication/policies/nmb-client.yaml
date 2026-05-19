@@ -33,9 +33,9 @@ network_policies:
       - host: messages.local
         port: 9876
         access: full
-      # Observed OpenShell v0.0.26 binding: every sandbox gets a headless
-      # service in the gateway namespace. This is the route used by the smoke
-      # target until messages.local is explicitly bound to that service.
+      # Observed on older OpenShell gateway-backed Kubernetes deployments:
+      # every sandbox got a headless service in the gateway namespace. Re-smoke
+      # this route on OpenShell 0.0.44 before treating it as portable.
       - host: nmb-broker-smoke.openshell.svc.cluster.local
         port: 9876
         access: full

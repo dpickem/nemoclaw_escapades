@@ -435,7 +435,7 @@ The principle:
 | Caller | Control-plane access | Why |
 |---|---|---|
 | **Sub-agent sandbox** | **No.** Per-task model / policy / spawn requests go via NMB to the orchestrator. M3's `policy.request` flow ([`design_m3.md` §7](design_m3.md#7--policy-hot-reload)) is the canonical shape. | Containment requires the constraint be enforced from outside the constrained process. |
-| **Orchestrator sandbox** | **Narrow yes, behind an approval gate.** Scoped to specific verbs (e.g. `sandbox create / delete / upload / download`, `policy set --sandbox <child>`), gated by the M1 Approve/Deny pattern, audit-logged with `workflow_id`. Self-modification stays disallowed. | The orchestrator is the trusted parent of the sub-agent hierarchy, but is itself LLM-driven and prompt-injectable. |
+| **Orchestrator sandbox** | **Narrow yes, behind an approval gate.** Scoped to specific verbs (e.g. `sandbox create / delete / upload / download`, `policy update <child>`), gated by the M1 Approve/Deny pattern, audit-logged with `workflow_id`. Self-modification stays disallowed. | The orchestrator is the trusted parent of the sub-agent hierarchy, but is itself LLM-driven and prompt-injectable. |
 | **Operator's host shell** | **Yes.** The authoritative trust root. Where M2b pins gateway state (e.g. Option A multi-endpoint provider registrations), that state lives here. | Operator owns the trust root: registered the providers, started the gateway, signed the mTLS root. |
 
 Three direct consequences:
@@ -629,6 +629,11 @@ The 4-of-6 threshold tolerates minor signal drift (e.g. the
 Test-only threshold-tuning, the rationale for the specific signal
 choices, and the full structured-log payload format live in
 [Appendix D](#appendix-d--sandbox-detection-implementation-detail).
+
+OpenShell 0.0.44 should be treated as the baseline for these signals. If a
+future OpenShell release changes injected environment variables or proxy
+certificate paths, update the signal list rather than reintroducing a
+single-signal `OPENSHELL_SANDBOX` dependency.
 
 #### 5.4.3 Startup Self-Check Wiring
 
@@ -1897,7 +1902,7 @@ being able to exfiltrate credentials or reach arbitrary endpoints
 — the constraint is enforced *outside* the process the LLM is
 steering.
 
-A sandbox calling `openshell inference set` (or `policy set`, or
+A sandbox calling `openshell inference set` (or `policy update`, or
 `sandbox create` for a non-child of itself) inverts that
 asymmetry.  A prompt-injected, hallucinated, or simply buggy agent
 could:
@@ -1956,7 +1961,7 @@ specific deployment.
 When M3 implementation kicks off, the gateway-API surface the
 orchestrator's image exposes should be deliberately narrow —
 `sandbox create / delete / upload / download` and
-`policy set --sandbox <child>` only, not the full `openshell` CLI
+`policy update <child>` only, not the full `openshell` CLI
 — and every invocation should be audited with `workflow_id`.  This
 is tracked in [`design_m3.md`](design_m3.md) but worth flagging
 here because the principle is shared: control-plane reach from
