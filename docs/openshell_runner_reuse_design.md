@@ -4,7 +4,7 @@
 >
 > **Source title:** Add OpenShell-backed coding runner
 >
-> **Last updated:** 2026-04-30
+> **Last updated:** 2026-05-19 for OpenShell 0.0.44
 
 ---
 
@@ -28,6 +28,11 @@ The most relevant reusable pieces are:
    structured output.
 5. Operational learnings around Docker socket access, private GitLab
    `allowed_ips`, OpenShell TLS CA, and nonblocking startup denials.
+
+OpenShell 0.0.37+ is incompatible with gateway state created by older
+releases. NemoClaw should assume a registered OpenShell 0.0.44+ gateway and
+avoid per-job gateway creation unless the deployment deliberately provisions a
+fresh gateway service/container for each job.
 
 ---
 
@@ -228,10 +233,12 @@ AgentHub's worker is an external control-plane process.  It performs the
 operations that should not live inside an LLM-steered sandbox:
 
 1. Poll Redis for jobs.
-2. Create a per-job OpenShell gateway:
+2. Select or provision a gateway for the job:
 
 ```text
-openshell gateway start --name agenthub-{job_id} --port ... --gateway-host ... --recreate
+openshell gateway select <registered-gateway>
+# or provision a fresh gateway service/container, then:
+openshell gateway add https://<job-gateway-url> --name agenthub-{job_id}
 ```
 
 3. Create providers:
@@ -282,7 +289,9 @@ bash -lc "<job env> bash /sandbox/job/run_job.sh"
 }
 ```
 
-10. Clean up sandbox, gateway, and job files unless debugging is enabled.
+10. Clean up sandbox and job files unless debugging is enabled. Remove only the
+    gateway registration or service/container that this job explicitly
+    provisioned.
 
 ### 5.2 Runner Script Learnings
 

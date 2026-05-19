@@ -1216,15 +1216,19 @@ scenarios:
 - The agent needs git remote access to push a branch (see §10.4).
 
 Rather than requiring sandbox teardown and recreation, the orchestrator can
-**hot-reload** the sub-agent's policy using the OpenShell CLI:
+**hot-reload** small runtime grants using the OpenShell CLI:
 
 ```
-openshell policy set coding-<wf_id> --policy <updated_policy_file> --wait
+openshell policy update coding-<wf_id> \
+  --add-endpoint pypi.org:443:read-only:rest:enforce
 ```
 
-The `--wait` flag blocks until the policy engine has applied the new rules.
-Existing connections are not dropped; new rules take effect on the next
-outbound request.
+OpenShell 0.0.44 also exposes `openshell policy prove`; operator-mediated
+flows should prove generated policy files or patches with the corresponding
+credential descriptor where possible before applying them. Full-file
+`openshell policy set --policy <file> --wait` remains available for deliberate
+replacement, but incremental `policy update` is the default for
+approval-driven additions.
 
 #### 6.3.1 Request Flow
 
@@ -1246,9 +1250,9 @@ Sub-Agent                     NMB                    Orchestrator           Gate
     │                          │        Orchestrator evaluates request         │
     │                          │        (auto-approve or ask user)             │
     │                          │                          │                    │
-    │                          │                          │ policy set         │
-    │                          │                          │ --policy updated   │
-    │                          │                          │ --wait             │
+    │                          │                          │ policy prove       │
+    │                          │                          │ policy update      │
+    │                          │                          │ --add-endpoint     │
     │                          │                          │───────────────────▶│
     │                          │                          │◀───────────────────│
     │                          │                          │ policy applied     │
@@ -2347,7 +2351,7 @@ NMB events.
 | Implement finalization tools (`present_work_to_user`, `push_and_create_pr`, `push_branch`, `discard_work`, `re_delegate`, `destroy_sandbox`) | `src/nemoclaw_escapades/tools/finalization.py` |
 | Wire finalization tools into orchestrator `ToolRegistry` | `src/nemoclaw_escapades/orchestrator/orchestrator.py` |
 | Implement `_finalize_workflow` (build context, run `AgentLoop` with finalization tools) | `src/nemoclaw_escapades/orchestrator/orchestrator.py` |
-| Implement `PolicyOverlay` + hot-reload via `openshell policy set` | `src/nemoclaw_escapades/orchestrator/policy_overlay.py` |
+| Implement `PolicyOverlay` + incremental hot-reload via `openshell policy update` | `src/nemoclaw_escapades/orchestrator/policy_overlay.py` |
 | Handle `policy.request` NMB messages (auto-approve / escalate / deny) | `src/nemoclaw_escapades/orchestrator/delegation.py` |
 | Implement `AuditBuffer` with both `log_tool_call` and `log_inference_call` (child-side NMB flush + JSONL fallback, see §4.9) | `src/nemoclaw_escapades/agent/audit_buffer.py` |
 | Implement orchestrator-side `audit.flush` handler (ingest both `tool_calls` and `inference_calls` arrays) + fallback JSONL ingest | `src/nemoclaw_escapades/audit/db.py` |

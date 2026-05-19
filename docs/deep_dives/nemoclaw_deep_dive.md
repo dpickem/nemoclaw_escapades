@@ -458,7 +458,7 @@ intercepts every call and routes it to the configured provider.
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                               │
 │  Granularity: per-binary, per-endpoint, per-method, per-path  │
-│  Updates: openshell policy set <name> --policy file.yaml      │
+│  Updates: openshell policy prove, then policy update <name>   │
 └───────────────────────────────────────────────────────────────┘
 ```
 

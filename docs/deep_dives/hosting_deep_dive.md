@@ -70,9 +70,9 @@ only handles personal/open-source tasks, Brev remains a convenient option.
 | Requirement | Priority | Notes |
 |-------------|----------|-------|
 | **24/7 uptime** | Critical | Agent must run continuously, not just when laptop is open |
-| **Docker support** | Critical | OpenShell requires Docker |
+| **Container/runtime support** | Critical | OpenShell can use Docker, Podman, VM, or Kubernetes-backed runtimes depending on deployment |
 | **Network access** | Critical | Must reach Slack API, inference endpoints, GitHub/GitLab |
-| **SSH access** | High | For `openshell gateway start --remote` |
+| **Gateway reachability** | High | The laptop or automation host must reach a registered OpenShell gateway endpoint |
 | **GPU access** | Medium | Needed for local inference; optional if using cloud inference (build.nvidia.com) |
 | **Persistent storage** | High | Skills, memory files, session databases must survive restarts |
 | **Low latency to Slack** | Medium | Agent should respond quickly to messages |
@@ -189,7 +189,7 @@ and purpose-built for enterprise on-premises agent deployments.
 | Feature | Details |
 |---------|---------|
 | **Work-approved** | On-premises hardware under IT control — safe for company IP |
-| **OpenShell native** | `openshell gateway start` runs directly; one-click Launchable via [build.nvidia.com/station/openshell](https://build.nvidia.com/station/openshell) |
+| **OpenShell native** | Run the gateway as a service/container and register it with `openshell gateway add`; one-click Launchable via [build.nvidia.com/station/openshell](https://build.nvidia.com/station/openshell) |
 | **NIM inference** | Run NVIDIA NIM microservices locally — data never leaves the machine |
 | **Always-on** | Designed for 24/7 unattended operation |
 | **GPU memory** | Enough to run 200B+ parameter models locally |
@@ -201,8 +201,9 @@ and purpose-built for enterprise on-premises agent deployments.
 # 1. Install OpenShell on DGX Station
 # (follow build.nvidia.com/station/openshell instructions)
 
-# 2. Start gateway
-openshell gateway start
+# 2. Start the gateway service/container, then register it
+openshell gateway add https://<dgx-station-gateway> --name dgx-station
+openshell gateway select dgx-station
 
 # 3. Deploy NemoClaw orchestrator sandbox
 nemoclaw onboard
@@ -211,7 +212,8 @@ nemoclaw onboard
 docker run -d --gpus all nvcr.io/nim/meta/llama-3.3-70b-instruct:latest
 
 # 5. Connect from laptop
-openshell gateway start --remote user@dgx-station-host
+openshell gateway select dgx-station
+openshell status
 ```
 
 ### When to Choose DGX Station over DGX Spark
@@ -400,14 +402,14 @@ the NVIDIA firewall is work-approved; a personal cloud VM is not.
 │  │  Laptop  │───────────────▶ │  Linux VM (cloud or on-prem)     │    │
 │  │  (CLI)   │                 │                                  │    │
 │  └──────────┘                │  Requirements:                     │   │
-│                               │  • Docker installed              │    │
-│                               │  • SSH access                    │    │
+│                               │  • OpenShell gateway service     │    │
+│                               │  • Reachable gateway endpoint    │    │
 │                               │  • 8+ GB RAM                     │    │
 │                               │  • 20+ GB disk                   │    │
 │                               │                                  │    │
 │                               │  Setup:                          │    │
-│                               │  $ openshell gateway start \     │    │
-│                               │      --remote user@host          │    │
+│                               │  $ openshell gateway add \       │    │
+│                               │      https://host:17670          │    │
 │                               │  $ openshell sandbox create \    │    │
 │                               │      --from openclaw             │    │
 │                               └──────────────────────────────────┘    │
@@ -775,10 +777,10 @@ docker ps                                # inspect sandbox containers
 docker logs <container-id>               # read container logs
 ```
 
-You can also use the OpenShell CLI from your laptop, which tunnels through SSH
-transparently (`openshell gateway start --remote ubuntu@brev-host`). Either
-way, the host filesystem is fully accessible — you can inspect mounted data,
-run manual backups, install packages, or manage Docker directly.
+You can also use the OpenShell CLI from your laptop after registering the Brev
+gateway endpoint with `openshell gateway add` and `openshell gateway select`.
+Either way, the host filesystem is fully accessible — you can inspect mounted
+data, run manual backups, install packages, or manage the runtime directly.
 
 **2. Periodic backup to host or cloud storage**
 

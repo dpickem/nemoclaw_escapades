@@ -209,7 +209,7 @@ I am developing this project on macOS. In principle, this code should be able to
 |---|---|---|
 | Python | 3.11+ | `python3 --version` |
 | Docker Desktop | Running | `docker info` |
-| OpenShell CLI | 0.0.21+ | `openshell --version` |
+| OpenShell CLI | 0.0.44+ | `openshell --version` |
 | A Slack workspace | You have admin access or can create apps | — |
 | An NVIDIA account | For Inference Hub API keys | [build.nvidia.com](https://build.nvidia.com) |
 
@@ -332,24 +332,24 @@ All four checks should show ✓. If inference fails, check the model name.
 
 If you want to run the bot inside a policy-enforced OpenShell sandbox (rather than just on your bare-metal local host), complete these additional setup steps. You need to configure the gateway, register credential providers, set up inference routing, and understand the network policy.
 
-### Step 6: Start the OpenShell Gateway
+### Step 6: Verify the OpenShell Gateway
 
 ```bash
-openshell gateway start
+brew services restart openshell
+openshell gateway add https://127.0.0.1:17670 --local --name openshell
+openshell gateway select openshell
+openshell status
 ```
 
-This downloads and starts a **k3s cluster inside Docker Desktop**. In this
-guide, the gateway runs **locally** on your laptop — but OpenShell also
-supports remote gateways (via SSH to a Linux host, a Brev cloud GPU
-instance, or a DGX Spark) and cloud gateways (behind a reverse proxy). The
-same CLI, policies, and sandbox definitions work identically regardless of
-where the gateway runs; only the transport changes. For details, see the
+Current OpenShell runs the gateway as a local service/container and the CLI
+targets a registered gateway. In this guide, the gateway runs **locally** on
+your laptop — but OpenShell also supports remote gateways on a Linux host, a
+Brev cloud GPU instance, DGX Spark, or cloud gateways behind a reverse proxy.
+The same CLI, policies, and sandbox definitions work identically regardless of
+where the gateway runs; only the registration and authentication change. For
+details, see the
 [OpenShell deep dive](../../deep_dives/openshell_deep_dive.md) section on
 remote hosting.
-
-First run downloads the gateway image (~200 MB) and initializes the cluster.
-Expect 1-2 minutes. Subsequent starts reuse the existing cluster and take
-seconds.
 
 Verify the gateway is healthy:
 
@@ -362,29 +362,22 @@ Expected output:
 ```
 Server Status
   Gateway: openshell
-  Server: https://127.0.0.1:8080
+  Server: https://127.0.0.1:17670
   Status: Connected
-  Version: 0.0.21
+  Version: 0.0.44
 ```
 
-If you see `connection refused`, the gateway container is likely stopped
-(e.g. after a reboot or Docker Desktop restart). As of OpenShell v0.0.21,
-`openshell gateway start` cannot restart a stopped gateway — it only asks
-"Destroy and recreate?", which re-downloads the image. Instead, restart the
-container directly:
+If you see `connection refused`, the gateway service is likely stopped or the
+active registration points at the wrong endpoint:
 
 ```bash
-make setup-gateway        # detects stopped container and restarts it
+make setup-gateway        # verifies the registered gateway is reachable
 openshell status          # should now show "Connected"
 ```
 
-`make setup-gateway` handles this automatically: it tries `docker start`
-on the existing container, waits for k3s to initialize, and only falls
-back to a fresh `openshell gateway start` when no container exists at all.
-If you see "Connection reset by peer" instead of "Connected", wait a few
-more seconds and retry — the gateway is starting but k3s isn't ready yet.
-See [Lesson #18](#18-gateway-lifecycle-stopped--destroyed-but-start-doesnt-restart)
-for the full breakdown of this limitation.
+If you are upgrading from OpenShell 0.0.36 or older, clear the old gateway
+state with the old CLI before installing 0.0.44+. See the deep dive for the
+current migration note.
 
 #### Understanding the gateway
 
@@ -439,14 +432,14 @@ support inference routing.
 If the provider already exists, you'll see an error. Use
 `openshell provider delete inference-hub` first, or ignore the error.
 
-> **Shortcut:** `make setup-secrets` runs Steps 7–9 (inference provider,
+> **Shortcut:** `make setup-providers` runs Steps 7–9 (inference provider,
 > inference routing, and Slack provider) in one command.
 
 > **Persistence note:** Provider registrations are stored in a Docker volume
 > on the gateway host. They survive gateway restarts via `docker start` but
 > are **lost** if you destroy and recreate the gateway (`openshell gateway
 > start --recreate` or answering `Y` to "Destroy and recreate?"). After a
-> recreate, re-run this step and Steps 8–9 (or just `make setup-secrets`).
+> recreate, re-run this step and Steps 8–9 (or just `make setup-providers`).
 
 Verify the provider:
 
@@ -528,7 +521,7 @@ System inference:
 If you omit `--no-verify`, the command will test the endpoint and report
 whether it's reachable.
 
-> **Shortcut:** This step is included in `make setup-secrets` (along with
+> **Shortcut:** This step is included in `make setup-providers` (along with
 > Steps 7 and 9).
 
 > **Persistence note:** Like providers, inference routing config is stored in
@@ -563,7 +556,7 @@ These HTTP credentials also cover Slack's Socket Mode (WebSocket) — see
 [Lesson #19](#19-why-http-credentials-are-sufficient-for-slack-socket-mode)
 for how.
 
-**Shortcut:** `make setup-secrets` runs all three commands (inference provider,
+**Shortcut:** `make setup-providers` runs all three commands (inference provider,
 inference routing, Slack provider) in one step.
 
 ### Step 10: Understand the Sandbox Network Policy
@@ -1566,7 +1559,13 @@ This is how we discovered the `sandbox user not found` and `iproute2 missing` er
 
 (See also [Step 6: Start the OpenShell Gateway](#step-6-start-the-openshell-gateway))
 
-The gateway is a Docker container running k3s. It can be in one of three states: **running**, **stopped** (container exists but is not running), or **destroyed** (container removed). The `openshell` CLI does not handle all transitions cleanly:
+> **2026-05-19 update:** this section documents the historical OpenShell
+> 0.0.21 gateway behavior from the original M1 work. NemoClaw now targets
+> OpenShell 0.0.44+. OpenShell 0.0.37+ is incompatible with old gateway state,
+> and local gateway lifecycle is managed by a service/container plus
+> `openshell gateway add/select`, not by `openshell gateway start`.
+
+The old gateway was a Docker container running k3s. It could be in one of three states: **running**, **stopped** (container exists but is not running), or **destroyed** (container removed). The `openshell` CLI did not handle all transitions cleanly:
 
 | Situation | What happens |
 |---|---|
@@ -1594,9 +1593,9 @@ The "Destroy and recreate?" prompt gives you two options, both bad. Your real op
 3. **Restart the Docker container directly**:
    `docker start openshell-cluster-openshell`, then verify with `openshell status`. The container name follows the pattern `openshell-cluster-<gateway-name>` (default name is `openshell`). This is the fastest path — it preserves the image, all provider registrations, and inference routing config. The downside is that it sidesteps the CLI.
 
-**Our recommendation:** Always use `docker start openshell-cluster-openshell` to bring back a stopped gateway. Reserve `--recreate` for cases where the gateway is genuinely broken and you need a fresh start. This is an OpenShell v0.0.21 limitation — the CLI has no working restart path for stopped gateways.
+**Historical recommendation:** use `docker start openshell-cluster-openshell` to bring back a stopped gateway. This no longer applies to the OpenShell 0.0.44+ service/registered-gateway path.
 
-The Makefile's `setup-gateway` target automates this three-way check: if the gateway is already running it does nothing; if the container exists but is stopped it restarts it via `docker start` (preserving providers and routing); and only if no container exists at all does it fall back to a fresh `openshell gateway start`. Running `make setup-gateway` (or any target that depends on it, like `make setup` or `make run-local-sandbox`) handles the right path automatically.
+The current Makefile's `setup-gateway` target verifies that the registered gateway is reachable and tells the operator how to start/register the service if it is not.
 
 ### 19. Why HTTP credentials are sufficient for Slack Socket Mode
 
@@ -1715,7 +1714,10 @@ YAML file on disk.
 **Hot-reload the policy** (for dynamic fields like `network_policies`):
 
 ```bash
-openshell policy set orchestrator --policy policies/orchestrator.yaml
+openshell policy prove \
+  --policy policies/orchestrator.yaml \
+  --credentials policies/credentials.yaml
+openshell policy update orchestrator --add-endpoint ...
 ```
 
 This takes effect immediately without rebuilding the image or recreating the

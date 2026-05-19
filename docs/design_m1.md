@@ -501,9 +501,9 @@ that justify the infrastructure investment.
 
 - Running the gateway and sandbox on the same local machine keeps the
   architecture easy to inspect, iterate, and debug.
-- Preserves a clean path toward remote hosting: `openshell gateway start
-  --remote user@brev-host` moves the entire setup to Brev without changing
-  any application code.
+- Preserves a clean path toward remote hosting: run the gateway as a service or
+  container on Brev, register it with `openshell gateway add`, and select it
+  without changing any application code.
 
 **Deployment to managed infrastructure** (Brev, DGX Spark) is a stretch goal
 for late M1. The [Hosting Deep Dive](deep_dives/hosting_deep_dive.md)
@@ -516,18 +516,25 @@ This section specifies the OpenShell setup steps that are part of M1.
 **Gateway setup:**
 
 ```bash
-openshell gateway start
+brew services restart openshell
+openshell gateway add https://127.0.0.1:17670 --local --name openshell
+openshell gateway select openshell
 ```
 
-The gateway runs as a Docker container on the local machine. It exposes a
-control-plane API that the CLI uses to manage sandboxes and providers.
+The gateway runs as a local service or container. OpenShell 0.0.37 and later are
+not compatible with older gateway state; upgrading from 0.0.36 or earlier
+requires backing up sandbox artifacts, deleting old sandboxes, destroying the
+old gateway with the old CLI, and then registering the new gateway. Operational
+details live in the [OpenShell Deep Dive](deep_dives/openshell_deep_dive.md).
 
 **Provider registration:**
 
 ```bash
-openshell provider add nvidia-inference-hub \
-  --base-url https://integrate.api.nvidia.com/v1 \
-  --api-key-env NVIDIA_API_KEY
+openshell provider create \
+  --name nvidia-inference-hub \
+  --type openai \
+  --credential NVIDIA_API_KEY \
+  --config base_url=https://integrate.api.nvidia.com/v1
 ```
 
 This registers NVIDIA Inference Hub as the inference provider. Inside any
@@ -538,15 +545,17 @@ and never appears in the sandbox filesystem.
 **Orchestrator sandbox creation:**
 
 ```bash
-openshell sandbox create orchestrator \
-  --image nemoclaw-orchestrator:latest \
+openshell sandbox create \
+  --name orchestrator \
+  --from nemoclaw-orchestrator:latest \
   --policy policies/orchestrator.yaml \
-  --always-on \
-  --mount logs:/app/logs
+  -- claude
 ```
 
-The orchestrator sandbox is created as an always-on container. It runs the
-main agent loop, the Slack connector, and the inference backend client.
+The orchestrator sandbox runs the main agent loop, the Slack connector, and the
+inference backend client. Long-running service exposure should use OpenShell's
+current `service`/`forward` mechanisms rather than assuming an `--always-on`
+flag or host volume mounts.
 
 **Sandbox policy (M1):**
 
@@ -556,34 +565,29 @@ sandbox and it needs outbound network access for Slack and inference.
 
 ```yaml
 # policies/orchestrator.yaml
-sandbox:
-  name: orchestrator
-  always_on: true
-
-network:
-  outbound:
-    - host: "*.slack.com"
-      ports: [443]
-      reason: "Slack socket mode websocket"
-    - host: "wss-primary.slack.com"
-      ports: [443]
-      reason: "Slack websocket fallback"
-    - host: "inference.local"
-      ports: [443]
-      reason: "Model inference via OpenShell proxy"
-
-filesystem:
-  read_write:
-    - /app/logs
-    - /app/prompts
+version: 1
+network_policies:
+  - name: slack_api
+    endpoints:
+      - host: slack.com
+        port: 443
+      - host: "*.slack.com"
+        port: 443
+    allowed_processes:
+      - /usr/bin/python
+filesystem_policy:
   read_only:
     - /app/src
-
-credentials:
-  - SLACK_BOT_TOKEN
-  - SLACK_APP_TOKEN
-  # NVIDIA_API_KEY is injected via inference.local, not directly
+  read_write:
+    - /sandbox
+process:
+  allow_exec:
+    - /usr/bin/python
 ```
+
+The exact schema evolves with OpenShell; NemoClaw should generate policies via
+the local policy helpers and verify with `openshell policy prove` where
+possible before applying broad changes.
 
 M2 will add ephemeral per-task sandboxes with much tighter policies. The
 orchestrator policy will also tighten as the system gains sub-agent delegation
@@ -627,9 +631,9 @@ make start             # run the orchestrator
 
 | Target | What It Does | Idempotent? |
 |--------|-------------|-------------|
-| `make setup` | Runs `setup-gateway`, `setup-secrets`, `setup-sandbox` in order | Yes |
-| `make setup-gateway` | Starts the OpenShell gateway if not already running (`openshell gateway start`) | Yes |
-| `make setup-secrets` | Reads `.env` and registers each secret with the OpenShell gateway so they can be injected into sandboxes. Registers the NVIDIA Inference Hub provider with the API key. Registers Slack tokens as sandbox credentials. | Yes (re-registers are no-ops or overwrites) |
+| `make setup` | Runs `setup-gateway`, `setup-providers`, `setup-sandbox` in order | Yes |
+| `make setup-gateway` | Verifies a registered OpenShell 0.0.44+ gateway is reachable; local installs may start/restart the service manager first | Yes |
+| `make setup-providers` | Reads `.env` and registers provider credentials with OpenShell so they can be injected into sandboxes. Registers the NVIDIA Inference Hub provider and Slack tokens via current provider/profile commands. | Yes (re-registers are no-ops or overwrites) |
 | `make setup-sandbox` | Builds the orchestrator container image and creates the always-on sandbox with the versioned policy | Yes (recreates if policy changed) |
 | `make start` | Starts the orchestrator sandbox (or restarts if already running) | Yes |
 | `make stop` | Stops the orchestrator sandbox | Yes |
@@ -643,39 +647,36 @@ make start             # run the orchestrator
 | `make lint` | Runs linters and type checks | — |
 | `make build` | Builds the orchestrator container image without creating a sandbox | — |
 
-**`make setup-secrets` detail:**
+**`make setup-providers` detail:**
 
 This target reads the `.env` file and performs the following registrations
 against the running OpenShell gateway:
 
 ```makefile
-setup-secrets: .env
+setup-providers: .env
 	@echo "Registering inference provider..."
-	openshell provider add nvidia-inference-hub \
-		--base-url $${INFERENCE_HUB_BASE_URL:-https://integrate.api.nvidia.com/v1} \
-		--api-key "$$(grep NVIDIA_API_KEY .env | cut -d= -f2-)"
-	@echo "Registering sandbox credentials..."
-	openshell credential set SLACK_BOT_TOKEN \
-		--value "$$(grep SLACK_BOT_TOKEN .env | cut -d= -f2-)"
-	openshell credential set SLACK_APP_TOKEN \
-		--value "$$(grep SLACK_APP_TOKEN .env | cut -d= -f2-)"
-	@echo "Secrets registered."
+	openshell provider create --name nvidia-inference-hub --type openai --credential NVIDIA_API_KEY --config base_url=https://integrate.api.nvidia.com/v1
+	@echo "Registering Slack provider/profile..."
+	openshell provider create --name slack --type generic --from-existing
+	@echo "Providers registered."
 ```
 
 The `.env` file never enters the sandbox. OpenShell injects the credentials
 at sandbox creation time based on the policy's `credentials` list. This means:
 
 - Secrets are stored in the gateway's credential store, not on the filesystem.
-- The sandbox policy declares which credentials it needs.
+- Providers or sandbox-provider bindings declare which credentials the sandbox
+  receives.
 - A leaked sandbox image contains no secrets.
-- Rotating a secret is a `make setup-secrets` + `make restart` operation.
+- Rotating a secret is a `make setup-providers` plus provider refresh/restart
+  operation.
 
 **`make setup` full sequence:**
 
 ```
 make setup
   ├── make setup-gateway       # start gateway if needed
-  ├── make setup-secrets       # register provider + credentials from .env
+  ├── make setup-providers     # register providers + credentials from .env
   └── make setup-sandbox       # build image, create sandbox with policy
 ```
 
@@ -685,7 +686,7 @@ make setup
   and run. No hidden scripts or manual steps.
 - Every target is idempotent so `make setup` can be re-run safely after
   pulling new code or changing configuration.
-- The `setup-secrets` target bridges the gap between a developer-friendly
+- The `setup-providers` target bridges the gap between a developer-friendly
   `.env` file and OpenShell's credential injection model, so the developer
   workflow stays simple while the runtime stays secure.
 - The same `Makefile` targets will extend naturally in M2 when ephemeral
